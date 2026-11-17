@@ -29,3 +29,16 @@ static int socket_option_readable(uint64_t level,uint64_t name) {
 static int message_flags_permitted(uint64_t flags) {
     return !(flags&~(uint64_t)(MSG_DONTWAIT|MSG_PEEK|MSG_WAITALL|MSG_TRUNC|MSG_NOSIGNAL));
 }
+
+// A futex call a guest makes, as the host is asked it: wait and wake, plain
+// or by bitset, and always private. Every guest thread shares this
+// process's memory, and a shared key on a page still backed by the
+// component's file would be one with every other VM that maps the same
+// file: a guest that leaves the private flag off is given it. The operation
+// the host is to be asked, or a negative error.
+static long futex_operation(uint64_t requested) {
+    unsigned op=requested&FUTEX_CMD_MASK;
+    if(op!=FUTEX_WAIT && op!=FUTEX_WAKE && op!=FUTEX_WAIT_BITSET && op!=FUTEX_WAKE_BITSET)return -ENOSYS;
+    if(requested&~(uint64_t)(FUTEX_CMD_MASK|FUTEX_PRIVATE_FLAG|FUTEX_CLOCK_REALTIME))return -EINVAL;
+    return (long)(requested|FUTEX_PRIVATE_FLAG);
+}

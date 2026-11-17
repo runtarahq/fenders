@@ -65,7 +65,6 @@ static long clone_virtual_thread(int parent,struct kvm_regs *regs,uint64_t flags
 static void exit_virtual_thread(void) {
     if(current_thread->clear_tid) {
         uint32_t *tid=ptr(current_thread->clear_tid,4);__atomic_store_n(tid,0,__ATOMIC_RELEASE);
-        syscall(SYS_futex,tid,FUTEX_WAKE,INT_MAX,NULL,NULL,0);
         syscall(SYS_futex,tid,FUTEX_WAKE|FUTEX_PRIVATE_FLAG,INT_MAX,NULL,NULL,0);
     }
     pthread_mutex_lock(&lifecycle_lock);current_thread->active=0;

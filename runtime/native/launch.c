@@ -489,11 +489,11 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 200: fprintf(DIAGNOSTICS,"guest fatal signal %llu\n",(unsigned long long)b);exit(1);
     case 204: if(b<8)return -EINVAL;memset(ptr(c,b),0,b);*(uint64_t *)ptr(c,8)=1;return 8;
     case 202: {
+        // Always private (guest_args.inc).
+        long asked=futex_operation(b);if(asked<0)return asked;
         unsigned op=b&FUTEX_CMD_MASK;
-        if(op!=FUTEX_WAIT && op!=FUTEX_WAKE && op!=FUTEX_WAIT_BITSET && op!=FUTEX_WAKE_BITSET)return -ENOSYS;
-        if(b&~(FUTEX_CMD_MASK|FUTEX_PRIVATE_FLAG|FUTEX_CLOCK_REALTIME))return -EINVAL;
         struct timespec *timeout=(op==FUTEX_WAIT || op==FUTEX_WAIT_BITSET) && d?ptr(d,sizeof(struct timespec)):NULL;
-        return result(syscall(SYS_futex,ptr(a,4),b,c,timeout,NULL,r->r9));
+        return result(syscall(SYS_futex,ptr(a,4),asked,c,timeout,NULL,r->r9));
     }
     case 157: if(a==15){ptr(b,16);return 0;}return -ENOSYS;
     case 228: if(!clock_permitted(a))return -EINVAL;return result(clock_gettime(a,ptr(b,sizeof(struct timespec))));
