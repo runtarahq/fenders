@@ -38,6 +38,9 @@ pub struct Store {
     pub pool: PgPool,
     pub(crate) state: PathBuf,
     pub(crate) cipher: fernet::Fernet,
+    /// For run-channel credentials alone, under a key of its own: nothing
+    /// encrypted with `cipher`, a tenant's secret among it, is one.
+    pub(crate) channel_cipher: fernet::Fernet,
     pub(crate) encryption_key_id: String,
     pub(crate) browser_auth: Option<std::sync::Arc<crate::browser_auth::BrowserAuth>>,
     pub(crate) invitation_mailer: Option<std::sync::Arc<crate::invitation_email::InvitationMailer>>,
@@ -96,6 +99,23 @@ pub(crate) fn token(prefix: &str) -> Result<String> {
             .collect::<String>()
     ))
 }
+/// A cipher for one `purpose`, under a key derived from the encryption key
+/// `key`: what it encrypts is nothing to the encryption key's own cipher or
+/// to another purpose's, and the reverse.
+pub(crate) fn purpose_cipher(key: &str, purpose: &str) -> Result<fernet::Fernet> {
+    use base64::Engine;
+    let invalid = || Error::invalid("invalid encryption key");
+    let engine = base64::engine::general_purpose::URL_SAFE;
+    let secret = engine.decode(key.trim()).map_err(|_| invalid())?;
+    let mut derived = [0u8; 32];
+    hkdf::Hkdf::<sha2::Sha256>::new(Some(b"fenders-purpose-key-v1"), &secret)
+        .expand(purpose.as_bytes(), &mut derived)
+        .map_err(|_| invalid())?;
+    let cipher = fernet::Fernet::new(&engine.encode(derived)).ok_or_else(invalid);
+    derived.fill(0);
+    cipher
+}
+
 impl Store {
     pub async fn connect(dsn: &str, state: &Path) -> Result<Self> {
         let pool = PgPoolOptions::new()
@@ -123,6 +143,7 @@ impl Store {
             pool,
             state: state.canonicalize()?,
             cipher,
+            channel_cipher: purpose_cipher(&key, crate::run_channel::PURPOSE)?,
             encryption_key_id: digest(&key),
             browser_auth: None,
             onboarding: None,
@@ -658,6 +679,35 @@ impl Store {
     }
 }
 
+#[cfg(test)]
+mod purpose_cipher_tests {
+    use super::purpose_cipher;
+
+    #[test]
+    fn a_purposes_cipher_opens_nothing_of_anothers_or_of_the_keys_own() {
+        let key = fernet::Fernet::generate_key();
+        let own = fernet::Fernet::new(&key).unwrap();
+        let channel = purpose_cipher(&key, "run-channel").unwrap();
+        let other = purpose_cipher(&key, "something-else").unwrap();
+        let sealed = channel.encrypt(b"credential");
+        assert_eq!(channel.decrypt(&sealed).unwrap(), b"credential");
+        // The same purpose under the same key is the same cipher.
+        assert_eq!(
+            purpose_cipher(&key, "run-channel")
+                .unwrap()
+                .decrypt(&sealed)
+                .unwrap(),
+            b"credential"
+        );
+        assert!(other.decrypt(&sealed).is_err());
+        assert!(own.decrypt(&sealed).is_err());
+        assert!(channel.decrypt(&own.encrypt(b"secret")).is_err());
+        // Another key's cipher for the purpose opens nothing either.
+        let elsewhere = purpose_cipher(&fernet::Fernet::generate_key(), "run-channel").unwrap();
+        assert!(elsewhere.decrypt(&sealed).is_err());
+        assert!(purpose_cipher("not a key", "run-channel").is_err());
+    }
+}
 #[cfg(test)]
 mod guarded_io_tests {
     use super::guarded_blocking;

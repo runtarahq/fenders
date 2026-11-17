@@ -44,7 +44,7 @@ use serde_json::{Value, json};
 
 /// The run protocol version the shim speaks.
 const PROTOCOL: i64 = 1;
-const PURPOSE: &str = "fenders-run-channel-v1";
+pub(crate) const PURPOSE: &str = "fenders-run-channel-v1";
 /// Where a shim posts a run's outcome, under the launch's endpoint.
 const OUTCOME: &str = "v1/run/outcome";
 const MAX_OUTCOME_BYTES: usize = 64 * 1024;
@@ -233,7 +233,7 @@ impl Store {
             "run": {"execution": execution, "generation": generation},
             "channel": {
                 "endpoint": format!("{}/run/{execution}/{generation}", channel.endpoint),
-                "credential": self.cipher.encrypt(claim(execution, generation).as_bytes()),
+                "credential": self.channel_cipher.encrypt(claim(execution, generation).as_bytes()),
                 "trust": trust,
             },
         }))
@@ -249,7 +249,7 @@ impl Store {
     ) -> Result<()> {
         identity(execution)?;
         let issued = self
-            .cipher
+            .channel_cipher
             .decrypt(credential)
             .map_err(|_| Error::unauthorized())?;
         if issued != claim(execution, generation).as_bytes() {

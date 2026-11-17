@@ -102,6 +102,29 @@ async fn a_launch_names_its_run_channel_and_only_its_credential_is_answered() {
         call(&router, "POST", &outcome, Some("not-a-credential")).await,
         StatusCode::UNAUTHORIZED
     );
+    // What a tenant can have the control plane encrypt is never a credential:
+    // a secret whose value is a launch's claim, read back from the database
+    // as someone with a copy of it could, is refused.
+    let forged = l
+        .store
+        .create_secret(
+            &l.operator,
+            &l.tenant,
+            &l.project,
+            json!({"name":"forged","value":format!("fenders-run-channel-v1\n{id}\n{generation}")}),
+        )
+        .await
+        .unwrap();
+    let ciphertext: String =
+        sqlx::query_scalar("SELECT convert_from(ciphertext,'UTF8') FROM secrets WHERE id=$1")
+            .bind(s(&forged["id"]))
+            .fetch_one(&l.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        call(&router, "POST", &outcome, Some(&ciphertext)).await,
+        StatusCode::UNAUTHORIZED
+    );
     // The credential is for this execution and generation alone.
     for path in [
         format!(

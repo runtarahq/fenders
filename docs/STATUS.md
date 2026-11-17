@@ -150,9 +150,14 @@ as both control plane and node.
 ### The run channel
 
 - Its listener takes no client certificate: a launch's credential is the only
-  thing that authenticates a call. The credential is a token under the
-  control plane's encryption key, so rotating that key ends the credentials
-  of runs in flight.
+  thing that authenticates a call. The credential is a token under a key
+  derived from the control plane's encryption key for this purpose alone
+  (nothing else the control plane encrypts, a tenant's secret among it, is
+  one), so rotating that key ends the credentials of runs in flight.
+- A stored secret's ciphertext is not bound to its row: whoever can write
+  the database can move one. They can also insert a credential or an
+  execution, so the encryption at rest protects against reading the
+  database, not against writing it.
 - The launcher's control socket also accepts pause and resume; a shim sends
   it only grants and status, over a socket pair nothing else holds.
 
