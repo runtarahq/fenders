@@ -150,6 +150,7 @@ const VMM_KVM_REQUESTS: &[u64] = &[
     0x0000_aea3, // KVM_GET_TSC_KHZ
     0x8188_aea6, // KVM_GET_XCRS
     0x4188_aea7, // KVM_SET_XCRS
+    0x4188_aec6, // KVM_X86_SET_MSR_FILTER
     0x4018_aee1, // KVM_SET_DEVICE_ATTR
     0x4018_aee2, // KVM_GET_DEVICE_ATTR
 ];
@@ -255,7 +256,8 @@ fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
                 // the number alone, 0xa3 was KVM_ENABLE_CAP as much as the
                 // KVM_GET_TSC_KHZ that was meant. KVM_GET_TSC_KHZ and
                 // KVM_{SET,GET}_DEVICE_ATTR calibrate the guest vDSO's clock
-                // page and keep every vCPU on one TSC offset.
+                // page and keep every vCPU on one TSC offset;
+                // KVM_X86_SET_MSR_FILTER refuses the guest every MSR.
                 for request in VMM_KVM_REQUESTS {
                     rule("ioctl", &[eq(1, *request)], allow)?;
                 }

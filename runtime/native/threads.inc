@@ -7,7 +7,7 @@ static void setup_cpuid(int cpu) {
     struct kvm_cpuid2 *cpuid=calloc(1,sizeof(*cpuid)+256*sizeof(struct kvm_cpuid_entry2));
     if(!cpuid)fail("calloc");
     cpuid->nent=256;
-    CHECK(ioctl(kvm_handle,KVM_GET_SUPPORTED_CPUID,cpuid));CHECK(ioctl(cpu,KVM_SET_CPUID2,cpuid));free(cpuid);
+    CHECK(ioctl(kvm_handle,KVM_GET_SUPPORTED_CPUID,cpuid));restrict_cpuid(cpuid);CHECK(ioctl(cpu,KVM_SET_CPUID2,cpuid));free(cpuid);
 }
 static void *run_virtual_thread(void *arg) {
     struct virtual_thread *thread=arg;current_thread=thread;

@@ -29,6 +29,11 @@ else
   echo 'The x86-64 VMM compilation check requires x86_64-linux-gnu-gcc and libc6-dev-amd64-cross.' >&2
   exit 2
 fi
+if [[ $(uname -m) == x86_64 ]]; then
+  cc -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+    "$task_root/runtime/native/cpuid_test.c" -o "$task_build/cpuid-test"
+  "$task_build/cpuid-test"
+fi
 echo 'PASS x86-64 VMM compile (not a KVM execution test)'
 # The launcher's own messages: standard error unless a pipe is named for them.
 task_plain=$("$task_build/launch" 2>&1 >/dev/null || true)

@@ -497,6 +497,8 @@ static long syscall_guest(int cpu,struct kvm_regs *r) {
     for(unsigned i=0;i<lease_count;i++)release_descriptor(leases[i]);
     lease_count=0;pthread_mutex_unlock(&fd_lock);return rc;
 }
+#include "cpuid.inc"
+#include "msr_filter.inc"
 #include "threads.inc"
 int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"--capabilities")) {
