@@ -51,7 +51,9 @@ trap cleanup EXIT
 docker rm -f "$pg" >/dev/null 2>&1 || true
 docker run -d --name "$pg" -p 127.0.0.1:$((base + 9)):5432 -e POSTGRES_PASSWORD=live \
   -e POSTGRES_DB=fenders --tmpfs /var/lib/postgresql/data postgres:17-alpine >/dev/null
-until docker exec "$pg" pg_isready -q -U postgres; do sleep 1; done
+# Asked over TCP: on a new data directory the image first runs a server
+# that listens on its socket alone, says it is ready there, and restarts.
+until docker exec "$pg" pg_isready -q -h 127.0.0.1 -U postgres; do sleep 1; done
 sleep 1
 
 "$bin/fenders-pki" --output "$out/pki" --identity control=127.0.0.1 --identity node=127.0.0.1 \
@@ -90,7 +92,7 @@ sudo "$stage/build/fenders-node" --state "$stage/state" --build "$stage/build" -
   --control "https://127.0.0.1:$((base + 1))" --control-pin "$(jq -er .control "$out/pins.json")" \
   --ca "$out/pki/ca.pem" --cert "$out/pki/node.pem" --key "$out/pki/node.key" \
   --cpu-percent 200 --memory-mib 1024 --max-instances 4 --port "$node_port" \
-  --local-destinations \
+  --local-destinations --nested-virtualization \
   --run-uid-base 620000 \
   > /dev/null 2> "$out/node.log" &
 node_pid=$!

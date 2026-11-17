@@ -43,6 +43,11 @@ struct Args {
     /// nothing for it.
     #[arg(long)]
     share_cores: bool,
+    /// Start although this host's KVM has nested virtualization enabled
+    /// (`kvm_intel` or `kvm_amd` loaded with `nested=1`). No run uses it; a
+    /// node refuses to start beside it unless told this.
+    #[arg(long)]
+    nested_virtualization: bool,
     /// Warm shims (VM booted, component loaded, each for one run) kept per
     /// artifact and guest configuration a run used.
     #[arg(long, default_value_t = 0)]
@@ -129,20 +134,33 @@ struct Args {
     #[arg(long, default_value_t = 1000)]
     retention_batch: usize,
 }
-/// What this host's settings mean for runs that share it, said once at
-/// start. Neither stops the node: both are the operator's to decide.
-fn host_notes(share_cores: bool) {
+/// What this host's settings mean for runs that share it, checked once at
+/// start.
+/// Whether to go on beside a KVM module with nested virtualization
+/// `enabled`: refused unless the operator `allowed` it, and worth a warning
+/// when they did.
+fn nested(enabled: bool, allowed: bool) -> Result<bool> {
+    if enabled && !allowed {
+        return Err(Error::invalid(
+            "nested virtualization is enabled in this host's KVM (kvm_intel or kvm_amd, nested=1); reload the module with nested=0, or start the node with --nested-virtualization",
+        ));
+    }
+    Ok(enabled)
+}
+fn host_notes(share_cores: bool, nested_virtualization: bool) -> Result<()> {
     let on = |path: &str| {
         std::fs::read_to_string(path).is_ok_and(|v| matches!(v.trim(), "1" | "Y" | "y"))
     };
     // A guest is never told of nested virtualization, and its launcher gives
-    // up the call that could tell it before the guest runs. A host that runs
-    // only Fenders has no use for the module option either way.
+    // up the call that could tell it before the guest runs. It is still
+    // host kernel code for nothing: a host that runs Fenders has it off, or
+    // its operator says the node may start beside it.
     for module in ["kvm_intel", "kvm_amd"] {
-        if on(&format!("/sys/module/{module}/parameters/nested")) {
+        let enabled = on(&format!("/sys/module/{module}/parameters/nested"));
+        if nested(enabled, nested_virtualization)? {
             tracing::warn!(
                 module,
-                "nested virtualization is enabled in this host's KVM; no run uses it, and it is best turned off"
+                "nested virtualization is enabled in this host's KVM and --nested-virtualization is set; no run uses it"
             );
         }
     }
@@ -160,6 +178,7 @@ fn host_notes(share_cores: bool) {
             );
         }
     }
+    Ok(())
 }
 fn main() {
     if let Err(error) = entry() {
@@ -239,7 +258,7 @@ fn entry() -> Result<()> {
             )
         })
         .transpose()?;
-    host_notes(args.share_cores);
+    host_notes(args.share_cores, args.nested_virtualization)?;
     let mut node = Node::new(
         &args.state.join("node"),
         &args.build,
@@ -527,5 +546,25 @@ mod quota_args_tests {
         assert_eq!(parsed.state_project_id, Some(123));
         assert_eq!(parsed.state_quota_mib, Some(4096));
         assert_eq!(parsed.state_quota_inodes, Some(100000));
+    }
+
+    #[test]
+    fn a_node_does_not_start_beside_nested_virtualization_unless_told() {
+        // Off: nothing to refuse or to say, whatever the operator allowed.
+        assert!(!nested(false, false).unwrap());
+        assert!(!nested(false, true).unwrap());
+        // On: refused, with how to change it, unless allowed; then said.
+        let refused = nested(true, false).unwrap_err();
+        assert!(refused.message.contains("--nested-virtualization"));
+        assert!(nested(true, true).unwrap());
+        // And the flag is one the node takes.
+        let mut args = arguments();
+        args.push("--nested-virtualization".into());
+        assert!(Args::try_parse_from(args).unwrap().nested_virtualization);
+        assert!(
+            !Args::try_parse_from(arguments())
+                .unwrap()
+                .nested_virtualization
+        );
     }
 }
