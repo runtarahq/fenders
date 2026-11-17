@@ -45,3 +45,34 @@ fn the_guard_looks_where_the_unit_puts_its_runs() {
         "the unit runs under {root}"
     );
 }
+
+#[test]
+fn the_worker_unit_takes_away_what_the_agent_has_no_use_for() {
+    let directives: Vec<&str> = UNIT.lines().map(str::trim).collect();
+    for wanted in [
+        "NoNewPrivileges=yes",
+        "ProtectHome=yes",
+        "ProtectKernelModules=yes",
+        "ProtectKernelLogs=yes",
+        "ProtectHostname=yes",
+        "RestrictSUIDSGID=yes",
+        "RestrictRealtime=yes",
+        "LockPersonality=yes",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+        "UMask=0077",
+        "LimitCORE=0",
+    ] {
+        assert!(directives.contains(&wanted), "{wanted}");
+    }
+    // And not what it needs: its runs' cgroups, /dev/kvm, its capabilities.
+    for kept in [
+        "ProtectControlGroups",
+        "PrivateDevices",
+        "CapabilityBoundingSet",
+        "ProtectKernelTunables",
+    ] {
+        assert!(!directives.iter().any(|d| d.starts_with(kept)), "{kept}");
+    }
+    // An operator's own flags reach the node.
+    assert!(UNIT.contains("$FENDERS_NODE_OPTIONS"));
+}
