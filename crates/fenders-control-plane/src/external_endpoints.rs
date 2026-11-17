@@ -95,6 +95,10 @@ impl ExternalNetworkPolicy {
     }
     pub(crate) fn permits(&self, address: Ipv4Addr) -> bool {
         address.octets()[0] != 0
+            // The address a cloud platform answers its own guests on (Azure's
+            // WireServer): never an externally operated service, whatever a
+            // broad range allows, as it is never one for an HTTPS origin.
+            && address.octets() != [168, 63, 129, 16]
             && !address.is_loopback()
             && !address.is_link_local()
             && !address.is_multicast()
@@ -476,9 +480,45 @@ mod tests {
             "192.168.10.2",
             "169.254.169.254",
             "100.100.100.200",
+            "168.63.129.16",
         ] {
             assert!(!policy.permits(ip.parse().unwrap()), "{ip}");
         }
+        // What is not public for an HTTPS origin is not for a TCP endpoint
+        // under the shipped policy either: the two cannot drift apart.
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                for (c, d) in [
+                    (0u8, 1u8),
+                    (99, 7),
+                    (100, 9),
+                    (113, 2),
+                    (129, 16),
+                    (193, 4),
+                    (196, 3),
+                    (48, 5),
+                    (2, 8),
+                ] {
+                    let ip = Ipv4Addr::new(a, b, c, d);
+                    assert_eq!(policy.permits(ip), fenders_egress::is_public_v4(ip), "{ip}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cloud_platforms_own_address_is_never_a_destination() {
+        // Azure's WireServer, on an address that is public by its range: an
+        // operator who allows everything and denies nothing still does not
+        // allow it, and the shipped policy denies it by name.
+        let open = ExternalNetworkPolicy {
+            allowed_cidrs: vec!["0.0.0.0/0".parse().unwrap()],
+            denied_cidrs: vec![],
+        };
+        assert!(!open.permits("168.63.129.16".parse().unwrap()));
+        assert!(open.permits("168.63.129.17".parse().unwrap()));
+        let shipped = include_str!("../../../deploy/systemd/external-network-public.json");
+        assert!(shipped.contains("168.63.129.16/32"));
     }
 
     #[test]
@@ -494,6 +534,8 @@ mod tests {
             "224.0.0.1",
             "255.255.255.255",
             "10.20.30.40",
+            // Whatever an operator allows.
+            "168.63.129.16",
         ] {
             assert!(!policy.permits(ip.parse().unwrap()), "{ip}");
         }
