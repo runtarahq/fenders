@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/fenders-control-plane", "crates/fenders-node-protocol", "crates/fenders-node", "crates/fenders-shim", "crates/fenders-component", "crates/fenders-service-trust", "crates/fenders-egress", "crates/fenders-runtime-limits"]
-exclude = ["runtime/guest", "runtime/vendor/wasmtime-wasi-http", "examples/service-client", "examples/runtime-fixtures", "examples/demo-components"]
+exclude = ["runtime/guest", "runtime/vendor/wasmtime-wasi-http", "runtime/vendor/sqlx-sqlite-unused", "examples/service-client", "examples/runtime-fixtures", "examples/demo-components"]
 
 [workspace.package]
 edition = "2024"
@@ -18,6 +18,11 @@ sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-toki
 sha2 = "=0.10.9"
 uuid = { version = "=1.23.1", features = ["v4"] }
 clap = { version = "=4.6.7", features = ["derive", "env"] }
+
+# SQLx's SQLite driver is not used; an empty crate stands in for it so that
+# it does not hold `libsqlite3-sys` back (runtime/vendor/sqlx-sqlite-unused).
+[patch.crates-io]
+sqlx-sqlite = { path = "runtime/vendor/sqlx-sqlite-unused" }
 
 # Backup and restore tests encrypt and authenticate whole archives. Optimize the
 # controller's crypto call sites and crypto dependencies, keeping test debug checks.

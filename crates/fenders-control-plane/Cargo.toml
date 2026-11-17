@@ -43,7 +43,7 @@ openidconnect = { version = "=4.1.0", default-features = false, features = ["acc
 lettre = { version = "=0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "ring", "webpki-roots"] }
 
 [dev-dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 tokio = { workspace = true, features = ["process", "test-util"] }
 fenders-component = { path = "../fenders-component" }
 wat = "=1.239.0"
