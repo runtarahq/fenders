@@ -8,10 +8,6 @@ ignore = [
     # signatures with public keys: no private key is held. No fixed release
     # that openidconnect 4 accepts.
     "RUSTSEC-2023-0071",
-    # crypto-bigint 0.5: timing variability. Here through p256 0.13 under
-    # openidconnect, again for verification only. Fixed in 0.7, which p256
-    # 0.13 does not take.
-    "RUSTSEC-2026-0387",
     # libsqlite3-sys 0.30 (bundled SQLite). sqlx 0.8 pins this version for
     # every crate in the graph. The node opens only its own journal with it:
     # no SQL or database file from a tenant reaches it.
