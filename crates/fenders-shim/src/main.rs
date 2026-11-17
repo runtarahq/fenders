@@ -309,7 +309,16 @@ fn vmm() -> Result<()> {
 
 /// The gid owning /dev/kvm, which the run needs as a supplementary group.
 fn kvm_gid() -> Option<u32> {
-    fs::metadata("/dev/kvm").ok().map(|m| m.gid())
+    // Never the root group: where /dev/kvm is root's own, a VMM is given no
+    // group for it, and opens it only if everyone may.
+    fs::metadata("/dev/kvm")
+        .ok()
+        .and_then(|m| vmm_group(m.gid()))
+}
+
+/// The group a VMM is given for a `/dev/kvm` owned by group `gid`: never root's.
+fn vmm_group(gid: u32) -> Option<u32> {
+    (gid != 0).then_some(gid)
 }
 
 /// The shim's ends of a capturing VM's output pipes ([`output`]), taken by
@@ -1698,5 +1707,11 @@ mod tests {
         assert_eq!(meter_report("final 12 1 1 0")["complete"], false);
         assert!(meter_report("final 12 0 0 0").is_null());
         assert!(meter_report("").is_null());
+    }
+
+    #[test]
+    fn a_vmm_is_never_given_the_root_group() {
+        assert_eq!(vmm_group(0), None);
+        assert_eq!(vmm_group(993), Some(993));
     }
 }
