@@ -1,0 +1,6 @@
+package fenders:fixtures;
+
+/// A WASI 0.3 command: its only export is the async-lifted `run`.
+world async-command {
+  export wasi:cli/run@0.3.0;
+}

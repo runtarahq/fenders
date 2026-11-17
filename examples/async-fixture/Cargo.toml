@@ -1,0 +1,13 @@
+[package]
+name = "fenders-async-fixture"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[lib]
+crate-type = ["cdylib"]
+[dependencies]
+wit-bindgen = "=0.58.0"
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,14 @@
+# Copy to /etc/fenders/worker/environment after enrollment and host checks.
+# Certificates and private keys are supplied separately; never include secrets here.
+FENDERS_CONTROL_URL=https://control.internal.example:9091
+FENDERS_CONTROL_PIN=REPLACE_WITH_CONTROL_CERTIFICATE_SHA256
+FENDERS_NODE_HOST=127.0.0.1
+FENDERS_NODE_PORT=9443
+FENDERS_CPU_PERCENT=100
+FENDERS_MEMORY_MIB=512
+FENDERS_MAX_INSTANCES=1
+# Further fenders-node options, split on spaces; may be left out.
+# --egress-budget makes the node serve the outbound byte limit: set it on a
+# node registered with egress_budget_required, which is otherwise given no
+# run with a connection.
+#FENDERS_NODE_OPTIONS=--egress-budget

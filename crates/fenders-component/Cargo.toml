@@ -1,0 +1,28 @@
+[package]
+name = "fenders-component"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+wasmparser = "=0.261.0"
+wasmtime = { version = "=50.0.0", default-features = false, features = ["anyhow", "std", "cranelift", "parallel-compilation", "runtime", "component-model", "component-model-async", "async", "incremental-cache"] }
+wasmtime-wasi = { version = "=50.0.0", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "=50.0.0", path = "../../runtime/vendor/wasmtime-wasi-http", features = ["fenders-platform"] }
+
+[dev-dependencies]
+fenders-runtime-limits = { path = "../fenders-runtime-limits" }
+tempfile = "3"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+wat = "=1.239.0"
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

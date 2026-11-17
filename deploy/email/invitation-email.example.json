@@ -1,0 +1,8 @@
+{
+  "host": "smtp.example.com",
+  "port": 587,
+  "username": "YOUR_SMTP_LOGIN",
+  "password_file": "/etc/fenders/control/invitation-smtp.key",
+  "from": "Fenders <hello@example.com>",
+  "console_origin": "https://console.example.com"
+}

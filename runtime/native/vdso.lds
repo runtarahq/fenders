@@ -1,0 +1,1 @@
+LINUX_2.6 { global: __vdso_clock_gettime; clock_gettime; local: *; };

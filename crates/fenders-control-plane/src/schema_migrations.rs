@@ -1,0 +1,92 @@
+//! Applied under Store's existing mutation transaction/advisory lock. A startup
+//! records a schema change only after its SQL succeeds; rollback never rewinds it.
+use crate::{
+    error::{Error, Result},
+    model::digest,
+    store::{SCHEMA, Tx},
+};
+
+// Version 1 freezes the existing WASM-only startup updates. Append future
+// migrations with an explicitly qualified reader/rollback window; do not edit
+// an applied migration or silently accept an unknown database revision.
+const BASELINE: &[&str] = &[
+    crate::egress_budget::RETAINED_LAUNCHERS_MIGRATION,
+    crate::app_https::RUNTIME_MIGRATION,
+    include_str!("../sql/app_https_observations.sql"),
+    "ALTER TABLE external_endpoints ALTER COLUMN username_secret_id DROP NOT NULL, ALTER COLUMN password_secret_id DROP NOT NULL",
+    "CREATE TABLE IF NOT EXISTS external_https_endpoints (
+            id text PRIMARY KEY, tenant_id text NOT NULL, project_id text NOT NULL,
+            name text NOT NULL, origin text NOT NULL, deleted boolean NOT NULL DEFAULT false,
+            created timestamptz NOT NULL DEFAULT now(),
+            UNIQUE(tenant_id,project_id,name),
+            FOREIGN KEY(tenant_id,project_id) REFERENCES projects(tenant_id,id))",
+    crate::customer_api::MIGRATION,
+    crate::customer_onboarding::MIGRATION,
+    crate::invitations::MIGRATION,
+    crate::operator_api::MIGRATION,
+    crate::operator_admission::MIGRATION,
+    crate::workspace_lifecycle::MIGRATION,
+    crate::app_delete::MIGRATION,
+];
+
+pub(crate) async fn apply(tx: &mut Tx) -> Result<()> {
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS control_schema_migrations (
+        version bigint PRIMARY KEY CHECK(version>0),
+        checksum text NOT NULL CHECK(checksum ~ '^[a-f0-9]{64}$'),
+        applied_at timestamptz NOT NULL DEFAULT clock_timestamp())",
+    )
+    .execute(&mut **tx)
+    .await?;
+    // Keep the qualified baseline immutable. Main's HTTP-run schema is a new
+    // additive migration, including when upgrading an existing version-1 ledger.
+    let http_runs = [include_str!("http_runs.sql")];
+    let pickup = [crate::pickup::MIGRATION];
+    let static_connections = [include_str!("../sql/static_connections.sql")];
+    let http_scale = [include_str!("../sql/http_scale.sql")];
+    let http_limits = [include_str!("../sql/http_limits.sql")];
+    let websocket_connections = [include_str!("../sql/websocket_connections.sql")];
+    let migrations = [
+        (
+            digest(format!("{SCHEMA}\0{}", BASELINE.join("\0"))),
+            BASELINE,
+        ),
+        (digest(http_runs[0]), http_runs.as_slice()),
+        (digest(pickup[0]), pickup.as_slice()),
+        (digest(static_connections[0]), static_connections.as_slice()),
+        (digest(http_scale[0]), http_scale.as_slice()),
+        (digest(http_limits[0]), http_limits.as_slice()),
+        (
+            digest(websocket_connections[0]),
+            websocket_connections.as_slice(),
+        ),
+    ];
+    let applied: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT version,checksum FROM control_schema_migrations ORDER BY version LIMIT 8",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    if applied.len() > migrations.len()
+        || applied
+            .iter()
+            .enumerate()
+            .any(|(index, (version, checksum))| {
+                *version != index as i64 + 1 || *checksum != migrations[index].0
+            })
+    {
+        return Err(Error::invalid(
+            "unsupported control-plane schema migration history",
+        ));
+    }
+    for (index, (checksum, statements)) in migrations.iter().enumerate().skip(applied.len()) {
+        for statement in *statements {
+            sqlx::raw_sql(statement).execute(&mut **tx).await?;
+        }
+        sqlx::query("INSERT INTO control_schema_migrations(version,checksum) VALUES($1,$2)")
+            .bind(index as i64 + 1)
+            .bind(checksum)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}

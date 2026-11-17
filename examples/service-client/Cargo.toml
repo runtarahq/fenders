@@ -1,0 +1,16 @@
+[package]
+name = "fenders-http-component"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dependencies]
+wasi = "=0.14.4"
+tokio-postgres = { version = "=0.7.18", default-features = false }
+tokio = { version = "1", default-features = false, features = ["io-util"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
+base64 = "0.22"
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

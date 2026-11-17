@@ -1,0 +1,694 @@
+use crate::{
+    db::s,
+    error::{Error, Result},
+    model::*,
+};
+use axum::http::StatusCode;
+use serde_json::{Value, json};
+use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
+use std::{
+    fs::{self, OpenOptions},
+    io::{Read, Write},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+pub const SCHEMA: &str = include_str!("../schema.sql");
+pub type Tx = Transaction<'static, Postgres>;
+
+/// Keep the admission transaction alive even if the awaiting request is cancelled.
+/// Dropping a spawn_blocking handle does not stop its filesystem worker.
+pub(crate) async fn guarded_blocking<G, T, F>(guard: G, work: F) -> Result<(G, T)>
+where
+    G: Send + 'static,
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let result = work();
+        (guard, result)
+    })
+    .await
+    .map_err(|_| Error::internal())
+}
+
+#[derive(Clone)]
+pub struct Store {
+    pub pool: PgPool,
+    pub(crate) state: PathBuf,
+    pub(crate) cipher: fernet::Fernet,
+    pub(crate) encryption_key_id: String,
+    pub(crate) browser_auth: Option<std::sync::Arc<crate::browser_auth::BrowserAuth>>,
+    pub(crate) invitation_mailer: Option<std::sync::Arc<crate::invitation_email::InvitationMailer>>,
+    pub(crate) onboarding: Option<std::sync::Arc<crate::customer_onboarding::OnboardingConfig>>,
+    pub(crate) external_network:
+        Option<std::sync::Arc<crate::external_endpoints::ExternalNetworkPolicy>>,
+    pub(crate) public_egress: Option<std::sync::Arc<crate::public_egress::PublicEgress>>,
+    pub(crate) orphan_upload_scan: std::sync::Arc<std::sync::Mutex<crate::orphan_uploads::Scan>>,
+    pub(crate) background: std::sync::Arc<crate::supervision::Monitor>,
+    pub(crate) pickup: std::sync::Arc<crate::pickup::Pickup>,
+    pub(crate) run_channel: Option<std::sync::Arc<crate::run_channel::RunChannel>>,
+    /// Requests for HTTP apps, between the gateway and the run channel.
+    pub exchange: std::sync::Arc<crate::http_exchange::Exchange>,
+    /// The WebSocket connections the gateway holds for apps.
+    pub sockets: std::sync::Arc<crate::websocket::Sockets>,
+    /// How many requests each workspace was admitted lately.
+    pub http_rates: std::sync::Arc<crate::ingress::Rates>,
+    /// Refuse what no shim node can serve; see [`crate::unavailable`].
+    pub(crate) refuse_unserved: bool,
+    /// Files served beside the API; see [`crate::api::Asset`].
+    pub(crate) assets: &'static [crate::api::Asset],
+}
+
+fn private_directory(path: &Path) -> Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(Error::invalid(
+            "state directories must not be symbolic links",
+        ));
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+fn private_file(path: &Path, content: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    fs::File::open(path.parent().ok_or_else(Error::internal)?)?.sync_all()?;
+    Ok(())
+}
+pub(crate) fn token(prefix: &str) -> Result<String> {
+    let mut entropy = [0u8; 32];
+    fs::File::open("/dev/urandom")?.read_exact(&mut entropy)?;
+    Ok(format!(
+        "{prefix}{}",
+        entropy
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    ))
+}
+impl Store {
+    pub async fn connect(dsn: &str, state: &Path) -> Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(16)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(dsn)
+            .await?;
+        Self::from_pool(pool, state)
+    }
+    pub fn from_pool(pool: PgPool, state: &Path) -> Result<Self> {
+        private_directory(state)?;
+        private_directory(&state.join("blobs"))?;
+        let key = state.join("encryption.key");
+        if !key.try_exists()? {
+            match private_file(&key, fernet::Fernet::generate_key().as_bytes()) {
+                Ok(()) => (),
+                Err(e) if !key.try_exists()? => return Err(e),
+                Err(_) => (),
+            }
+        }
+        let key = crate::key_rotation::read_key(&key)?;
+        let cipher =
+            fernet::Fernet::new(&key).ok_or_else(|| Error::invalid("invalid encryption key"))?;
+        Ok(Self {
+            pool,
+            state: state.canonicalize()?,
+            cipher,
+            encryption_key_id: digest(&key),
+            browser_auth: None,
+            onboarding: None,
+            invitation_mailer: None,
+            public_egress: None,
+            external_network: None,
+            orphan_upload_scan: Default::default(),
+            background: Default::default(),
+            pickup: Default::default(),
+            run_channel: None,
+            exchange: Default::default(),
+            http_rates: Default::default(),
+            sockets: Default::default(),
+            refuse_unserved: false,
+            assets: &[],
+        })
+    }
+    /// The shipped configuration: features no shim node serves answer 501.
+    pub fn refusing_unserved(mut self) -> Self {
+        self.refuse_unserved = true;
+        self
+    }
+    /// Serve these files from the management listener, each at its path.
+    pub fn with_assets(mut self, assets: &'static [crate::api::Asset]) -> Self {
+        self.assets = assets;
+        self
+    }
+    pub async fn transaction(&self, mutate: bool, recovery: bool) -> Result<Tx> {
+        self.begin_transaction(mutate, recovery, false).await
+    }
+    pub fn background_monitor(&self) -> std::sync::Arc<crate::supervision::Monitor> {
+        self.background.clone()
+    }
+    pub fn background_status(&self, p: &Principal) -> Result<Value> {
+        p.operator()?;
+        self.background.snapshot()
+    }
+    pub(crate) async fn snapshot(&self) -> Result<Tx> {
+        self.begin_transaction(false, false, true).await
+    }
+    async fn begin_transaction(&self, mutate: bool, recovery: bool, snapshot: bool) -> Result<Tx> {
+        let mut tx = self.pool.begin().await?;
+        if snapshot {
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("SET LOCAL statement_timeout = '10s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        if mutate {
+            sqlx::query("SELECT pg_advisory_xact_lock(184923781), set_config('fenders.mutation','true',true)")
+                .execute(&mut *tx)
+                .await?;
+        }
+        if !recovery {
+            let barrier: Value =
+                sqlx::query_scalar("SELECT to_jsonb(b) FROM recovery_barrier b WHERE singleton")
+                    .fetch_one(&mut *tx)
+                    .await?;
+            crate::key_rotation::check_identity(&barrier, &self.encryption_key_id)?;
+            if mutate && barrier["active"] == true {
+                return Err(Error::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "restored control plane awaits external-resource fencing and operator activation",
+                ));
+            }
+        }
+        Ok(tx)
+    }
+    pub async fn migrate(&self) -> Result<()> {
+        let mut tx = self.transaction(true, true).await?;
+        let initialized: bool =
+            sqlx::query_scalar("SELECT to_regclass('platform_format') IS NOT NULL")
+                .fetch_one(&mut *tx)
+                .await?;
+        if initialized {
+            let format: String =
+                sqlx::query_scalar("SELECT format FROM platform_format WHERE singleton")
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if format != "wasm-only-v1" {
+                return Err(Error::invalid("unsupported platform database format"));
+            }
+        } else {
+            let legacy: bool =
+                sqlx::query_scalar("SELECT to_regclass('schema_version') IS NOT NULL")
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if legacy {
+                return Err(Error::invalid(
+                    "managed-service databases are not supported; configure a fresh database and state directory for the WASM-only MVP",
+                ));
+            }
+            sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
+        }
+        crate::schema_migrations::apply(&mut tx).await?;
+        let unbound: bool = sqlx::query_scalar(
+            "SELECT encryption_key_id IS NULL FROM recovery_barrier WHERE singleton",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if unbound {
+            crate::key_rotation::validate_or_reencrypt(&mut tx, &self.cipher, None).await?;
+        }
+        sqlx::query("UPDATE recovery_barrier SET encryption_key_id=$1 WHERE singleton AND encryption_key_id IS NULL")
+            .bind(&self.encryption_key_id).execute(&mut *tx).await?;
+        let barrier: Value =
+            sqlx::query_scalar("SELECT to_jsonb(b) FROM recovery_barrier b WHERE singleton")
+                .fetch_one(&mut *tx)
+                .await?;
+        crate::key_rotation::check_identity(&barrier, &self.encryption_key_id)?;
+        tx.commit().await?;
+        Ok(())
+    }
+    pub async fn bootstrap(&self) -> Result<PathBuf> {
+        let mut tx = self.transaction(true, true).await?;
+        let path = self.state.join("operator.token");
+        if !path.try_exists()? {
+            private_file(&path, token("fnd_op_")?.as_bytes())?;
+        }
+        let credential = fs::read_to_string(&path)?;
+        let credential = credential.trim();
+        if !credential.starts_with("fnd_op_") || credential.len() > 256 {
+            return Err(Error::invalid("invalid operator credential file"));
+        }
+        sqlx::query("INSERT INTO credentials (id,token_hash,name,role,expires) VALUES ($1,$2,'bootstrap','operator',now()+interval '30 days') ON CONFLICT (token_hash) DO NOTHING")
+            .bind(uid()).bind(digest(credential)).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(path)
+    }
+    pub async fn authenticate(&self, token: &str) -> Result<Principal> {
+        if token.is_empty() || token.len() > 256 {
+            return Err(Error::unauthorized());
+        }
+        let mut tx = self.transaction(false, false).await?;
+        let row = sqlx::query_scalar::<_, Value>("SELECT jsonb_build_object('id',id,'role',role,'tenant_id',tenant_id,'project_id',project_id,'api_permissions',api_permissions) FROM credentials WHERE token_hash=$1 AND NOT revoked AND expires>now()")
+            .bind(digest(token)).fetch_optional(&mut *tx).await?.ok_or_else(Error::unauthorized)?;
+        // Metadata only; never persist or log the bearer value. Throttle writes.
+        sqlx::query("UPDATE credentials SET last_used=now() WHERE id=$1 AND api_permissions IS NOT NULL AND (last_used IS NULL OR last_used<now()-interval '1 minute')")
+            .bind(row["id"].as_str()).execute(&mut *tx).await?;
+        tx.commit().await?;
+        serde_json::from_value(row).map_err(|_| Error::internal())
+    }
+    pub(crate) async fn audit(
+        tx: &mut Tx,
+        actor: &Principal,
+        action: &str,
+        resource: &str,
+        tenant: &str,
+        detail: Value,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO audit (tenant_id,actor,action,resource_id,detail) VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(tenant)
+        .bind(&actor.id)
+        .bind(action)
+        .bind(resource)
+        .bind(detail)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+    pub(crate) async fn project(
+        tx: &mut Tx,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        write: bool,
+    ) -> Result<()> {
+        Self::live_principal(tx, p).await?;
+        p.scope(tenant, Some(project), write, false)?;
+        if write {
+            Self::require_workspace_active(tx, tenant).await?;
+        }
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM projects WHERE tenant_id=$1 AND id=$2)",
+        )
+        .bind(tenant)
+        .bind(project)
+        .fetch_one(&mut **tx)
+        .await?;
+        if !exists {
+            return Err(Error::missing());
+        }
+        Ok(())
+    }
+    pub async fn tenants(&self, p: &Principal) -> Result<Value> {
+        let mut tx = self.transaction(false, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        let rows = sqlx::query_scalar::<_, Value>(
+            "SELECT to_jsonb(t) FROM tenants t WHERE $1 OR id=$2 ORDER BY created",
+        )
+        .bind(p.role == Role::Operator)
+        .bind(&p.tenant_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        Ok(Value::Array(rows))
+    }
+    pub async fn create_tenant(&self, p: &Principal, value: CreateTenant) -> Result<Value> {
+        p.operator()?;
+        name(&value.name)?;
+        value.allowance.validate()?;
+        let mut tx = self.transaction(true, false).await?;
+        let (row, project_id) =
+            Self::create_workspace_records(&mut tx, &value.name, &value.name, &value.allowance)
+                .await?;
+        let id = s(&row["id"]);
+        Self::audit(&mut tx, p, "tenant.create", id, id, json!({})).await?;
+        Self::audit(
+            &mut tx,
+            p,
+            "project.create",
+            &project_id,
+            id,
+            json!({"default":true}),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+    /// Caller authorizes admission and writes its audit in the same transaction.
+    pub(crate) async fn create_workspace_records(
+        tx: &mut Tx,
+        name: &str,
+        display_name: &str,
+        a: &Allowance,
+    ) -> Result<(Value, String)> {
+        let id = uid();
+        let row = sqlx::query_scalar::<_, Value>("INSERT INTO tenants AS t (id,name,display_name,cpu_percent,memory_mib,storage_bytes,instances,transfer_bytes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_jsonb(t)")
+            .bind(&id).bind(name).bind(display_name).bind(a.cpu_percent).bind(a.memory_mib).bind(a.storage_bytes).bind(a.instances).bind(a.transfer_bytes).fetch_one(&mut **tx).await?;
+        let project_id = uid();
+        sqlx::query("INSERT INTO projects(id,tenant_id,name,display_name,slug,is_default) VALUES ($1,$2,'production','Production','production',true)")
+            .bind(&project_id).bind(&id).execute(&mut **tx).await?;
+        Ok((row, project_id))
+    }
+    pub async fn update_allowance(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        value: UpdateAllowance,
+    ) -> Result<Value> {
+        p.operator()?;
+        identity(tenant)?;
+        value.allowance.validate()?;
+        let mut tx = self.transaction(true, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        let row = Self::set_allowance(&mut tx, tenant, &value.allowance).await?;
+        Self::audit(
+            &mut tx,
+            p,
+            "tenant.allowance",
+            tenant,
+            tenant,
+            json!(value.allowance),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+    /// The caller authorizes the operation and records its audit in this transaction.
+    pub(crate) async fn set_allowance(tx: &mut Tx, tenant: &str, a: &Allowance) -> Result<Value> {
+        a.validate()?;
+        let allowed: bool = sqlx::query_scalar("SELECT (SELECT COALESCE(sum(cpu_percent),0)<=$2 AND COALESCE(sum(memory_mib),0)<=$3 AND count(*)<=$4 FROM compute_reservations WHERE tenant_id=$1) AND (SELECT COALESCE(sum(bytes),0)<=$5 FROM storage_reservations WHERE tenant_id=$1) AND ((SELECT COALESCE(sum(used_bytes+held_bytes),0) FROM transfer_allowance_accounting WHERE tenant_id=$1 AND period=date_trunc('month',now() AT TIME ZONE 'UTC')::date)<=$6)")
+            .bind(tenant).bind(a.cpu_percent).bind(a.memory_mib).bind(a.instances as i64).bind(a.storage_bytes).bind(a.transfer_bytes).fetch_one(&mut **tx).await?;
+        if !allowed {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "allowance is below current usage or reservations",
+            ));
+        }
+        let row = sqlx::query_scalar::<_, Value>("UPDATE tenants AS t SET cpu_percent=$2,memory_mib=$3,storage_bytes=$4,instances=$5,transfer_bytes=$6 WHERE id=$1 RETURNING to_jsonb(t)")
+            .bind(tenant).bind(a.cpu_percent).bind(a.memory_mib).bind(a.storage_bytes).bind(a.instances).bind(a.transfer_bytes).fetch_optional(&mut **tx).await?.ok_or_else(Error::missing)?;
+        Ok(row)
+    }
+    pub async fn projects(&self, p: &Principal, tenant: &str) -> Result<Value> {
+        p.scope(tenant, p.project_id.as_deref(), false, false)?;
+        let mut tx = self.transaction(false, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        Ok(Value::Array(sqlx::query_scalar::<_, Value>("SELECT to_jsonb(p) FROM projects p WHERE tenant_id=$1 AND ($2::text IS NULL OR id=$2) ORDER BY created")
+            .bind(tenant).bind(&p.project_id).fetch_all(&mut *tx).await?))
+    }
+    pub async fn create_project(&self, p: &Principal, tenant: &str, value: Named) -> Result<Value> {
+        self.create_project_keyed(p, tenant, value, None).await
+    }
+    pub async fn create_project_keyed(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        value: Named,
+        key: Option<&str>,
+    ) -> Result<Value> {
+        p.scope(tenant, None, true, false)?;
+        let request = json!({"kind":"project.create","name":value.name});
+        let (display_name, slug) = crate::workspaces::project_name(&value.name)?;
+        let mut tx = self.transaction(true, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        if let Some(key) = key
+            && let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await?
+        {
+            return Ok(row);
+        }
+        let id = uid();
+        let row = sqlx::query_scalar::<_, Value>(
+            "INSERT INTO projects AS p (id,tenant_id,name,display_name,slug) VALUES ($1,$2,$3,$4,$3) RETURNING to_jsonb(p)",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(slug)
+        .bind(display_name)
+        .fetch_one(&mut *tx)
+        .await?;
+        Self::audit(&mut tx, p, "project.create", &id, tenant, json!({})).await?;
+        if let Some(key) = key {
+            crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
+        }
+
+        tx.commit().await?;
+        Ok(row)
+    }
+    pub async fn credentials(&self, p: &Principal, tenant: &str) -> Result<Value> {
+        p.scope(tenant, None, false, true)?;
+        let mut tx = self.transaction(false, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        Ok(Value::Array(sqlx::query_scalar::<_, Value>("SELECT jsonb_build_object('id',id,'name',name,'role',role,'project_id',project_id,'expires',expires,'revoked',revoked,'created',created) FROM credentials WHERE tenant_id=$1 ORDER BY created DESC")
+            .bind(tenant).fetch_all(&mut *tx).await?))
+    }
+    pub async fn issue_credential(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        value: IssueCredential,
+    ) -> Result<Value> {
+        p.scope(tenant, None, false, true)?;
+        name(&value.name)?;
+        if value.role == Role::Operator
+            || value.role == Role::Owner && value.project_id.is_some()
+            || !(60..=2592000).contains(&value.ttl_seconds)
+        {
+            return Err(Error::invalid(
+                "invalid tenant role, project scope or credential lifetime",
+            ));
+        }
+        let mut tx = self.transaction(true, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        if let Some(project) = &value.project_id {
+            Self::project(&mut tx, p, tenant, project, false).await?;
+        }
+        let id = uid();
+        let token = token("fnd_tok_")?;
+        let row = sqlx::query_scalar::<_, Value>("INSERT INTO credentials (id,token_hash,tenant_id,project_id,name,role,expires) VALUES ($1,$2,$3,$4,$5,$6,now()+make_interval(secs=>$7::double precision)) RETURNING jsonb_build_object('id',id,'role',role,'expires',expires)")
+            .bind(&id).bind(digest(&token)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(value.role.as_str()).bind(value.ttl_seconds as f64).fetch_one(&mut *tx).await?;
+        Self::audit(
+            &mut tx,
+            p,
+            "credential.issue",
+            &id,
+            tenant,
+            json!({"role": value.role, "project_id": value.project_id}),
+        )
+        .await?;
+        tx.commit().await?;
+        let mut row = row;
+        row["token"] = json!(token);
+        Ok(row)
+    }
+    pub async fn revoke_credential(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        credential: &str,
+    ) -> Result<Value> {
+        p.scope(tenant, None, false, true)?;
+        identity(credential)?;
+        let mut tx = self.transaction(true, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        let row = Self::revoke_credential_in_tx(&mut tx, tenant, credential).await?;
+        Self::audit(
+            &mut tx,
+            p,
+            "credential.revoke",
+            credential,
+            tenant,
+            json!({}),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+    pub(crate) async fn revoke_credential_in_tx(
+        tx: &mut Tx,
+        tenant: &str,
+        credential: &str,
+    ) -> Result<Value> {
+        let row = sqlx::query_scalar::<_, Value>("UPDATE credentials SET revoked=true WHERE tenant_id=$1 AND id=$2 RETURNING jsonb_build_object('id',id)")
+            .bind(tenant).bind(credential).fetch_optional(&mut **tx).await?.ok_or_else(Error::missing)?;
+        Ok(row)
+    }
+    pub async fn upload(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        data: &[u8],
+    ) -> Result<Value> {
+        p.scope(tenant, Some(project), true, false)?;
+        if !(8..=MAX_UPLOAD).contains(&data.len()) || &data[..8] != b"\0asm\x0d\0\x01\0" {
+            return Err(Error::invalid("expected a WASI component, maximum 16 MiB"));
+        }
+        let digest = digest(data);
+        let mut tx = self.transaction(true, false).await?;
+        Self::project(&mut tx, p, tenant, project, true).await?;
+        let existing = sqlx::query_scalar::<_, Value>("SELECT to_jsonb(a) FROM artifacts a WHERE tenant_id=$1 AND project_id=$2 AND digest=$3")
+            .bind(tenant).bind(project).bind(&digest).fetch_optional(&mut *tx).await?;
+        if let Some(row) = &existing
+            && row["retired_at"].is_null()
+        {
+            let row = sqlx::query_scalar::<_, Value>(
+                "UPDATE artifacts a SET last_uploaded_at=now() WHERE id=$1 RETURNING to_jsonb(a)",
+            )
+            .bind(s(&row["id"]))
+            .fetch_one(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(row);
+        }
+        let fits: bool = sqlx::query_scalar("SELECT storage_bytes >= $2+(SELECT COALESCE(sum(bytes),0) FROM storage_reservations WHERE tenant_id=$1) FROM tenants WHERE id=$1")
+            .bind(tenant).bind(data.len() as i64).fetch_one(&mut *tx).await?;
+        if !fits {
+            return Err(Error::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "tenant storage allowance exhausted",
+            ));
+        }
+        // Durable bytes precede the metadata commit. Failed transactions can leave an
+        // unreferenced blob, but never a database record pointing to incomplete bytes.
+        let target = self.state.join("blobs").join(&digest);
+        let dir = self.state.join("blobs");
+        let content = data.to_vec();
+        let (mut tx, written) = guarded_blocking(tx, move || -> Result<()> {
+            if target.try_exists()? {
+                if crate::model::digest(fs::read(&target)?) != digest {
+                    return Err(Error::internal());
+                }
+                return Ok(());
+            }
+            let temporary = dir.join(format!(".upload-{}", uid()));
+            let result = (|| {
+                private_file(&temporary, &content)?;
+                fs::rename(&temporary, &target)?;
+                fs::File::open(&dir)?.sync_all()?;
+                Ok(())
+            })();
+            if temporary.exists() {
+                let _ = fs::remove_file(&temporary);
+            }
+            result
+        })
+        .await?;
+        written?;
+        let id = existing
+            .as_ref()
+            .map(|v| s(&v["id"]).to_owned())
+            .unwrap_or_else(uid);
+        let digest = crate::model::digest(data);
+        let row = sqlx::query_scalar::<_, Value>("INSERT INTO artifacts AS a (id,tenant_id,project_id,digest,size) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET retired_at=NULL,last_uploaded_at=now() RETURNING to_jsonb(a)")
+            .bind(&id).bind(tenant).bind(project).bind(&digest).bind(data.len() as i64).fetch_one(&mut *tx).await?;
+        sqlx::query("INSERT INTO artifact_validations(artifact_id,tenant_id,project_id,runtime) VALUES($1,$2,$3,$4) ON CONFLICT(artifact_id) DO UPDATE SET state='pending',inspection=NULL,error=NULL,node_id=NULL,node_boot=NULL,lease_until=NULL,generation=artifact_validations.generation+1,available_at=now(),updated=now()")
+            .bind(&id).bind(tenant).bind(project).bind(crate::artifacts::RUNTIME).execute(&mut *tx).await?;
+        Self::audit(
+            &mut tx,
+            p,
+            "artifact.upload",
+            &id,
+            tenant,
+            json!({"digest": digest, "bytes": data.len()}),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+    pub async fn resources(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        kind: &str,
+        id: Option<&str>,
+    ) -> Result<Value> {
+        // Only this exhaustive mapping may introduce an SQL identifier.
+        if kind == "external-endpoints" {
+            return self.external_connections(p, tenant, project, id).await;
+        }
+        let (table, projection) = match kind {
+            "artifacts" => ("artifacts", "to_jsonb(r)"),
+            "deployments" => ("deployments", "to_jsonb(r)"),
+            "executions" => ("executions", "to_jsonb(r)"),
+            "operations" => ("operations", "to_jsonb(r)"),
+            "routes" => ("routes", "to_jsonb(r)"),
+            "networks" => ("networks", "to_jsonb(r)"),
+            "external-endpoints" => ("external_endpoints", "to_jsonb(r)"),
+            "grants" => ("network_grants", "to_jsonb(r)"),
+            "secrets" => (
+                "secrets",
+                "jsonb_build_object('id',id,'name',name,'created',created)",
+            ),
+            _ => return Err(Error::missing()),
+        };
+        if let Some(id) = id {
+            identity(id)?;
+        }
+        let mut tx = self.transaction(false, false).await?;
+        Self::project(&mut tx, p, tenant, project, false).await?;
+        let query = format!(
+            "SELECT {projection} FROM {table} r WHERE tenant_id=$1 AND project_id=$2 AND ($3::text IS NULL OR id=$3) AND ($4<>'artifacts' OR to_jsonb(r)->>'retired_at' IS NULL) ORDER BY created DESC LIMIT 1000"
+        );
+        let mut rows = sqlx::query_scalar::<_, Value>(&query)
+            .bind(tenant)
+            .bind(project)
+            .bind(id)
+            .bind(kind)
+            .fetch_all(&mut *tx)
+            .await?;
+        if id.is_some() {
+            rows.pop().ok_or_else(Error::missing)
+        } else {
+            Ok(Value::Array(rows))
+        }
+    }
+}
+
+#[cfg(test)]
+mod guarded_io_tests {
+    use super::guarded_blocking;
+    use tokio::sync::oneshot;
+    #[derive(Debug)]
+    struct Guard(Option<oneshot::Sender<()>>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = self.0.take().unwrap().send(());
+        }
+    }
+    #[tokio::test]
+    async fn cancellation_keeps_guard_until_blocking_work_has_finished() {
+        let (dropped, mut drop_rx) = oneshot::channel();
+        let (started, start_rx) = oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(guarded_blocking(Guard(Some(dropped)), move || {
+            started.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        }));
+        start_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let before = drop_rx.try_recv();
+        release.send(()).unwrap();
+        assert!(matches!(before, Err(oneshot::error::TryRecvError::Empty)));
+        tokio::time::timeout(std::time::Duration::from_secs(5), drop_rx)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}

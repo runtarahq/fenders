@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+# Drain and confirm termination through Fenders before replacing this bundle.
+# Never stop a worker or release its reservations from a package script.
+if [ -d /run/systemd/system ]; then
+    state=$(systemctl show fenders-worker.service --property=ActiveState --value) || {
+        echo 'Cannot determine worker service state; package change refused.' >&2
+        exit 1
+    }
+    case "$state" in
+        inactive|failed) ;;
+        *)
+            echo 'Drain the worker, confirm its executions stopped, then stop fenders-worker.service before changing the package.' >&2
+            exit 1
+            ;;
+    esac
+fi
+# KillMode=process preserves detached VMs after the supervisor exits.
+if [ -f /sys/fs/cgroup/system.slice/fenders-worker.service/workloads/cgroup.events ] && \
+    grep -q '^populated 1$' /sys/fs/cgroup/system.slice/fenders-worker.service/workloads/cgroup.events; then
+    echo 'Worker executions remain in its cgroup; confirmed teardown is required before changing the package.' >&2
+    exit 1
+fi

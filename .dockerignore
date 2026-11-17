@@ -1,0 +1,16 @@
+.git
+**/target
+**/node_modules
+run
+build
+.cache
+.env
+.env.*
+**/*.key
+**/*.pem
+**/*.token
+**/*.db
+**/*.sqlite*
+**/*.log
+
+dist

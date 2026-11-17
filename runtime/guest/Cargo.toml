@@ -1,0 +1,24 @@
+[package]
+name = "fenders-http-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+fenders-runtime-limits = { path = "../../crates/fenders-runtime-limits" }
+anyhow = "1"
+hyper = { version = "1", features = ["server", "http1", "client", "http2"] }
+http-body-util = "0.1"
+libc = "0.2"
+wasmtime = { version = "=50.0.0", default-features = false, features = ["anyhow", "runtime", "std", "component-model", "component-model-async", "async"] }
+wasmtime-wasi = { version = "=50.0.0", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "=50.0.0", path = "../vendor/wasmtime-wasi-http", features = ["fenders-platform"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+dlmalloc = { version = "0.2", features = ["global"] }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

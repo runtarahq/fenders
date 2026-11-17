@@ -1,0 +1,37 @@
+[Unit]
+Description=Fenders kernel-free WASM worker
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/fenders/worker/environment
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/fenders/worker/environment
+StateDirectory=fenders/worker
+StateDirectoryMode=0700
+Delegate=cpu memory pids
+DelegateSubgroup=supervisor
+ExecStartPre=/bin/sh -c 'echo "+cpu +memory +pids" > /sys/fs/cgroup/system.slice/%n/cgroup.subtree_control'
+ExecStart=/usr/lib/fenders/worker/fenders-node service-run \
+    --state /var/lib/fenders/worker --package-build /usr/lib/fenders/worker \
+    --selection /etc/fenders/worker/selected-release.json --releases /var/lib/fenders/releases -- \
+    --cgroup-root /sys/fs/cgroup/fenders-runs \
+    --control ${FENDERS_CONTROL_URL} --control-pin ${FENDERS_CONTROL_PIN} \
+    --ca /etc/fenders/worker/ca.pem --cert /etc/fenders/worker/node.pem \
+    --key /etc/fenders/worker/node.key --host ${FENDERS_NODE_HOST} --port ${FENDERS_NODE_PORT} \
+    --cpu-percent ${FENDERS_CPU_PERCENT} --memory-mib ${FENDERS_MEMORY_MIB} \
+    --max-instances ${FENDERS_MAX_INSTANCES} $FENDERS_NODE_OPTIONS
+Restart=on-failure
+RestartSec=5
+# Agent exit is not evidence that a detached VM has stopped.
+KillMode=process
+# Accepted TLS/header/request limits total at most 90 seconds; renewals continue
+# while authenticated RPCs drain. Keep the stop deadline outside that bound.
+TimeoutStopSec=100s
+UMask=0077
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

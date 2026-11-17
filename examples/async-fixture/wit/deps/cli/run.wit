@@ -1,0 +1,6 @@
+package wasi:cli@0.3.0;
+
+/// The `run` interface of WASI 0.3 (`wasi:cli@0.3.0`), as Wasmtime 50 links it.
+interface run {
+  run: async func() -> result;
+}

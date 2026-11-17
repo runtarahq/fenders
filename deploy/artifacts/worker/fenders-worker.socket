@@ -1,0 +1,11 @@
+[Unit]
+Description=Fenders worker RPC listener retained across agent replacement
+
+[Socket]
+ListenStream=127.0.0.1:9443
+Service=fenders-worker.service
+FileDescriptorName=rpc
+Backlog=128
+
+[Install]
+WantedBy=sockets.target

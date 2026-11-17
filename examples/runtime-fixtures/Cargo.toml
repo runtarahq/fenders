@@ -1,0 +1,29 @@
+[package]
+name = "fenders-node-fixtures"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[lib]
+crate-type = ["cdylib"]
+[[bin]]
+name = "fenders-command"
+path = "src/command.rs"
+[[bin]]
+name = "fenders-dual"
+path = "src/dual.rs"
+[[bin]]
+name = "fenders-rollout"
+path = "src/rollout.rs"
+[[bin]]
+name = "fenders-credential"
+path = "src/credential.rs"
+[[bin]]
+name = "fenders-public-https"
+path = "src/public_https.rs"
+[dependencies]
+wasi = "=0.14.4"
+sha2 = "=0.10.9"
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

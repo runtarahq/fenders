@@ -1,0 +1,59 @@
+[Unit]
+Description=Fenders Rust control plane
+Documentation=https://github.com/runtarahq/fenders/blob/main/deploy/systemd/README.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=fenders-control
+Group=fenders-control
+StateDirectory=fenders/control
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/fenders/control
+EnvironmentFile=/etc/fenders/control/environment
+LoadCredential=database-url:/etc/fenders/control/database-url
+LoadCredential=control.key:/etc/fenders/control/control.key
+LoadCredential=gateway.key:/etc/fenders/control/gateway.key
+ExecStart=/usr/local/bin/fenders-control-plane \
+    --state /var/lib/fenders/control \
+    --database-url-file ${CREDENTIALS_DIRECTORY}/database-url \
+    --host 0.0.0.0 --port 9090 --internal-port 9091 --gateway-port 9092 \
+    --run-channel-port 9093 --run-channel-endpoint ${FENDERS_RUN_CHANNEL_ENDPOINT} \
+    --domain ${FENDERS_APP_DOMAIN} \
+    --ca /etc/fenders/control/ca.pem \
+    --cert /etc/fenders/control/control.pem \
+    --key ${CREDENTIALS_DIRECTORY}/control.key \
+    --gateway-cert /etc/fenders/control/gateway.pem \
+    --gateway-key ${CREDENTIALS_DIRECTORY}/gateway.key \
+    --external-network /etc/fenders/control/external-network.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=100s
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
