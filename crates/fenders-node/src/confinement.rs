@@ -199,6 +199,10 @@ fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
         let masked = |arg, a, b| Compare { arg, op: 7, a, b };
         let result = (|| {
             for name in COMMON.split_whitespace() {
+                // The launcher's descriptor control is allowed by command.
+                if profile == "vmm" && name.starts_with("fcntl") {
+                    continue;
+                }
                 rule(name, &[], allow)?;
             }
             rule("prlimit64", &[eq(0, 0), eq(2, 0)], allow)?;
@@ -238,10 +242,74 @@ fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
                 // with accept4 and sends and receives with sendto and
                 // recvfrom, never with accept, sendmsg or recvmsg (which
                 // would also pass descriptors).
-                for name in "accept4 connect bind shutdown sendto recvfrom getsockname getpeername getsockopt setsockopt memfd_create".split_whitespace() {
+                for name in "accept4 connect bind shutdown getsockname getpeername memfd_create"
+                    .split_whitespace()
+                {
                     rule(name, &[], allow)?;
                 }
                 for (kind, protocols) in [(1, [0, 6]), (2, [0, 17])] {
+                // And with what arguments. An `int` argument is compared in
+                // its low half: the high half of its register is not the
+                // caller's to have set.
+                let int = |arg, value: u64| masked(arg, 0xffff_ffff, value);
+                // Message flags: those a guest may pass (guest_args.inc)
+                // and the launcher's own MSG_NOSIGNAL; never MSG_FASTOPEN,
+                // which connects, or MSG_OOB and MSG_ERRQUEUE.
+                for name in ["sendto", "recvfrom"] {
+                    rule(
+                        name,
+                        &[masked(
+                            3,
+                            0xffff_ffff & !(0x40 | 0x2 | 0x100 | 0x20 | 0x4000),
+                            0,
+                        )],
+                        allow,
+                    )?;
+                }
+                // Socket options: the ones the launcher reads and sets for
+                // itself and passes on for a guest, by level and name.
+                const SOCKET: u64 = 1;
+                const TCP: u64 = 6;
+                for (level, name) in [
+                    (SOCKET, 2),  // SO_REUSEADDR
+                    (SOCKET, 7),  // SO_SNDBUF
+                    (SOCKET, 8),  // SO_RCVBUF
+                    (SOCKET, 9),  // SO_KEEPALIVE
+                    (SOCKET, 20), // SO_RCVTIMEO
+                    (SOCKET, 21), // SO_SNDTIMEO
+                    (TCP, 1),     // TCP_NODELAY
+                    (TCP, 4),     // TCP_KEEPIDLE
+                    (TCP, 5),     // TCP_KEEPINTVL
+                    (TCP, 6),     // TCP_KEEPCNT
+                ] {
+                    rule("setsockopt", &[int(1, level), int(2, name)], allow)?;
+                    rule("getsockopt", &[int(1, level), int(2, name)], allow)?;
+                }
+                for (level, name) in [
+                    (SOCKET, 3),  // SO_TYPE
+                    (SOCKET, 4),  // SO_ERROR
+                    (SOCKET, 30), // SO_ACCEPTCONN
+                    (SOCKET, 38), // SO_PROTOCOL
+                    (SOCKET, 39), // SO_DOMAIN
+                    (0, 2),       // IPPROTO_IP, IP_TTL
+                ] {
+                    rule("getsockopt", &[int(1, level), int(2, name)], allow)?;
+                }
+                // Descriptor control: duplicate, and the descriptor and
+                // status flags. No owner, signal, lock, lease or pipe size.
+                for command in [0, 1, 2, 3, 4, 1030] {
+                    rule("fcntl", &[int(1, command)], allow)?;
+                }
+                // The launcher adds a filter of its own before its guest
+                // first runs (runtime/native/running_filter.inc), which
+                // refuses what only setting up takes. A filter can be added
+                // and never removed: allowing that widens nothing.
+                rule("seccomp", &[eq(0, 1)], allow)?;
+                rule(
+                    "prctl",
+                    &[eq(0, libc::PR_SET_NO_NEW_PRIVS as u64), eq(1, 1)],
+                    allow,
+                )?;
                     if kind == 2 && !dns {
                         continue;
                     }
