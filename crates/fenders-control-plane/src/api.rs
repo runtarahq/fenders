@@ -52,7 +52,28 @@ pub fn router(store: Store) -> Router {
     })
 }
 pub fn management(state: ApiState) -> Router {
-    Router::new().fallback(dispatch).with_state(state)
+    Router::new()
+        .fallback(dispatch)
+        .with_state(state)
+        .layer(axum::middleware::map_response(management_headers))
+}
+
+/// Headers of every answer from the management listener, an error's among
+/// them: the API and a console's pages are served over TLS only, are never
+/// framed by another site, and their content type is not guessed at.
+async fn management_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (header::STRICT_TRANSPORT_SECURITY, "max-age=31536000"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::X_FRAME_OPTIONS, "DENY"),
+        (header::REFERRER_POLICY, "no-referrer"),
+    ] {
+        if !headers.contains_key(&name) {
+            headers.insert(name, header::HeaderValue::from_static(value));
+        }
+    }
+    response
 }
 pub fn internal(store: Store) -> Router {
     Router::new().fallback(internal_dispatch).with_state(store)

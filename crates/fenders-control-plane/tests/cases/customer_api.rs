@@ -816,3 +816,34 @@ async fn a_workspaces_credentials_do_not_see_the_operators_notes_on_it() {
     assert!(all[0]["allowance_revision"].is_number());
     l.finish().await;
 }
+
+/// Every answer of the management listener, refusals included, carries the
+/// headers a browser needs to keep a console's session on TLS and unframed.
+#[tokio::test]
+async fn management_answers_carry_browser_security_headers() {
+    let l = Lab::new().await;
+    for (path, token) in [
+        ("/v1/tenants", Some(l.token.as_str())),
+        ("/v1/tenants", None),
+        ("/api/openapi.json", None),
+        ("/no/such/path", Some(l.token.as_str())),
+    ] {
+        let mut request = Request::builder().uri(path);
+        if let Some(token) = token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        let response = api::router(l.store.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let headers = response.headers();
+        assert_eq!(
+            headers["strict-transport-security"], "max-age=31536000",
+            "{path}"
+        );
+        assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
+        assert_eq!(headers["x-frame-options"], "DENY", "{path}");
+        assert_eq!(headers["referrer-policy"], "no-referrer", "{path}");
+    }
+    l.finish().await;
+}
