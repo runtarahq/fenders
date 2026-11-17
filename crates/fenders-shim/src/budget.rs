@@ -163,7 +163,9 @@ where
     loop {
         let body = unanswered.take().unwrap_or_else(|| {
             serial += 1;
-            json!({"expected_revision": revision, "request_id": format!("{id}-{serial}"), "bytes": bytes})
+            // With what the run has sent, so that the endpoint can hold a
+            // grant to what is yet to be sent.
+            json!({"expected_revision": revision, "request_id": format!("{id}-{serial}"), "bytes": bytes, "sent": meter.borrow().bytes})
         });
         let asked = body["bytes"].as_u64().unwrap_or(0);
         let asked_at = boottime_ns();

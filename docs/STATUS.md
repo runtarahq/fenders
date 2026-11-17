@@ -131,7 +131,9 @@ as both control plane and node.
   lapses within 10 seconds and the run ends as `outbound-grant-expired`.
 - A run alive across the end of a UTC month cannot renew its grant and ends.
 - A running run holds at least 256 KiB of the allowance, and up to 16 MiB
-  more than it has sent, until it ends.
+  more than it has sent, until it ends. The control plane holds it to that:
+  a shim says what its run has sent with each ask, and is granted no more
+  than brings what is unsent to that much.
 - A run whose shim is killed with it has no final total: all it held is
   counted as used.
 - What is counted is payload handed to sockets the guest opened, not packet

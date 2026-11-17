@@ -154,9 +154,11 @@ impl Store {
         generation: i64,
         ask: Value,
     ) -> Result<Value> {
+        // `sent`, which a shim may give, is what the launcher's meter says
+        // the run has sent: a grant is then held to what is yet to be sent.
         crate::db::fields(
             &ask,
-            &["expected_revision", "request_id", "bytes"],
+            &["expected_revision", "request_id", "bytes", "sent"],
             &["expected_revision", "request_id", "bytes"],
         )?;
         let mut tx = self.transaction(false, false).await?;
@@ -171,13 +173,16 @@ impl Store {
         let node = placed["node_id"]
             .as_str()
             .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
-        let request = json!({
+        let mut request = json!({
             "boot_id": placed["boot_id"],
             "action": "grant",
             "expected_revision": ask["expected_revision"],
             "request_id": ask["request_id"],
             "bytes": ask["bytes"],
         });
+        if let Some(sent) = ask.get("sent") {
+            request["sent"] = sent.clone();
+        }
         match self
             .egress_budget(node, execution, generation, request)
             .await

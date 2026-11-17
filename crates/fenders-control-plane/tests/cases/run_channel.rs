@@ -449,6 +449,65 @@ async fn a_launch_under_the_outbound_byte_limit_is_granted_bytes_over_its_run_ch
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(held().await, (0, 5000));
 
+    // A run holds no more than it has yet to send and one grant, whatever
+    // its workspace's allowance has: here, plenty.
+    sqlx::query("UPDATE tenants SET transfer_bytes=1073741824 WHERE id=$1")
+        .bind(&l.tenant)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    const GRANT: i64 = 16 * 1024 * 1024;
+    const MOST_UNSENT: i64 = GRANT + 256 * 1024;
+    let capped = |revision: i64, id: &'static str, sent: i64| {
+        ask(
+            path.clone(),
+            bearer.clone(),
+            json!({"expected_revision":revision,"request_id":id,"bytes":GRANT,"sent":sent}),
+        )
+    };
+    // It has sent nothing and holds 5000: a grant more is within the most.
+    let (status, granted) = capped(3, "cap-1", 0).await;
+    assert_eq!(status, StatusCode::OK, "{granted}");
+    assert_eq!(
+        (n(&granted["revision"]), n(&granted["ceiling_bytes"])),
+        (4, 5000 + GRANT)
+    );
+    // Still nothing sent: given only what brings it to the most. Asked
+    // again as it was, the same answer.
+    for _ in 0..2 {
+        let (status, granted) = capped(4, "cap-2", 0).await;
+        assert_eq!(status, StatusCode::OK, "{granted}");
+        assert_eq!(
+            (n(&granted["revision"]), n(&granted["ceiling_bytes"])),
+            (5, MOST_UNSENT)
+        );
+    }
+    // And then nothing more, though its grant is renewed.
+    let (status, granted) = capped(5, "cap-3", 0).await;
+    assert_eq!(status, StatusCode::OK, "{granted}");
+    assert_eq!(
+        (n(&granted["revision"]), n(&granted["ceiling_bytes"])),
+        (6, MOST_UNSENT)
+    );
+    // A grant's worth sent: a grant's worth more. More said sent than it
+    // could have: counted as all it had.
+    let (status, granted) = capped(6, "cap-4", GRANT).await;
+    assert_eq!(status, StatusCode::OK, "{granted}");
+    assert_eq!(n(&granted["ceiling_bytes"]), MOST_UNSENT + GRANT);
+    let (status, granted) = capped(7, "cap-5", i64::MAX).await;
+    assert_eq!(status, StatusCode::OK, "{granted}");
+    assert_eq!(n(&granted["ceiling_bytes"]), MOST_UNSENT + 2 * GRANT);
+    assert_eq!(
+        ask(
+            path.clone(),
+            bearer.clone(),
+            json!({"expected_revision":8,"request_id":"cap-6","bytes":1,"sent":-1})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+
     // The run ends having sent 1234 bytes: those are used, the rest released,
     // and its credential is granted nothing more.
     l.store.heartbeat(node, json!({"boot_id":"test-boot","confinement":HOST_CONFINEMENT,"egress_budget_contract":CONTRACT,"launcher_digest":LAUNCHER,"reports":[
@@ -456,7 +515,7 @@ async fn a_launch_under_the_outbound_byte_limit_is_granted_bytes_over_its_run_ch
          "egress":{"contract":"socket-payload-v1","boot_id":"test-boot","bytes":1234,"in_flight":0,"complete":true,"observed":chrono::Utc::now().timestamp_micros() as f64/1e6},
          "egress_authority":{"contract":CONTRACT,"boot_id":"test-boot","launcher_digest":LAUNCHER}}]})).await.unwrap();
     assert_eq!(held().await, (1234, 0));
-    assert_eq!(grant(3, "shim-7", 1).await.0, StatusCode::CONFLICT);
+    assert_eq!(grant(8, "shim-7", 1).await.0, StatusCode::CONFLICT);
     l.finish().await;
 }
 
