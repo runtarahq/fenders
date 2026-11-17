@@ -77,7 +77,7 @@ fn every_check_the_status_page_names_exists() {
     let scripts = named(status, "scripts/", |c| {
         c.is_ascii_alphanumeric() || "_-./".contains(c)
     });
-    assert!(!scripts.is_empty());
+    assert!(scripts.len() > 10);
     for script in scripts {
         let script = script.trim_end_matches('.');
         assert!(root.join(script).is_file(), "{script} does not exist");

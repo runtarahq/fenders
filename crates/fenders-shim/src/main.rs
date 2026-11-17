@@ -1347,6 +1347,15 @@ async fn supervise(
             "permanent",
             "the guest exited without posting an outcome".to_owned(),
         )
+    } else if exit_code == Some(3) {
+        // Not a guest that failed: one that stepped outside what the
+        // launcher gives a guest, and was ended for it.
+        (
+            "failed",
+            "GUEST_VIOLATION",
+            "permanent",
+            "the guest broke the launcher's interface and was ended (exit 3)".to_owned(),
+        )
     } else if exit_code == Some(2) {
         (
             "failed",

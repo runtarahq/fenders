@@ -34,7 +34,7 @@ static void *run_virtual_thread(void *arg) {
         if(run->exit_reason==KVM_EXIT_IO && run->io.direction==KVM_EXIT_IO_OUT && run->io.port==0x510 && run->io.size==4 && run->io.count==1) {
             regs.rax=syscall_guest(thread->cpu,&regs);CHECK(ioctl(thread->cpu,KVM_SET_REGS,&regs));continue;
         }
-        fprintf(DIAGNOSTICS,"unexpected KVM exit %u tid=%u rip=%llx\n",run->exit_reason,thread->tid,(unsigned long long)regs.rip);exit(1);
+        fprintf(DIAGNOSTICS,"unexpected KVM exit %u tid=%u rip=%llx\n",run->exit_reason,thread->tid,(unsigned long long)regs.rip);exit(GUEST_VIOLATION);
     }
 }
 static long clone_virtual_thread(int parent,struct kvm_regs *regs,uint64_t flags,uint64_t stack,uint64_t ptid,uint64_t ctid,uint64_t tls) {

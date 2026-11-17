@@ -76,6 +76,10 @@ __attribute__((noreturn)) static void exit_once(int code) {
     (exit)(code);
 }
 #define exit(code) exit_once(code)
+// The launcher's exit status when a guest steps outside what it is given (a
+// pointer beyond its memory, an exit from the VM that is not its one way
+// out): apart from 1, a guest that failed, and 2, a refused configuration.
+#define GUEST_VIOLATION 3
 #include "diagnostics.inc"
 static void fail(const char *msg) {fprintf(DIAGNOSTICS,"%s: %s\n",msg,strerror(errno));exit(1);}
 #define CHECK(x) do {if((x)<0) fail(#x);} while(0)
@@ -141,7 +145,7 @@ static void calibrate_clock(int cpu) {
     __atomic_store_n(&page->valid,valid,__ATOMIC_RELEASE);
 }
 static void *ptr(uint64_t address,size_t size) {
-    if(address>ram || size>ram-address) {fprintf(DIAGNOSTICS,"invalid guest pointer\n");exit(1);}
+    if(address>ram || size>ram-address) {fprintf(DIAGNOSTICS,"invalid guest pointer\n");exit(GUEST_VIOLATION);}
     return mem+address;
 }
 static void reserve_pages(uint64_t address,size_t size) {
@@ -539,7 +543,14 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 291: return guest_fd(epoll_create1(a));
     case 318: if(b>4096)return -EINVAL;return result(getrandom(ptr(a,b),b,c));
     case 334: return -ENOSYS;
-    default: fprintf(DIAGNOSTICS,"unsupported syscall %llu\n",(unsigned long long)n);return -ENOSYS;
+    default: {
+        // Said once for each call number, and once for all past the table:
+        // a guest cannot fill its launcher's messages by repeating one.
+        static _Atomic uint64_t said[8];
+        uint64_t slot=n<448?n:448+(n&63),bit=1ull<<(slot&63);
+        if(!(atomic_fetch_or(&said[slot>>6],bit)&bit))fprintf(DIAGNOSTICS,"unsupported syscall %llu\n",(unsigned long long)n);
+        return -ENOSYS;
+    }
     }
 }
 static long syscall_guest(int cpu,struct kvm_regs *r) {
