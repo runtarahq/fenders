@@ -249,8 +249,45 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             segments.as_slice(),
             ["v1", "tenants", _, "projects", _, "artifacts"]
         );
-    let bytes: Bytes = to_bytes(body, if is_upload { MAX_UPLOAD } else { 64 * 1024 })
+    // An upload's body is held whole, up to 16 MiB of it. Before any of it
+    // is read: the credential must be one that may upload there, the body
+    // must say it fits, and its workspace and the control plane must have a
+    // place for one more.
+    let limit = if is_upload { MAX_UPLOAD } else { 64 * 1024 };
+    let _uploading = if let ["v1", "tenants", tenant, "projects", project, "artifacts"] =
+        segments.as_slice()
+        && is_upload
+    {
+        p.scope(tenant, Some(project), true, false)?;
+        Some(UPLOADS.begin(tenant).ok_or_else(|| {
+            Error::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many uploads in progress",
+            )
+        })?)
+    } else {
+        None
+    };
+    if parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some_and(|length| length > limit)
+    {
+        return Err(Error::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body too large",
+        ));
+    }
+    let bytes: Bytes = tokio::time::timeout(BODY_WITHIN, to_bytes(body, limit))
         .await
+        .map_err(|_| {
+            Error::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "request body not received in time",
+            )
+        })?
         .map_err(|_| Error::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"))?;
     if (public_api || p.api_permissions.is_some())
         && matches!(
@@ -1520,6 +1557,54 @@ async fn gateway_dispatch_tracked(
                 state.store.ingress_finish(&lease, Some(used)).await?;
             }
             Err(error)
+        }
+    }
+}
+
+/// How long a management request's body may take to arrive.
+const BODY_WITHIN: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Uploads whose bodies are being received: each may hold 16 MiB.
+static UPLOADS: Uploads = Uploads {
+    receiving: std::sync::Mutex::new(None),
+};
+
+struct Uploads {
+    /// For each workspace with any, how many.
+    receiving: std::sync::Mutex<Option<std::collections::HashMap<String, usize>>>,
+}
+
+/// One upload being received; no longer counted when dropped.
+struct Uploading(String);
+
+impl Uploads {
+    /// Uploads received at once, and for one workspace.
+    const MOST: usize = 16;
+    const MOST_OF_ONE: usize = 4;
+
+    fn begin(&'static self, tenant: &str) -> Option<Uploading> {
+        let mut receiving = self.receiving.lock().unwrap_or_else(|e| e.into_inner());
+        let receiving = receiving.get_or_insert_with(Default::default);
+        if receiving.values().sum::<usize>() >= Self::MOST
+            || receiving.get(tenant).copied().unwrap_or(0) >= Self::MOST_OF_ONE
+        {
+            return None;
+        }
+        *receiving.entry(tenant.to_owned()).or_default() += 1;
+        Some(Uploading(tenant.to_owned()))
+    }
+}
+
+impl Drop for Uploading {
+    fn drop(&mut self) {
+        let mut receiving = UPLOADS.receiving.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(receiving) = receiving.as_mut()
+            && let Some(count) = receiving.get_mut(&self.0)
+        {
+            *count -= 1;
+            if *count == 0 {
+                receiving.remove(&self.0);
+            }
         }
     }
 }

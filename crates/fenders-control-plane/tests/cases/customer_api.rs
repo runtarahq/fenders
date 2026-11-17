@@ -583,3 +583,81 @@ async fn credentials_end_with_whoever_issued_them() {
     assert!(l.store.authenticate(s(&long["token"])).await.is_ok());
     l.finish().await;
 }
+
+/// An upload's body may be 16 MiB and is held whole. None of it is read for
+/// a credential that may not upload there, or when it says it is too large.
+#[tokio::test]
+async fn an_uploads_body_is_not_read_for_a_credential_that_may_not_upload_there() {
+    let l = Lab::new().await;
+    let (_, viewer) = l.credential("viewer", None).await;
+    let (_, editor) = l.credential("editor", None).await;
+    let upload = |token: String, tenant: String, declared: Option<usize>| {
+        let router = api::router(l.store.clone());
+        let project = l.project.clone();
+        async move {
+            // A body that records being asked for its first piece.
+            let read = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let asked = read.clone();
+            let body = Body::new(Asked(Some(move || {
+                asked.store(true, std::sync::atomic::Ordering::SeqCst);
+            })));
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(format!("/v1/tenants/{tenant}/projects/{project}/artifacts"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/wasm");
+            if let Some(declared) = declared {
+                request = request.header("Content-Length", declared);
+            }
+            let status = router
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap()
+                .status();
+            (status, read.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    };
+    // Another workspace, a read-only credential, a body that says it is too
+    // large: refused with nothing read.
+    assert_eq!(
+        upload(s(&editor["token"]).to_owned(), uid(), None).await,
+        (StatusCode::NOT_FOUND, false)
+    );
+    assert_eq!(
+        upload(s(&viewer["token"]).to_owned(), l.tenant.clone(), None).await,
+        (StatusCode::FORBIDDEN, false)
+    );
+    assert_eq!(
+        upload(
+            s(&editor["token"]).to_owned(),
+            l.tenant.clone(),
+            Some(17 << 20)
+        )
+        .await,
+        (StatusCode::PAYLOAD_TOO_LARGE, false)
+    );
+    // One that may upload there is read (and refused for what it holds).
+    assert_eq!(
+        upload(s(&editor["token"]).to_owned(), l.tenant.clone(), None).await,
+        (StatusCode::BAD_REQUEST, true)
+    );
+    l.finish().await;
+}
+
+/// A body of one small piece, calling `asked` when it is first polled.
+struct Asked<F>(Option<F>);
+impl<F: FnOnce() + Unpin> http_body::Body for Asked<F> {
+    type Data = axum::body::Bytes;
+    type Error = std::convert::Infallible;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        std::task::Poll::Ready(self.0.take().map(|asked| {
+            asked();
+            Ok(http_body::Frame::data(axum::body::Bytes::from_static(
+                b"not wasm",
+            )))
+        }))
+    }
+}
