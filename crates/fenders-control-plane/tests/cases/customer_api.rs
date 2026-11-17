@@ -296,6 +296,24 @@ async fn customer_api_secret_retries_do_not_tell_a_guess_and_expired_keys_fail()
         call(&l, token, "POST", &route, body, "secret").await.1,
         created
     );
+    // A value of a few bytes would mask those bytes wherever they appear in
+    // a run's output: refused.
+    for short in ["", "1", "yes"] {
+        assert_eq!(
+            call(
+                &l,
+                token,
+                "POST",
+                &route,
+                json!({"name":"short","value":short}),
+                &uid()
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST,
+            "{short:?}"
+        );
+    }
     // A retry with another value is answered as the first was: whether it
     // matched the stored value is not something a caller is told. The
     // secret keeps the value it was created with.
@@ -708,7 +726,7 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
                 &l.operator,
                 &l.tenant,
                 &l.project,
-                json!({"name":"more","value":"v"})
+                json!({"name":"more","value":"value"})
             )
             .await
             .unwrap_err()
@@ -747,7 +765,7 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
             token,
             "POST",
             &path,
-            json!({"name":"x","value":"v"}),
+            json!({"name":"x","value":"value"}),
             "",
         )
         .await
@@ -759,7 +777,7 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
         token,
         "POST",
         &path,
-        json!({"name":"x","value":"v"}),
+        json!({"name":"x","value":"value"}),
         "",
     )
     .await;
@@ -776,7 +794,7 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
             &l.token,
             "POST",
             &path,
-            json!({"name":"x","value":"v"}),
+            json!({"name":"x","value":"value"}),
             ""
         )
         .await

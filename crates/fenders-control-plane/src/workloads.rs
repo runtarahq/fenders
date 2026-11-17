@@ -9,6 +9,15 @@ use axum::http::StatusCode;
 pub use fenders_node_protocol::workloads::*;
 use serde_json::{Value, json};
 
+/// The shortest value a secret may have.
+const MIN_SECRET_BYTES: usize = 4;
+/// Whether `plain` may be a secret's value: long enough that masking it in
+/// a run's output does not mask the output, no longer than a value is, and
+/// without NUL.
+fn secret_value_fits(plain: &str) -> bool {
+    (MIN_SECRET_BYTES..=1024).contains(&plain.len()) && !plain.contains('\0')
+}
+
 impl Store {
     pub(crate) async fn idem(
         tx: &mut Tx,
@@ -84,8 +93,14 @@ impl Store {
         fields(&value, &["name", "value"], &["name", "value"])?;
         named(&value["name"])?;
         let plain = text(&value["value"])?;
-        if plain.len() > 1024 || plain.contains('\0') {
-            return Err(Error::invalid("invalid secret value"));
+        // A secret's value is masked wherever it appears in its runs' output.
+        // One of a few bytes would mask those bytes everywhere in it, which
+        // hides the output and shows where the value is: such a value is not
+        // a secret worth storing, and is refused.
+        if !secret_value_fits(plain) {
+            return Err(Error::invalid(
+                "invalid secret value: 4 to 1024 bytes, without NUL",
+            ));
         }
         let mut tx = self.transaction(true, false).await?;
         Self::project(&mut tx, p, tenant, project, true).await?;
@@ -456,5 +471,22 @@ impl Store {
         self.reclaim_orphan_uploads().await?;
         self.websocket_sweep().await?;
         Ok(())
+    }
+}
+#[cfg(test)]
+mod secret_value_tests {
+    use super::secret_value_fits;
+
+    #[test]
+    fn a_secrets_value_is_at_least_four_bytes() {
+        for short in ["", "a", "ab", "abc"] {
+            assert!(!secret_value_fits(short), "{short:?}");
+        }
+        assert!(secret_value_fits("abcd"));
+        assert!(secret_value_fits(&"x".repeat(1024)));
+        assert!(!secret_value_fits(&"x".repeat(1025)));
+        assert!(!secret_value_fits("ab\0cd"));
+        // Bytes, not characters: two letters of two bytes each are four.
+        assert!(secret_value_fits("éé"));
     }
 }

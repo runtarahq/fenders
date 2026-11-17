@@ -95,7 +95,9 @@ as both control plane and node.
 - Output is stored in the control plane's PostgreSQL: at most 1 MiB a run and
   64 MiB a tenant, for 7 days.
 - Masking is of literal values; a program that encodes a secret before
-  printing it is not caught. The node is trusted to mask, as it is trusted
+  printing it is not caught. A secret is at least 4 bytes, so that masking
+  one does not blank its output; one stored before that limit is masked as
+  it is. The node is trusted to mask, as it is trusted
   with the secrets themselves.
 - Following lags by about 200 ms and polls; nothing is pushed.
 - The output of a run that was stopped is not closed by its shim, so it reads
