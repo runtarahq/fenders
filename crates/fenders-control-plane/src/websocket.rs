@@ -263,11 +263,51 @@ pub async fn accept(state: ApiState, host: String, request: Request) -> Result<R
             "too many connections are open",
         ));
     };
+    // The connection has a place now. It is given up when the connection is
+    // served to its end, and also when it never is: recording it fails, this
+    // call is dropped with its client, or the upgrade is not completed.
+    let held = held(state.clone(), &host, &id);
     state.store.websocket_opened(&id, &app.0, &path).await?;
     Ok(upgrade
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_MESSAGE)
-        .on_upgrade(move |socket| serve(state, host, id, socket, pushed)))
+        .on_upgrade(move |socket| serve(state, host, id, socket, pushed, held)))
+}
+
+/// An open connection's place among those of its app and workspace. Dropped
+/// before the connection was served, it gives the place back, closes its
+/// record and tells the app the client is gone, as the end of serving does.
+pub struct Held {
+    state: ApiState,
+    host: String,
+    id: String,
+    served: bool,
+}
+
+/// The place of connection `id`, which [`Sockets::open`] opened. Public for
+/// tests, which stand in for a client that goes away before its upgrade.
+#[doc(hidden)]
+pub fn held(state: ApiState, host: &str, id: &str) -> Held {
+    Held {
+        state,
+        host: host.to_owned(),
+        id: id.to_owned(),
+        served: false,
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.state.store.sockets.closed(&self.id);
+        if self.served {
+            return;
+        }
+        let (state, host, id) = (self.state.clone(), self.host.clone(), self.id.clone());
+        tokio::spawn(async move {
+            let _ = state.store.websocket_closed(&id, [0; 4]).await;
+            let _ = event(&state, &host, &id, "disconnect", None, None, Bytes::new()).await;
+        });
+    }
 }
 
 /// Serves one connection until it closes.
@@ -277,7 +317,10 @@ async fn serve(
     id: String,
     mut socket: WebSocket,
     mut pushed: mpsc::Receiver<Push>,
+    mut held: Held,
 ) {
+    // Served from here: this function closes it.
+    held.served = true;
     let closing = |code: u16, reason: &'static str| {
         Message::Close(Some(CloseFrame {
             code,
@@ -369,7 +412,7 @@ async fn serve(
             }
         }
     }
-    state.store.sockets.closed(&id);
+    drop(held);
     // A message still with the app is seen to its end: dropping it would
     // leave its request unsettled until its reservation lapsed.
     if let Some(answer) = answering {

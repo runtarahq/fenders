@@ -1721,6 +1721,47 @@ async fn an_apps_executions_send_to_its_websocket_connections_and_no_others() {
                 .status()
         }
     };
+    // A connection that was opened and never served (its client went away
+    // before the upgrade, or recording it failed) gives its place back and
+    // its record is closed: it does not count against the app for ever.
+    let abandoned = "f".repeat(32);
+    let before = l.store.sockets.list(&sockets).len();
+    assert!(
+        l.store
+            .sockets
+            .open(&abandoned, &sockets, &l.tenant, &l.project)
+            .is_some()
+    );
+    l.store
+        .websocket_opened(&abandoned, &sockets, "/abandoned")
+        .await
+        .unwrap();
+    assert_eq!(l.store.sockets.list(&sockets).len(), before + 1);
+    drop(fenders_control_plane::websocket::held(
+        api::ApiState {
+            store: l.store.clone(),
+            domain: "apps.test".into(),
+            tls: None,
+        },
+        &format!("app-{sockets}.apps.test"),
+        &abandoned,
+    ));
+    assert_eq!(l.store.sockets.list(&sockets).len(), before);
+    let mut finished = false;
+    for _ in 0..200 {
+        finished =
+            sqlx::query_scalar("SELECT finished_at IS NOT NULL FROM app_http_runs WHERE id=$1")
+                .bind(&abandoned)
+                .fetch_one(&l.store.pool)
+                .await
+                .unwrap();
+        if finished {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(finished, "an abandoned connection's record is closed");
+
     assert_eq!(
         ask(&sockets, "/_fenders/ws/message", false).await,
         StatusCode::NOT_FOUND
