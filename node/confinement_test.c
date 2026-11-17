@@ -74,6 +74,18 @@ int main(int argc,char **argv) {
         int second=open(path,O_RDONLY|O_CLOEXEC);CHECK(second>=0);
         CHECK(read(second,data,4)==4 && !memcmp(data,"test",4));close(second);close(fd);
         puts("PASS native resolver memfd reopening remains usable");
+        // Socket calls the launcher does not make: none passes a descriptor
+        // or takes a connection it was not handed.
+        int ends[2]={0,1};
+        fd=socket(AF_INET,SOCK_STREAM,0);CHECK(fd>=0);
+        struct msghdr message={0};
+        CHECK(sendmsg(fd,&message,0)==-1 && errno==EPERM);
+        CHECK(recvmsg(fd,&message,0)==-1 && errno==EPERM);
+        CHECK(listen(fd,1)==-1 && errno==EPERM);
+        CHECK(syscall(SYS_accept,fd,NULL,NULL)==-1 && errno==EPERM);
+        CHECK(syscall(SYS_socketpair,AF_UNIX,SOCK_STREAM,0,ends)==-1 && errno==EPERM);
+        close(fd);
+        puts("PASS VMM has no sendmsg, recvmsg, listen, accept or socketpair");
     }
     return 0;
 }

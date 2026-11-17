@@ -802,14 +802,13 @@ fn start(
             .unwrap_or_default()
     };
     let tcp = list("tcp_allow");
-    let mut ports: Vec<String> = tcp
+    let ports: Vec<String> = tcp
         .iter()
         .filter_map(|a| a.rsplit_once(':').map(|(_, p)| p.to_owned()))
         .collect();
+    // Name lookups are datagrams, which the launcher sends to the resolver
+    // alone: no TCP port is opened for them.
     let dns = guest["dns_server"].is_string();
-    if dns {
-        ports.push("53".into());
-    }
     let mut command = Command::new("/proc/self/exe");
     command
         .arg("vmm")

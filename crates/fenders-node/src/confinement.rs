@@ -234,7 +234,13 @@ fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
                     &[eq(0, libc::PR_SET_DUMPABLE as u64), eq(1, 0)],
                     allow,
                 )?;
-                for name in "accept accept4 connect bind shutdown sendto recvfrom sendmsg recvmsg getsockname getpeername getsockopt setsockopt memfd_create".split_whitespace(){rule(name,&[],allow)?;}
+                // What the launcher calls on sockets, and no more: it accepts
+                // with accept4 and sends and receives with sendto and
+                // recvfrom, never with accept, sendmsg or recvmsg (which
+                // would also pass descriptors).
+                for name in "accept4 connect bind shutdown sendto recvfrom getsockname getpeername getsockopt setsockopt memfd_create".split_whitespace() {
+                    rule(name, &[], allow)?;
+                }
                 for (kind, protocols) in [(1, [0, 6]), (2, [0, 17])] {
                     if kind == 2 && !dns {
                         continue;
