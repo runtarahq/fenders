@@ -1118,6 +1118,15 @@ async fn internal_dispatch(State(store): State<Store>, req: Request) -> Result<R
         let data = to_bytes(body, 1024 * 1024)
             .await
             .map_err(|_| Error::new(StatusCode::PAYLOAD_TOO_LARGE, "heartbeat too large"))?;
+        // One heartbeat of a node at a time, and one more waiting: each is
+        // a transaction under the lock every mutation shares, and a node
+        // that sent many at once would hold that lock from everyone.
+        let _turn = store.node_turns.take(node).await.ok_or_else(|| {
+            Error::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "a heartbeat of this node is already waiting",
+            )
+        })?;
         let assignments = store.heartbeat(node, parse(&data)?).await?;
         let (prewarm, prewarm_scopes) = store.prewarm_offer(node).await?;
         return Ok(Json(

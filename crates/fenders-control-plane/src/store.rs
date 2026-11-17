@@ -58,6 +58,8 @@ pub struct Store {
     pub sockets: std::sync::Arc<crate::websocket::Sockets>,
     /// How many requests each workspace was admitted lately.
     pub http_rates: std::sync::Arc<crate::ingress::Rates>,
+    /// One heartbeat of each node at a time.
+    pub node_turns: std::sync::Arc<crate::nodes::NodeTurns>,
     /// Mutating management requests admitted for each workspace.
     pub api_rates: std::sync::Arc<crate::ingress::Rates>,
     /// Whose each gateway host name is, for refusing without a transaction.
@@ -175,6 +177,7 @@ impl Store {
             http_rates: Default::default(),
             ingress_hosts: Default::default(),
             api_rates: Default::default(),
+            node_turns: Default::default(),
             sockets: Default::default(),
             refuse_unserved: false,
             assets: &[],
