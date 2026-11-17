@@ -24,13 +24,17 @@
 # from as the approved one, so every run with a connection sends only what
 # the workspace's transfer allowance grants. LOCAL_EGRESS_BUDGET=0 on `up`
 # runs the node without it, and such runs then go unlimited.
+# A product that wraps the control plane uses this script with its own
+# binaries: LOCAL_BIN (the directory with fenders-control-plane and
+# fenders-pki), LOCAL_BUILD (the node bundle), LOCAL_STATE (instead of
+# run/local) and LOCAL_CONTROL_ARGS (further control-plane options).
 # For development only: one self-made CA, an operator token on disk,
 # everything on 127.0.0.1.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-state=$repo/run/local
-build=$repo/build/node
-bin=$repo/target/release
+state=${LOCAL_STATE:-$repo/run/local}
+build=${LOCAL_BUILD:-$repo/build/node}
+bin=${LOCAL_BIN:-$repo/target/release}
 stage=/var/lib/fenders-local
 cgroup=/sys/fs/cgroup/fenders-local
 pg=fenders-local-pg
@@ -62,7 +66,7 @@ start_control() {
     --run-channel-port $channel_port --run-channel-endpoint "https://127.0.0.1:$channel_port" \
     --ca "$state/pki/ca.pem" --cert "$state/pki/control.pem" --key "$state/pki/control.key" \
     --external-network "$state/external-network.json" --public-egress "$state/public-egress.json" \
-    >> "$state/control.log" 2>&1 < /dev/null &
+    ${LOCAL_CONTROL_ARGS:-} >> "$state/control.log" 2>&1 < /dev/null &
   echo $! > "$state/control.pid"
   until [[ -s $state/control/operator.token ]] && curl -s --cacert "$state/pki/ca.pem" -o /dev/null "$manage/"; do
     running "$state/control.pid" || { tail -5 "$state/control.log" >&2; exit 1; }
