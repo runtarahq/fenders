@@ -84,6 +84,10 @@ impl InvitationMailer {
         role: &str,
         scope: &str,
     ) -> Result<()> {
+        // A workspace and its projects are named by whoever invites, and this
+        // mail goes out under the operator's own address: the names appear in
+        // it as words, never as something a mail client makes into a link.
+        let (workspace, scope) = (&plain_name(workspace), &plain_name(scope));
         // The link identifies a request, not a credential. Verified-email ownership
         // and a fresh explicit decision are still required by the customer API.
         let message = Message::builder().from(self.from.clone())
@@ -97,5 +101,53 @@ impl InvitationMailer {
             // Do not log provider replies, credentials, or recipient addresses.
             _ => Err(Error::invalid("invitation email delivery failed")),
         }
+    }
+}
+
+/// `name` as words in a mail: letters, digits, spaces and a little
+/// punctuation, at most 80 characters. Dots, slashes, colons and `@`, which a
+/// mail client turns into links and addresses, are left out, so a name such
+/// as `Verify at https://example.test/x` names nothing to follow.
+fn plain_name(name: &str) -> String {
+    let kept: String = name
+        .chars()
+        .filter(|c| {
+            c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '\'' | '&' | '(' | ')' | ',')
+        })
+        .take(80)
+        .collect();
+    let kept = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    if kept.is_empty() {
+        "a workspace".to_owned()
+    } else {
+        kept
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_name;
+
+    #[test]
+    fn a_name_in_an_invitation_is_words_and_never_a_link() {
+        assert_eq!(plain_name("Acme Research (EU)"), "Acme Research (EU)");
+        assert_eq!(plain_name("Billing & Ops, team-2"), "Billing & Ops, team-2");
+        assert_eq!(plain_name("Zo\u{eb} K\u{f6}nig"), "Zo\u{eb} K\u{f6}nig");
+        for hostile in [
+            "Acme - verify now at https://evil.example/f",
+            "www.evil.example",
+            "security@evil.example",
+            "evil.example/login?next=1",
+            "line one\r\nBcc: other@example.test",
+        ] {
+            let shown = plain_name(hostile);
+            assert!(
+                !shown.contains(['.', '/', ':', '@', '?', '=', '\r', '\n']),
+                "{hostile} -> {shown}"
+            );
+        }
+        assert_eq!(plain_name("https://"), "https");
+        assert_eq!(plain_name("..//::"), "a workspace");
+        assert_eq!(plain_name(&"x".repeat(500)).chars().count(), 80);
     }
 }
