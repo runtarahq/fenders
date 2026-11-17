@@ -190,7 +190,9 @@ static uint64_t allocate(size_t size,int prot) {
 // following pages are free, else move (MREMAP_MAYMOVE) by copying. Growing in
 // place keeps a growing allocation from holding its old and new copies at once.
 static long remap_unlocked(uint64_t old,uint64_t old_size,uint64_t new_size,uint64_t flags) {
-    if(old%PAGE || !old_size || !new_size || (flags&~(uint64_t)MREMAP_MAYMOVE))return -EINVAL;
+    // Sizes over the guest's memory are refused before they are rounded up
+    // to pages, where one near 2^64 would wrap to none.
+    if(old%PAGE || !old_size || !new_size || old_size>ram || new_size>ram || (flags&~(uint64_t)MREMAP_MAYMOVE))return -EINVAL;
     uint64_t first=old/PAGE,old_pages=(old_size+PAGE-1)/PAGE,new_pages=(new_size+PAGE-1)/PAGE,limit=page_tables/PAGE;
     if(old<image_end || first>=limit || old_pages>limit-first || new_pages>ram/PAGE)return -EINVAL;
     for(uint64_t p=first;p<first+old_pages;p++)if(!used[p])return -EFAULT;
@@ -232,17 +234,22 @@ static void hold_start(void) {
     }
     hold_fd=(int)fd;
 }
+// One opener takes the pipe: two guest threads opening it at once would
+// otherwise both read it and both close its descriptor, the second closing
+// whatever another thread had been given that number since.
+static pthread_mutex_t hold_lock=PTHREAD_MUTEX_INITIALIZER;
 static int held_go(void) {
-    if(hold_fd<0)return -ENOENT;
+    pthread_mutex_lock(&hold_lock);int held=hold_fd;hold_fd=-1;pthread_mutex_unlock(&hold_lock);
+    if(held<0)return -ENOENT;
     char data[4096];size_t len=0;
     for(;;) {
-        ssize_t n=read(hold_fd,data+len,sizeof(data)-len);
+        ssize_t n=read(held,data+len,sizeof(data)-len);
         if(n<0 && errno==EINTR)continue;
-        if(n<0){int error=errno;close(hold_fd);hold_fd=-1;return -error;}
+        if(n<0){int error=errno;close(held);return -error;}
         if(n==0)break;
-        len+=(size_t)n;if(len==sizeof(data)){close(hold_fd);hold_fd=-1;return -E2BIG;}
+        len+=(size_t)n;if(len==sizeof(data)){close(held);return -E2BIG;}
     }
-    close(hold_fd);hold_fd=-1;
+    close(held);
     int fd=memfd_create("fenders-go",MFD_CLOEXEC);if(fd<0)return -errno;
     if(len && write(fd,data,len)!=(ssize_t)len){close(fd);return -EIO;}
     char path[64];snprintf(path,sizeof(path),"/proc/self/fd/%d",fd);
@@ -263,6 +270,7 @@ static int virtual_config_file(const char *name) {
 }
 #include "filesystem.inc"
 #include "network.inc"
+#include "guest_args.inc"
 static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     uint64_t n=r->rax,a=r->rdi,b=r->rsi,c=*(uint64_t *)ptr(r->rsp,8),d=r->r10;
     ++syscall_count;
@@ -312,7 +320,9 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
         if(b>64)return -EINVAL;
         struct pollfd *guest=ptr(a,b*sizeof(struct pollfd)),fds[64];
         memcpy(fds,guest,b*sizeof(*fds));
-        for(unsigned i=0;i<b;i++) fds[i].fd=guest[i].fd>=0 && guest[i].fd<=2?guest[i].fd:host_fd((uint64_t)guest[i].fd);
+        // From the copy alone: the guest's own array can change under
+        // another of its threads between a check and a use.
+        for(unsigned i=0;i<b;i++){int wanted=fds[i].fd;fds[i].fd=wanted>=0 && wanted<=2?wanted:host_fd((uint64_t)wanted);}
         int rc=poll(fds,b,(int)c);
         if(rc<0)return -errno;
         for(unsigned i=0;i<b;i++)guest[i].revents=fds[i].revents;
@@ -405,12 +415,14 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
         return network_connect(a,&addr);
     }
     case 44: {
+        if(!message_flags_permitted(d))return -EINVAL;
         if(!r->r8 && !r->r9)return network_send(a,ptr(b,c),c,d);
         if(r->r9!=sizeof(struct sockaddr_in))return -EINVAL;
         struct sockaddr_in addr;memcpy(&addr,ptr(r->r8,sizeof(addr)),sizeof(addr));
         return network_sendto(a,ptr(b,c),c,d,&addr);
     }
     case 45: {
+        if(!message_flags_permitted(d))return -EINVAL;
         if(!r->r8 && !r->r9)return result(recv(host_fd(a),ptr(b,c),c,d));
         if(!r->r8 || !r->r9)return -EINVAL;
         socklen_t size=*(uint32_t *)ptr(r->r9,4);if(size>128)return -EINVAL;
@@ -445,6 +457,7 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
         return result(setsockopt(host_fd(a),b,c,ptr(d,sizeof(int)),sizeof(int)));
     }
     case 55: {
+        if(!socket_option_readable(b,c))return -ENOPROTOOPT;
         socklen_t size=*(uint32_t *)ptr(r->r8,4);if(size>256)return -EINVAL;
         int rc=getsockopt(host_fd(a),b,c,ptr(d,size),&size);*(uint32_t *)ptr(r->r8,4)=size;return result(rc);
     }
@@ -462,6 +475,9 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
         if(b==F_DUPFD || b==F_DUPFD_CLOEXEC)return guest_duplicate(a,b);
         if(b==F_GETFD || b==F_GETFL)return result(fcntl(fd,b));
         if(b==F_SETFD && !(c&~FD_CLOEXEC))return result(fcntl(fd,b,c));
+        // Standard output and error are the launcher's own too: a guest
+        // does not change how they block or append.
+        if(b==F_SETFL && a<=2)return 0;
         if(b==F_SETFL && !(c&~(O_NONBLOCK|O_APPEND|O_ACCMODE|O_DIRECTORY|O_NOFOLLOW|O_SYNC|O_DSYNC|0x8000)))return result(fcntl(fd,b,c));
         return -EINVAL;
     }
@@ -480,7 +496,7 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
         return result(syscall(SYS_futex,ptr(a,4),b,c,timeout,NULL,r->r9));
     }
     case 157: if(a==15){ptr(b,16);return 0;}return -ENOSYS;
-    case 228: return result(clock_gettime(a,ptr(b,sizeof(struct timespec))));
+    case 228: if(!clock_permitted(a))return -EINVAL;return result(clock_gettime(a,ptr(b,sizeof(struct timespec))));
     case 281: case 232: if(b>ram || !c || c>1024)return -EINVAL;return result(epoll_wait(host_fd(a),ptr(b,c*sizeof(struct epoll_event)),c,(int)d));
     case 233: return result(epoll_ctl(host_fd(a),b,host_fd(c),d?ptr(d,sizeof(struct epoll_event)):NULL));
     case 273: return 0;
