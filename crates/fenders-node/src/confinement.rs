@@ -128,6 +128,36 @@ fn landlock_scoped(paths: &[(PathBuf, u64)], ports: &[u16], scoped: u64) -> Resu
     check(unsafe { libc::syscall(446, guard.0, 0) })?;
     Ok(abi)
 }
+/// Gives this process a core-scheduling cookie of its own, which its threads
+/// and children inherit: the kernel then never runs it on one hardware
+/// thread of a core while a process with another cookie (another run's VM,
+/// or the node itself) runs on the core's other thread. Two guests in ring 0
+/// on sibling threads share what the threads share; this is what keeps them
+/// off each other's core at the same moment, at the cost of the sibling
+/// standing idle when no thread of the same run wants it.
+///
+/// `Ok(false)` where there is nothing to do it with: a host without
+/// simultaneous multithreading, or a kernel built without core scheduling.
+pub fn core_alone() -> std::io::Result<bool> {
+    // PR_SCHED_CORE, PR_SCHED_CORE_CREATE, this process, its whole thread group.
+    if unsafe { libc::prctl(62, 1, 0, 1, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENODEV) | Some(libc::EINVAL) => Ok(false),
+        _ => Err(error),
+    }
+}
+/// The core-scheduling cookie of `pid` (0 for this thread): 0 when it has none.
+pub fn core_cookie(pid: libc::pid_t) -> std::io::Result<u64> {
+    let mut cookie = 0u64;
+    // PR_SCHED_CORE, PR_SCHED_CORE_GET, the one task.
+    match unsafe { libc::prctl(62, 0, pid, 0, &mut cookie as *mut u64) } {
+        0 => Ok(cookie),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
 /// Every KVM `ioctl` request the launcher makes: `linux/kvm.h` on x86-64.
 const VMM_KVM_REQUESTS: &[u64] = &[
     0x0000_ae00, // KVM_GET_API_VERSION

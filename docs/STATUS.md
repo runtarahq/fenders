@@ -218,6 +218,11 @@ as both control plane and node.
   and system calls it has no use for refused. That refusal is a list, not
   the allowlist the compiler and the VMM have: a call not on it is allowed.
   A warm shim is confined when it is claimed, not while it waits.
+- On a host with sibling hardware threads, each run's VM has a
+  core-scheduling cookie of its own: two runs never share a core at the
+  same moment, and a sibling stands idle when its core's run has nothing
+  for it. Capacity counted in logical CPUs is then less than it reads when
+  every CPU is busy with a different run.
 - The kernel holds a VM's cgroup to the run's own destinations (its
   `tcp_allow` pairs and the resolver's port 53, no IPv6) when the shim is
   root, as a node's is. A shim that is not root has the launcher's check

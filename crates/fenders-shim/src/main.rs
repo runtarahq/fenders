@@ -264,6 +264,8 @@ fn vmm() -> Result<()> {
             .collect();
         drop_to(uid, gid, &kvm)?;
     }
+    // The VM shares no core with another run's at the same moment.
+    fenders_node::confinement::core_alone().map_err(os("a core-scheduling cookie"))?;
     undumpable()?;
     // Set after the uid change, which clears it: the VMM dies with its shim.
     check(

@@ -118,6 +118,31 @@ struct Args {
     #[arg(long, default_value_t = 1000)]
     retention_batch: usize,
 }
+/// What this host's settings mean for runs that share it, said once at
+/// start. Neither stops the node: both are the operator's to decide.
+fn host_notes() {
+    let on = |path: &str| {
+        std::fs::read_to_string(path).is_ok_and(|v| matches!(v.trim(), "1" | "Y" | "y"))
+    };
+    // A guest is never told of nested virtualization, and its launcher gives
+    // up the call that could tell it before the guest runs. A host that runs
+    // only Fenders has no use for the module option either way.
+    for module in ["kvm_intel", "kvm_amd"] {
+        if on(&format!("/sys/module/{module}/parameters/nested")) {
+            tracing::warn!(
+                module,
+                "nested virtualization is enabled in this host's KVM; no run uses it, and it is best turned off"
+            );
+        }
+    }
+    // Each run's VM has a core-scheduling cookie of its own (the shim asks
+    // for one), so two runs never share a core at the same moment.
+    if on("/sys/devices/system/cpu/smt/active") {
+        tracing::info!(
+            "sibling hardware threads are active: runs are kept off each other's cores, and a sibling stands idle when its core's run has nothing for it"
+        );
+    }
+}
 fn main() {
     if let Err(error) = entry() {
         if fenders_node::log::installed() {
@@ -196,6 +221,7 @@ fn entry() -> Result<()> {
             )
         })
         .transpose()?;
+    host_notes();
     let mut node = Node::new(
         &args.state.join("node"),
         &args.build,
