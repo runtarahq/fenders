@@ -1263,6 +1263,26 @@ async fn supervise(
     if let Some(requests) = requests {
         requests.abort();
     }
+    // The run is over; what is left is to report it and to hold its end for
+    // the launcher, for up to an hour. A request to stop meant the run until
+    // now: from here it means the shim, which ends at once rather than
+    // ignoring it until it is killed.
+    tokio::spawn(async move {
+        let asked = |signal: Option<tokio::signal::unix::Signal>| async move {
+            match signal {
+                Some(mut signal) => {
+                    signal.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = asked(terminate) => {}
+            _ = asked(interrupt) => {}
+        }
+        tracing::warn!("stopped while holding the run's end: not reported further");
+        std::process::exit(1);
+    });
     let status = status.ok().and_then(|s| s.ok());
     let exit_code = status.and_then(|s| s.code());
     let signal = status.and_then(|s| s.signal());
