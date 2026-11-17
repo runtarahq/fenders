@@ -52,6 +52,44 @@ pub fn load(path: &Path) -> Result<Value> {
 /// Makes `path` a directory of this user's alone. One that is already there
 /// must be this user's own and no link: a directory someone else made, or a
 /// link to one, would be theirs to fill whatever its mode was set to.
+/// The last uid a node with `instances` runs may give out from `base`: one
+/// for each run and warm shim, and one to spare. Refused below the range of
+/// ordinary accounts or past the last usable uid.
+fn run_uid_span(base: u32, instances: usize) -> Result<u32> {
+    let slots = instances as u64 + 32 + 1;
+    let last = base as u64 + slots;
+    if base < 65_536 || last >= u32::MAX as u64 - 1 {
+        return Err(Error::invalid(
+            "--run-uid-base must leave its range between 65536 and the last uid",
+        ));
+    }
+    Ok(last as u32)
+}
+
+/// Whether any uid of `base..=last` is named in `text`: `/etc/passwd`
+/// (`name:x:UID:…`), or with `ranged` `/etc/subuid` (`name:START:COUNT`).
+fn uids_taken(text: &str, ranged: bool, base: u32, last: u32) -> bool {
+    text.lines().any(|line| {
+        let mut fields = line.split(':');
+        let (first, second) = if ranged {
+            (fields.nth(1), fields.next())
+        } else {
+            (fields.nth(2), None)
+        };
+        let Some(start) = first.and_then(|v| v.trim().parse::<u64>().ok()) else {
+            return false;
+        };
+        let count = if ranged {
+            second
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+        } else {
+            1
+        };
+        count > 0 && start <= last as u64 && start + count > base as u64
+    })
+}
+
 pub fn private_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     fs::create_dir_all(path)?;
@@ -428,6 +466,8 @@ pub struct Node {
     /// compiled artifact each uses: counted against instance and disk
     /// capacity and pinned in the artifact cache until they are in `runs`.
     creating: Mutex<std::collections::HashMap<String, PathBuf>>,
+    /// Held for as long as this node gives out uids from its base.
+    run_uid_lock: Option<fs::File>,
     /// Warm shims kept per artifact and guest configuration (0: none).
     warm_runs: usize,
     /// Whether runs may ask for the outbound byte limit (`egress_budget`).
@@ -552,6 +592,7 @@ impl Node {
             endings: Default::default(),
             meters: Default::default(),
             creating: Default::default(),
+            run_uid_lock: None,
             warm_runs: 0,
             egress_budget: false,
             warm: Default::default(),
@@ -647,6 +688,7 @@ impl Node {
             endings: Default::default(),
             meters: Default::default(),
             creating: Default::default(),
+            run_uid_lock: None,
             warm_runs: 0,
             egress_budget: false,
             warm: Default::default(),
@@ -655,6 +697,34 @@ impl Node {
         // The runs a previous agent started, from their shims.
         node.reattach()?;
         Ok(node)
+    }
+    /// Runs take their uids from `base` on, one each. Refused when any of
+    /// them is an account's on this host or within a range given to a user
+    /// for containers, and, for a node that is root (the only kind that
+    /// changes uid), when another node on this host already runs from the
+    /// same base: two would give one uid to two runs, which could then
+    /// signal each other.
+    pub fn with_run_uids(mut self, base: u32) -> Result<Self> {
+        let last = run_uid_span(base, self.max_instances)?;
+        for (file, ranged) in [("/etc/passwd", false), ("/etc/subuid", true)] {
+            let Ok(text) = fs::read_to_string(file) else {
+                continue;
+            };
+            if uids_taken(&text, ranged, base, last) {
+                return Err(Error::invalid(
+                    "run uids overlap an account or a subordinate uid range of this host: choose another --run-uid-base",
+                ));
+            }
+        }
+        if unsafe { libc::geteuid() } == 0 {
+            self.run_uid_lock = Some(
+                flock(Path::new(&format!("/run/fenders-run-uids-{base}.lock"))).map_err(|_| {
+                    Error::invalid("another node on this host runs from the same --run-uid-base")
+                })?,
+            );
+        }
+        self.run_uid_base = base;
+        Ok(self)
     }
     /// Keeps `runs` warm shims for each artifact and guest configuration a
     /// run used here: each boots its VM and loads its component before its
@@ -964,6 +1034,28 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn run_uids_are_no_accounts_and_no_container_ranges() {
+        use super::*;
+        let passwd = "root:x:0:0:root:/root:/bin/sh\nsvc:x:600010:600010::/:/bin/false\nbad line\n";
+        // An account inside the range, at its edges, and outside it.
+        assert!(uids_taken(passwd, false, 600_000, 600_049));
+        assert!(uids_taken(passwd, false, 600_010, 600_010));
+        assert!(!uids_taken(passwd, false, 600_011, 600_060));
+        assert!(!uids_taken(passwd, false, 700_000, 700_049));
+        // A range given to a user for containers: 100000 uids from 524288.
+        let subuid = "alice:524288:100000\nbob:1000000:65536\n";
+        assert!(uids_taken(subuid, true, 600_000, 600_049));
+        assert!(uids_taken(subuid, true, 624_287, 624_300));
+        assert!(!uids_taken(subuid, true, 624_288, 624_300));
+        assert!(!uids_taken(subuid, true, 900_000, 900_049));
+        assert!(uids_taken(subuid, true, 999_990, 1_000_000));
+        // The span: one uid a run and a warm shim, and never ordinary uids.
+        assert_eq!(run_uid_span(700_000, 16).unwrap(), 700_049);
+        assert!(run_uid_span(1000, 16).is_err());
+        assert!(run_uid_span(u32::MAX - 10, 16).is_err());
+    }
+
     #[test]
     fn state_and_secrets_are_this_users_own_and_never_a_link() {
         use super::*;

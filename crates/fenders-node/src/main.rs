@@ -27,6 +27,11 @@ struct Args {
     cgroup_root: PathBuf,
     #[arg(long, default_value_t = 16)]
     max_instances: usize,
+    /// The first of the uids runs are given, one each. None may be an
+    /// account's or in a subordinate uid range on this host, and two nodes
+    /// on one host need different bases.
+    #[arg(long, default_value_t = 600_000)]
+    run_uid_base: u32,
     /// Warm shims (VM booted, component loaded, each for one run) kept per
     /// artifact and guest configuration a run used.
     #[arg(long, default_value_t = 0)]
@@ -198,6 +203,7 @@ fn entry() -> Result<()> {
         args.max_instances,
     )?
     .with_disk_free_mib(args.disk_free_mib)?
+    .with_run_uids(args.run_uid_base)?
     .with_warm_runs(args.warm_runs)?
     .with_egress_budget(args.egress_budget)
     .with_compiler_limits(fenders_node::core::CompilerLimits {

@@ -184,9 +184,10 @@ as both control plane and node.
 
 ### Nodes
 
-- Run uids start at 600000 and are not configurable. Nothing checks that
-  range against the host's accounts, and two node processes on one host
-  would give the same uids to different runs: one node a host.
+- Runs are given uids from `--run-uid-base` (600000 by default), one each.
+  A node refuses to start when one of them is an account's or within a
+  subordinate uid range of its host, or when another node on the host
+  already runs from the same base.
 - With `--warm-runs`, up to 32 booted shims wait outside the node's instance
   and memory accounting, and each holds the environment (secret values
   included) of the launch it was made like for up to ten minutes. A removed

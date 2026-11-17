@@ -6,6 +6,8 @@
 #
 #   bash scripts/verify_run_channel_live.sh [OUTPUT_DIR]
 #
+# Its node gives runs uids from 620000, a base of its own: two nodes on one
+# host may not share one, and scripts/local_env.sh keeps the default.
 # Needs: Linux x86-64 with /dev/kvm, cgroup v2, passwordless sudo, Docker (for a
 # disposable PostgreSQL 17), curl, jq, and `scripts/build_node.sh` already run.
 # It creates OUTPUT_DIR, /var/lib/fenders-run-channel-live (a copy of the node
@@ -88,6 +90,7 @@ sudo "$stage/build/fenders-node" --state "$stage/state" --build "$stage/build" -
   --control "https://127.0.0.1:$((base + 1))" --control-pin "$(jq -er .control "$out/pins.json")" \
   --ca "$out/pki/ca.pem" --cert "$out/pki/node.pem" --key "$out/pki/node.key" \
   --cpu-percent 200 --memory-mib 1024 --max-instances 4 --port "$node_port" \
+  --run-uid-base 620000 \
   > /dev/null 2> "$out/node.log" &
 node_pid=$!
 

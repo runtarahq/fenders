@@ -14,6 +14,9 @@ struct Args {
     port: u16,
     #[arg(long, default_value_t = 16)]
     max_instances: usize,
+    /// The first of the uids runs are given; see `fenders-node`.
+    #[arg(long, default_value_t = 600_000)]
+    run_uid_base: u32,
     /// Confined compiler cgroup memory ceiling.
     #[arg(long, default_value_t = 1024)]
     compiler_memory_mib: u64,
@@ -58,6 +61,7 @@ fn entry() -> Result<(), Box<dyn std::error::Error>> {
             &args.cgroup_root,
             args.max_instances,
         )?
+        .with_run_uids(args.run_uid_base)?
         .with_compiler_limits(fenders_node::core::CompilerLimits {
             memory_mib: args.compiler_memory_mib,
             cpu_percent: args.compiler_cpu_percent,
