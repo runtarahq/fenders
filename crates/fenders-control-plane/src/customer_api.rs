@@ -199,7 +199,7 @@ impl Store {
         } else {
             "viewer"
         };
-        let row: Value = sqlx::query_scalar("INSERT INTO credentials(id,token_hash,tenant_id,project_id,name,role,expires,api_permissions,created_by,prefix) VALUES($1,$2,$3,$4,$5,$6,now()+make_interval(secs=>$7::double precision),$8,$9,$10) RETURNING jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'prefix',prefix,'expires',expires,'created',created,'created_by',created_by)")
+        let row: Value = sqlx::query_scalar("INSERT INTO credentials(id,token_hash,tenant_id,project_id,name,role,expires,api_permissions,created_by,prefix) VALUES($1,$2,$3,$4,$5,$6,LEAST(now()+make_interval(secs=>$7::double precision),COALESCE((SELECT expires FROM credentials WHERE id=$9 AND tenant_id IS NOT NULL),'infinity'::timestamptz)),$8,$9,$10) RETURNING jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'prefix',prefix,'expires',expires,'created',created,'created_by',created_by)")
             .bind(&id).bind(digest(&secret)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(role).bind(value.ttl_seconds as f64).bind(json!(value.permissions)).bind(&p.id).bind(prefix).fetch_one(&mut *tx).await?;
         save_receipt(&mut tx, tenant, key, &request, &row).await?;
         Self::audit(

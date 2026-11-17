@@ -99,6 +99,11 @@ pub(crate) fn token(prefix: &str) -> Result<String> {
             .collect::<String>()
     ))
 }
+/// When a credential issued now expires: after `$7` seconds, and no later
+/// than the tenant credential `$8` that issues it, if it is one (an operator
+/// or a browser session is not).
+pub(crate) const ISSUED_EXPIRY: &str = "LEAST(now()+make_interval(secs=>$7::double precision),COALESCE((SELECT expires FROM credentials WHERE id=$8 AND tenant_id IS NOT NULL),'infinity'::timestamptz))";
+
 /// A cipher for one `purpose`, under a key derived from the encryption key
 /// `key`: what it encrypts is nothing to the encryption key's own cipher or
 /// to another purpose's, and the reverse.
@@ -498,8 +503,11 @@ impl Store {
         }
         let id = uid();
         let token = token("fnd_tok_")?;
-        let row = sqlx::query_scalar::<_, Value>("INSERT INTO credentials (id,token_hash,tenant_id,project_id,name,role,expires) VALUES ($1,$2,$3,$4,$5,$6,now()+make_interval(secs=>$7::double precision)) RETURNING jsonb_build_object('id',id,'role',role,'expires',expires)")
-            .bind(&id).bind(digest(&token)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(value.role.as_str()).bind(value.ttl_seconds as f64).fetch_one(&mut *tx).await?;
+        // Who issued it is recorded, so that it ends with its issuer; and one
+        // issued with a tenant credential lives no longer than that does, so a
+        // credential cannot renew itself past the lifetime it was given.
+        let row = sqlx::query_scalar::<_, Value>(&format!("INSERT INTO credentials (id,token_hash,tenant_id,project_id,name,role,expires,created_by) VALUES ($1,$2,$3,$4,$5,$6,{ISSUED_EXPIRY},$8) RETURNING jsonb_build_object('id',id,'role',role,'expires',expires)"))
+            .bind(&id).bind(digest(&token)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(value.role.as_str()).bind(value.ttl_seconds as f64).bind(&p.id).fetch_one(&mut *tx).await?;
         Self::audit(
             &mut tx,
             p,
@@ -544,7 +552,20 @@ impl Store {
     ) -> Result<Value> {
         let row = sqlx::query_scalar::<_, Value>("UPDATE credentials SET revoked=true WHERE tenant_id=$1 AND id=$2 RETURNING jsonb_build_object('id',id)")
             .bind(tenant).bind(credential).fetch_optional(&mut **tx).await?.ok_or_else(Error::missing)?;
+        // And every credential issued with it, or with one of those.
+        Self::revoke_issued_by(tx, Some(tenant), credential).await?;
         Ok(row)
+    }
+    /// Revokes the credentials `issuer` (a credential, or a customer user)
+    /// issued, and those issued with them in turn: in `tenant`, or in every
+    /// tenant. How many it revoked.
+    pub(crate) async fn revoke_issued_by(
+        tx: &mut Tx,
+        tenant: Option<&str>,
+        issuer: &str,
+    ) -> Result<u64> {
+        Ok(sqlx::query("WITH RECURSIVE issued AS (SELECT id FROM credentials WHERE created_by=$1 AND tenant_id IS NOT NULL AND ($2::text IS NULL OR tenant_id=$2) UNION SELECT c.id FROM credentials c JOIN issued i ON c.created_by=i.id WHERE c.tenant_id IS NOT NULL) UPDATE credentials SET revoked=true WHERE NOT revoked AND id IN (SELECT id FROM issued)")
+            .bind(issuer).bind(tenant).execute(&mut **tx).await?.rows_affected())
     }
     pub async fn upload(
         &self,

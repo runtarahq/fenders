@@ -62,7 +62,11 @@ as both control plane and node.
   `STATE/operator.token` at first start. It is not scoped; whoever holds it
   can do anything.
 - An API key or tenant credential lives at most 30 days. A host product
-  re-issues them with the operator credential.
+  re-issues them with the operator credential. One issued with a tenant
+  credential lives no longer than that credential, and ends when it is
+  revoked; those a member issued end when the member is removed or stops
+  being an owner, or their account is disabled. Credentials issued before
+  this was recorded have no issuer and are revoked one by one.
 - The OpenAPI contract (`/api/openapi.json`) covers the workspace API. The
   operator calls are described in [EMBEDDING-API.md](EMBEDDING-API.md), not
   yet in the contract.

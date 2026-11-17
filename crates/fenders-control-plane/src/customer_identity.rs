@@ -147,6 +147,11 @@ impl Store {
             args![user],
         )
         .await?;
+        // A disabled user's API keys and credentials go with their sessions,
+        // in every workspace; enabling the user again does not revive them.
+        if value["disabled"] == true {
+            Self::revoke_issued_by(&mut tx, None, user).await?;
+        }
         Self::audit_system(&mut tx, &p.id, "customer_user.update", &json!(user), &Value::Null,
             json!({"disabled":row["disabled"],"revision":row["revision"],"sessions_removed":removed})).await?;
         tx.commit().await?;
@@ -300,8 +305,15 @@ impl Store {
             && one(tx,"SELECT count(*) AS n FROM workspace_memberships m JOIN customer_users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.role='owner' AND NOT m.revoked AND NOT u.disabled AND (NOT u.email_required OR u.email_verified) AND m.id<>$2",args![tenant,member]).await?["n"]==0 {
                 return Err(conflict("add another owner before removing the last owner"));
         }
-        let row=one(tx,"UPDATE workspace_memberships SET role=$1,revoked=$2,revision=revision+1,updated=now() WHERE id=$3 RETURNING *",args![role,revoked,member]).await?;
-        Ok(row)
+        let updated=one(tx,"UPDATE workspace_memberships SET role=$1,revoked=$2,revision=revision+1,updated=now() WHERE id=$3 RETURNING *",args![role,revoked,member]).await?;
+        // A member who is removed, or is no longer an owner, could issue API
+        // keys and credentials while they were one. Those end here: a bearer
+        // credential is checked against its own row, not its issuer's
+        // standing, and would otherwise outlive the access it came from.
+        if row["role"] == "owner" && (updated["role"] != "owner" || updated["revoked"] == true) {
+            Self::revoke_issued_by(tx, Some(tenant), crate::db::s(&row["user_id"])).await?;
+        }
+        Ok(updated)
     }
     /// Called only after a cryptographically verified OIDC callback. Not an API
     /// for accepting caller-supplied claims or trading bearer credentials.

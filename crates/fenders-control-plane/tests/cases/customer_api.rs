@@ -446,3 +446,140 @@ async fn customer_api_connections_resolve_both_protocols_atomically_without_gran
     assert_eq!(count, 0);
     l.finish().await;
 }
+
+/// A credential lives no longer than the one that issued it, and ends when
+/// that one is revoked, or when the member who issued it is removed or their
+/// account disabled.
+#[tokio::test]
+async fn credentials_end_with_whoever_issued_them() {
+    let l = Lab::new().await;
+    let issue = |by: Principal, ttl: i64| {
+        let store = l.store.clone();
+        let tenant = l.tenant.clone();
+        async move {
+            let v = store
+                .issue_credential(
+                    &by,
+                    &tenant,
+                    serde_json::from_value(
+                        json!({"name":"line","role":"owner","project_id":null,"ttl_seconds":ttl}),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            (store.authenticate(s(&v["token"])).await.unwrap(), v)
+        }
+    };
+    let expires = |id: &str| {
+        let (pool, id) = (l.store.pool.clone(), id.to_owned());
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT extract(epoch FROM expires)::float8 FROM credentials WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // Two minutes from the operator; thirty days asked of it, and of that.
+    let (parent, parent_row) = issue(l.operator.clone(), 120).await;
+    let (child, child_row) = issue(parent.clone(), 2_592_000).await;
+    let (_, grandchild_row) = issue(child.clone(), 2_592_000).await;
+    let limit = expires(s(&parent_row["id"])).await;
+    assert_eq!(expires(s(&child_row["id"])).await, limit);
+    assert_eq!(expires(s(&grandchild_row["id"])).await, limit);
+    // An API key issued with a credential ends with it too.
+    let (status, key) = call(
+        &l,
+        s(&child_row["token"]),
+        "POST",
+        &format!("/v1/workspaces/{}/api-keys", l.tenant),
+        json!({"name":"automation","project_id":null,"permissions":["read"],"ttl_seconds":2592000}),
+        &uid(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{key}");
+    assert_eq!(expires(s(&key["id"])).await, limit);
+    // The operator's own are as long as asked.
+    let (_, long) = issue(l.operator.clone(), 2_592_000).await;
+    assert!(expires(s(&long["id"])).await > limit + 29.0 * 86400.0);
+
+    // Revoking the parent ends the whole line, and nothing beside it.
+    l.store
+        .revoke_credential(&l.operator, &l.tenant, s(&parent_row["id"]))
+        .await
+        .unwrap();
+    for token in [&parent_row, &child_row, &grandchild_row, &key] {
+        assert_eq!(
+            l.store
+                .authenticate(s(&token["token"]))
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert!(l.store.authenticate(s(&long["token"])).await.is_ok());
+
+    // A member who issued credentials while an owner: removed, or disabled.
+    let member_with_key = |name: &'static str| {
+        let l = &l;
+        let issue = &issue;
+        async move {
+            let (user, membership) = (uid(), uid());
+            sqlx::query("INSERT INTO customer_users(id,issuer,subject) VALUES($1,'https://identity.test',$2)")
+                .bind(&user).bind(name).execute(&l.store.pool).await.unwrap();
+            sqlx::query("INSERT INTO workspace_memberships(id,tenant_id,user_id,role) VALUES($1,$2,$3,'owner')")
+                .bind(&membership).bind(&l.tenant).bind(&user).execute(&l.store.pool).await.unwrap();
+            // As `create_api_key` and `issue_credential` record it for a
+            // browser session of theirs.
+            let (issued, row) = issue(l.operator.clone(), 3600).await;
+            sqlx::query("UPDATE credentials SET created_by=$1 WHERE id=$2")
+                .bind(&user)
+                .bind(s(&row["id"]))
+                .execute(&l.store.pool)
+                .await
+                .unwrap();
+            // And one issued with that in turn.
+            let (_, second) = issue(issued, 3600).await;
+            (user, membership, row, second)
+        }
+    };
+    // Another owner stays, so the last-owner rule allows the changes.
+    let _staying = member_with_key("staying").await;
+    let (_, membership, first, second) = member_with_key("removed").await;
+    l.store
+        .update_member(
+            &l.operator,
+            &l.tenant,
+            &membership,
+            json!({"revoked":true,"expected_revision":1}),
+        )
+        .await
+        .unwrap();
+    let (user, _, third, fourth) = member_with_key("disabled").await;
+    l.store
+        .update_customer_user(
+            &l.operator,
+            &user,
+            json!({"disabled":true,"expected_revision":1}),
+        )
+        .await
+        .unwrap();
+    for token in [&first, &second, &third, &fourth] {
+        assert_eq!(
+            l.store
+                .authenticate(s(&token["token"]))
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // The owner who stayed keeps theirs.
+    assert!(l.store.authenticate(s(&_staying.2["token"])).await.is_ok());
+    assert!(l.store.authenticate(s(&long["token"])).await.is_ok());
+    l.finish().await;
+}
