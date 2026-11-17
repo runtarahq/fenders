@@ -5,6 +5,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/random.h>
@@ -535,7 +536,13 @@ int main(int argc,char **argv) {
     filesystem_policy();
     signal(SIGALRM,timeout_handler);
     const char *lifetime=getenv("FENDERS_LIFETIME_SECONDS");
-    if(lifetime){char *end;unsigned long seconds=strtoul(lifetime,&end,10);if(!*lifetime || *end || seconds>86400)return 2;alarm(seconds);}else alarm(20);
+    // A deadline that cannot be set is not one the launcher goes on without:
+    // where its confinement refuses the timer, a lifetime must be 0 and kept
+    // by whoever started it, as its shim does.
+    unsigned long seconds=20;
+    if(lifetime){char *end;seconds=strtoul(lifetime,&end,10);if(!*lifetime || *end || seconds>86400)return 2;}
+    struct itimerval deadline={.it_value={.tv_sec=(time_t)seconds}};
+    if(seconds && setitimer(ITIMER_REAL,&deadline,NULL)){fprintf(DIAGNOSTICS,"lifetime of %lu s cannot be set: %s\n",seconds,strerror(errno));return 2;}
     // All virtual CPUs share one host CPU allowance; resolver threads do not add CPU capacity.
     cpu_set_t allowed,pinned;CPU_ZERO(&allowed);CPU_ZERO(&pinned);CHECK(sched_getaffinity(0,sizeof(allowed),&allowed));
     for(unsigned i=0;i<CPU_SETSIZE;i++)if(CPU_ISSET(i,&allowed)){CPU_SET(i,&pinned);break;}

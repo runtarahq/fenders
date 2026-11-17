@@ -37,12 +37,15 @@ static void *lifecycle_control(void *unused) {
     (void)unused;
     // A listening control socket takes one connection a command. A connected
     // one (the other end of a pair its shim keeps: no name anything else
-    // could connect to) carries every command, a line each, until it closes
-    // or sends something that is not a command.
+    // could connect to) carries every command, a line each, until it closes.
+    // A line that is no command is answered as such and the next is read:
+    // two commands that arrive together are two commands, not an error that
+    // ends the thread and with it every later grant.
     int listening=0;socklen_t option=sizeof(listening);
     if(getsockopt(control_fd,SOL_SOCKET,SO_ACCEPTCONN,&listening,&option))fail("control socket");
     struct timeval timeout={.tv_sec=2};
     if(!listening)setsockopt(control_fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
+    static struct control_input connected;
     for(;;) {
         int client=control_fd;
         if(listening) {
@@ -51,7 +54,10 @@ static void *lifecycle_control(void *unused) {
             setsockopt(client,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
             setsockopt(client,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
         }
-        char command[1024];int complete=control_read_command(client,command,sizeof(command));
+        char command[1024];
+        int read=listening?control_read_command(client,command,sizeof(command)):control_next_command(client,&connected,command,sizeof(command));
+        if(!listening && !read)return NULL;
+        int complete=read==1;
         const char *error=NULL;
         pthread_mutex_lock(&lifecycle_lock);
         if(!complete)error="invalid-command";
@@ -87,7 +93,6 @@ static void *lifecycle_control(void *unused) {
         pthread_mutex_unlock(&lifecycle_lock);
         send(client,response,count,MSG_NOSIGNAL);
         if(listening)close(client);
-        else if(!complete)return NULL;
     }
     return NULL;
 }

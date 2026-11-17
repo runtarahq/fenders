@@ -45,6 +45,32 @@ static void control_framing(void) {
     memset(buffer,'a',sizeof(buffer));assert(write(pair[0],buffer,sizeof(buffer))==sizeof(buffer));
     assert(!control_read_command(pair[1],buffer,sizeof(buffer)));
     close(pair[0]);close(pair[1]);puts("PASS fragmented management commands, embedded NUL and size limits");
+    // A connection that carries every command: two that arrive together are
+    // two, a line that is no command is passed by, and the next is read.
+    assert(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
+    static struct control_input input;
+    const char together[]="egress 1 0 5\nstatus\n";
+    assert(write(pair[0],together,sizeof(together)-1)==sizeof(together)-1);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==1 && !strcmp(buffer,"egress 1 0 5\n"));
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==1 && !strcmp(buffer,"status\n"));
+    const char nul[]="sta\0tus\nstatus\n";
+    assert(write(pair[0],nul,sizeof(nul)-1)==sizeof(nul)-1);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==-1);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==1 && !strcmp(buffer,"status\n"));
+    // Longer than any command, and longer than the reader holds: dropped as
+    // it comes, and the command after it is read.
+    static char flood[5000];memset(flood,'x',sizeof(flood)-1);flood[sizeof(flood)-1]='\n';
+    assert(write(pair[0],flood,sizeof(flood))==sizeof(flood));
+    assert(write(pair[0],"status\n",7)==7);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==-1);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==1 && !strcmp(buffer,"status\n"));
+    // A line that fits the reader and not a command.
+    memset(flood,'y',100);flood[100]='\n';
+    assert(write(pair[0],flood,101)==101);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==-1);
+    close(pair[0]);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==0);
+    close(pair[1]);puts("PASS commands that arrive together are each read, and a line that is none is passed by");
 }
 
 static void release_calls(void) {
