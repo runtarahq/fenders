@@ -294,7 +294,17 @@ struct Withdraw<'a> {
 impl Drop for Withdraw<'_> {
     fn drop(&mut self) {
         let mut inner = self.exchange.lock();
-        inner.out.remove(self.id);
+        // Still out: never answered. Whoever took it has nothing more to do
+        // with it, and must not read as busy with it for ever. One that was
+        // answered is its taker's until the answer's body has ended.
+        if let Some(Out {
+            taker: Some(taker), ..
+        }) = inner.out.remove(self.id)
+            && let Some(seen) = inner.takers.get_mut(&taker)
+            && seen.busy.remove(self.id)
+        {
+            seen.active = Instant::now();
+        }
         if let Some(queue) = inner.queues.get_mut(self.key) {
             queue.requests.retain(|(id, ..)| id != self.id);
         }
@@ -746,6 +756,53 @@ mod tests {
             exchange.next("e1", "e1", LONG).await.unwrap().head["id"],
             "r2"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_taker_is_not_busy_with_a_request_the_gateway_stopped_waiting_for() {
+        let exchange = Arc::new(Exchange::default());
+        let ask = {
+            let exchange = exchange.clone();
+            tokio::spawn(async move { exchange.next("app", "taker", LONG).await })
+        };
+        tokio::task::yield_now().await;
+        // Taken and never answered: the gateway gives up on it.
+        let offer = exchange.offer(
+            "app",
+            "lost",
+            message(b""),
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        );
+        let (offer, taken) = tokio::join!(offer, ask);
+        assert!(taken.unwrap().is_some());
+        assert!(matches!(offer, Offer::Lost));
+        assert!(!exchange.busy("taker"));
+        assert!(exchange.idle("taker").is_some());
+        // A late answer is refused, and changes nothing.
+        assert!(!exchange.respond("taker", "lost", message(b"late")));
+
+        // One that was answered stays its taker's until the answer ends,
+        // though the gateway's wait for the head is over.
+        let ask = {
+            let exchange = exchange.clone();
+            tokio::spawn(async move { exchange.next("app", "taker", LONG).await })
+        };
+        tokio::task::yield_now().await;
+        let answering = {
+            let exchange = exchange.clone();
+            tokio::spawn(async move {
+                exchange
+                    .offer("app", "answered", message(b""), LONG, LONG)
+                    .await
+            })
+        };
+        assert!(ask.await.unwrap().is_some());
+        assert!(exchange.respond("taker", "answered", message(b"done")));
+        assert!(matches!(answering.await.unwrap(), Offer::Answered(_)));
+        assert!(exchange.busy("taker"));
+        exchange.finished("taker", "answered");
+        assert!(!exchange.busy("taker"));
     }
 
     #[tokio::test(start_paused = true)]

@@ -365,9 +365,12 @@ async fn dispatch(State(store): State<Store>, request: Request) -> Result<Respon
         // new release took over from still finishes the requests it has.
         // The exchange gives an answer only to the request its taker took.
         let mut body = body;
-        let (head, rest) = read_head(&mut body)
-            .await
-            .ok_or_else(|| Error::invalid("invalid response"))?;
+        let Some((head, rest)) = read_head(&mut body).await else {
+            // An answer that cannot be read is still the end of what its
+            // taker had to do with the request.
+            store.exchange.finished(execution, id);
+            return Err(Error::invalid("invalid response"));
+        };
         // The gateway is given the head now and the body as the shim sends
         // it; this call answers when the body has ended or nobody reads it.
         let (tx, piped) = pipe();
