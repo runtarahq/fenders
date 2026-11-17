@@ -38,6 +38,10 @@ int main(int argc,char **argv) {
     CHECK(syscall(SYS_tgkill,atoi(argv[6]),atoi(argv[6]),0)==-1 && errno==EPERM);
     CHECK(syscall(SYS_unshare,0)==-1 && errno==EPERM);
     CHECK(ioctl(0,0x5412,0)==-1 && errno==EPERM); /* TIOCSTI denied. */
+    /* A KVM call's number in another request's form (KVM_CHECK_EXTENSION's
+       0x03 as a write of eight bytes) is not that call: matched on the
+       number alone it was let through to the kernel. */
+    CHECK(ioctl(0,0x4008ae03UL,0)==-1 && errno==EPERM);
     puts("PASS process creation, cross-process signals, namespaces and unrelated ioctl denied");
     cpu_set_t affinity;CHECK(sched_getaffinity(0,sizeof(affinity),&affinity)==0);
     if(compiler)CHECK(sched_setaffinity(0,sizeof(affinity),&affinity)==-1 && errno==EPERM);

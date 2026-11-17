@@ -128,6 +128,31 @@ fn landlock_scoped(paths: &[(PathBuf, u64)], ports: &[u16], scoped: u64) -> Resu
     check(unsafe { libc::syscall(446, guard.0, 0) })?;
     Ok(abi)
 }
+/// Every KVM `ioctl` request the launcher makes: `linux/kvm.h` on x86-64.
+const VMM_KVM_REQUESTS: &[u64] = &[
+    0x0000_ae00, // KVM_GET_API_VERSION
+    0x0000_ae01, // KVM_CREATE_VM
+    0x0000_ae03, // KVM_CHECK_EXTENSION
+    0x0000_ae04, // KVM_GET_VCPU_MMAP_SIZE
+    0xc008_ae05, // KVM_GET_SUPPORTED_CPUID
+    0x0000_ae41, // KVM_CREATE_VCPU
+    0x4020_ae46, // KVM_SET_USER_MEMORY_REGION
+    0x0000_ae47, // KVM_SET_TSS_ADDR
+    0x0000_ae80, // KVM_RUN
+    0x8090_ae81, // KVM_GET_REGS
+    0x4090_ae82, // KVM_SET_REGS
+    0x8138_ae83, // KVM_GET_SREGS
+    0x4138_ae84, // KVM_SET_SREGS
+    0x4008_ae89, // KVM_SET_MSRS
+    0x81a0_ae8c, // KVM_GET_FPU
+    0x41a0_ae8d, // KVM_SET_FPU
+    0x4008_ae90, // KVM_SET_CPUID2
+    0x0000_aea3, // KVM_GET_TSC_KHZ
+    0x8188_aea6, // KVM_GET_XCRS
+    0x4188_aea7, // KVM_SET_XCRS
+    0x4018_aee1, // KVM_SET_DEVICE_ATTR
+    0x4018_aee2, // KVM_GET_DEVICE_ATTR
+];
 const COMMON: &str = "read write readv writev pread64 pwrite64 close close_range fstat newfstatat stat lstat statx lseek open openat access faccessat faccessat2 readlink readlinkat getdents64 mmap mprotect munmap mremap madvise brk rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack futex futex_time64 set_robust_list set_tid_address rseq getrandom clock_gettime clock_gettime64 clock_nanosleep clock_nanosleep_time64 nanosleep getpid getppid gettid getuid geteuid getgid getegid getresuid getresgid getrusage getrlimit sysinfo uname sched_getaffinity sched_yield fcntl fcntl64 dup dup2 dup3 restart_syscall exit exit_group execve fadvise64 fadvise64_64 ftruncate fsync fdatasync poll ppoll ppoll_time64 select pselect6 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait epoll_pwait2 eventfd eventfd2";
 fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
     unsafe {
@@ -225,14 +250,14 @@ fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
                         )?;
                     }
                 }
-                // KVM_GET_TSC_KHZ (0xa3) and KVM_{SET,GET}_DEVICE_ATTR (0xe1,
-                // 0xe2) calibrate the guest vDSO's clock page and keep every
-                // vCPU on one TSC offset: attributes of the VMM's own VM.
-                for command in [
-                    0x00, 0x01, 0x03, 0x04, 0x05, 0x41, 0x46, 0x47, 0x80, 0x81, 0x82, 0x83, 0x84,
-                    0x89, 0x8c, 0x8d, 0x90, 0xa3, 0xa6, 0xa7, 0xe1, 0xe2,
-                ] {
-                    rule("ioctl", &[masked(1, 0xffff, 0xae00 | command)], allow)?;
+                // The launcher's KVM calls, each by its whole request
+                // value: direction and size as well as number. Matched on
+                // the number alone, 0xa3 was KVM_ENABLE_CAP as much as the
+                // KVM_GET_TSC_KHZ that was meant. KVM_GET_TSC_KHZ and
+                // KVM_{SET,GET}_DEVICE_ATTR calibrate the guest vDSO's clock
+                // page and keep every vCPU on one TSC offset.
+                for request in VMM_KVM_REQUESTS {
+                    rule("ioctl", &[eq(1, *request)], allow)?;
                 }
                 rule("ioctl", &[eq(1, 0x5421)], allow)?;
             }
