@@ -181,6 +181,28 @@ fn is_run_id(name: &str) -> bool {
     name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// The CPU time a run's shim may use in each 100 ms beyond its VM's share.
+const SHIM_CPU_USEC: u64 = 50_000;
+/// The limits on a run's cgroup, which holds its shim and its VM.
+fn run_limits(host_memory_mib: i64, cpu_percent: i64) -> [(&'static str, String); 5] {
+    // The run as a whole: the VM's memory and the shim's own.
+    let host = host_memory_mib.max(32) as u64 + 64;
+    // Its CPU likewise: the VM's share, which the shim sets on the VM's
+    // leaf, and half a CPU for the shim's own work (the run's output, its
+    // requests, its calls). Without it the shim's threads ran unthrottled,
+    // on a uid the guest's work drives.
+    let cpu = (cpu_percent.max(1) as u64) * 1000 + SHIM_CPU_USEC;
+    [
+        ("memory.max", (host * 1024 * 1024).to_string()),
+        ("memory.swap.max", "0".into()),
+        // Out of memory as a whole, the run ends as a whole: a shim killed
+        // alone would leave its VM running unwatched.
+        ("memory.oom.group", "1".into()),
+        ("cpu.max", format!("{cpu} 100000")),
+        ("pids.max", "64".into()),
+    ]
+}
+
 /// The SHA-256 of the compiled component in artifact directory `artifact`,
 /// as its `artifact.json` recorded it.
 fn compiled_digest(artifact: &Path) -> Option<String> {
@@ -888,13 +910,8 @@ impl Node {
         };
         let started = (|| -> Result<Option<std::process::ChildStdin>> {
             fs::create_dir(&cgroup).map_err(io("creating its cgroup"))?;
-            // The run as a whole: the VM's memory and the shim's own.
-            let host = n(&guest["host_memory_mib"]).max(32) as u64 + 64;
-            for (file, value) in [
-                ("memory.max", (host * 1024 * 1024).to_string()),
-                ("memory.swap.max", "0".into()),
-                ("pids.max", "64".into()),
-            ] {
+            for (file, value) in run_limits(n(&guest["host_memory_mib"]), n(&guest["cpu_percent"]))
+            {
                 fs::write(cgroup.join(file), value).map_err(io("limiting its cgroup"))?;
             }
             let procs =
@@ -1322,6 +1339,20 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_runs_cgroup_limits_its_shim_as_well_as_its_vm() {
+        let limits: std::collections::HashMap<_, _> = run_limits(256, 100).into_iter().collect();
+        // The VM's whole CPU and half a CPU for the shim, of a 100 ms period:
+        // never without a limit, which is what "max" would be.
+        assert_eq!(limits["cpu.max"], "150000 100000");
+        assert_eq!(limits["memory.max"], ((256 + 64) * 1024 * 1024).to_string());
+        assert_eq!(limits["memory.swap.max"], "0");
+        assert_eq!(limits["memory.oom.group"], "1");
+        assert_eq!(limits["pids.max"], "64");
+        // The least a run is given still has both.
+        assert_eq!(run_limits(0, 0)[3].1, "51000 100000");
     }
 
     #[test]
