@@ -487,16 +487,19 @@ async fn oidc_signing_key_rotation_refreshes_once_without_replaying_exchange() {
     let l = IdentityLab::new().await;
     let owner = l.login("owner").await;
     l.member(&owner, "owner", None).await;
+    // The provider's keys are fetched when a sign-in begins and held: the
+    // callback reads them again only for a key that is not among them, once.
     for (mode, status, reads) in [
-        ("signature", StatusCode::UNAUTHORIZED, 1),
-        ("rotate-unpublished", StatusCode::UNAUTHORIZED, 2),
-        ("rotate-unavailable", StatusCode::SERVICE_UNAVAILABLE, 2),
-        ("rotate-ambiguous", StatusCode::UNAUTHORIZED, 2),
-        ("rotate-signature", StatusCode::UNAUTHORIZED, 2),
-        ("rotate-nonce", StatusCode::UNAUTHORIZED, 2),
-        ("rotate-access-hash", StatusCode::UNAUTHORIZED, 2),
+        ("signature", StatusCode::UNAUTHORIZED, 0),
+        ("rotate-unpublished", StatusCode::UNAUTHORIZED, 1),
+        ("rotate-unavailable", StatusCode::SERVICE_UNAVAILABLE, 1),
+        ("rotate-ambiguous", StatusCode::UNAUTHORIZED, 1),
+        ("rotate-signature", StatusCode::UNAUTHORIZED, 1),
+        ("rotate-nonce", StatusCode::UNAUTHORIZED, 1),
+        ("rotate-access-hash", StatusCode::UNAUTHORIZED, 1),
     ] {
         l.provider.key_phase.store(0, Ordering::SeqCst);
+        l.lab.store.forget_provider_metadata().await;
         let login = l.begin("owner", mode).await;
         let before = l.provider.exchanges.load(Ordering::SeqCst);
         let keys = l.provider.key_reads.load(Ordering::SeqCst);
@@ -527,13 +530,14 @@ async fn oidc_signing_key_rotation_refreshes_once_without_replaying_exchange() {
         );
     }
     l.provider.key_phase.store(0, Ordering::SeqCst);
+    l.lab.store.forget_provider_metadata().await;
     let login = l.begin("owner", "rotate-valid").await;
     let before = l.provider.exchanges.load(Ordering::SeqCst);
     let keys = l.provider.key_reads.load(Ordering::SeqCst);
     let response = l.callback(&login).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(l.provider.exchanges.load(Ordering::SeqCst), before + 1);
-    assert_eq!(l.provider.key_reads.load(Ordering::SeqCst), keys + 2);
+    assert_eq!(l.provider.key_reads.load(Ordering::SeqCst), keys + 1);
     let cookie = response
         .headers()
         .get_all("set-cookie")
@@ -558,7 +562,13 @@ async fn oidc_signing_key_rotation_refreshes_once_without_replaying_exchange() {
     assert_eq!(info["workspaces"][0]["memberships"][0]["role"], "owner");
     assert_eq!(l.callback(&login).await.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(l.provider.exchanges.load(Ordering::SeqCst), before + 1);
-    assert_eq!(l.provider.key_reads.load(Ordering::SeqCst), keys + 2);
+    assert_eq!(l.provider.key_reads.load(Ordering::SeqCst), keys + 1);
+    // Sign-ins that anyone may start cost the provider nothing more: its
+    // keys are held, however many begin.
+    for _ in 0..5 {
+        l.begin("owner", "signature").await;
+    }
+    assert_eq!(l.provider.key_reads.load(Ordering::SeqCst), keys + 1);
     assert_eq!(
         l.request(&owner, "GET", "/auth/session", None, false)
             .await

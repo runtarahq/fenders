@@ -586,6 +586,15 @@ impl Store {
         Self::revoke_issued_by(tx, Some(tenant), credential).await?;
         Ok(row)
     }
+    /// Forgets the identity provider's metadata and keys, so that the next
+    /// sign-in fetches them. Public for tests, which change what their
+    /// provider serves between requests.
+    #[doc(hidden)]
+    pub async fn forget_provider_metadata(&self) {
+        if let Some(auth) = &self.browser_auth {
+            auth.forget_provider_metadata().await;
+        }
+    }
     /// Refuses another row of `table` for `tenant` once it has `limit`.
     ///
     /// None of these rows is charged to an allowance, and some are never

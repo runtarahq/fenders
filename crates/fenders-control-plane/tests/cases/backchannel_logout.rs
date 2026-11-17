@@ -293,7 +293,10 @@ async fn provider_logout_refuses_invalid_claims_signatures_and_framing() {
         deliver(&l, &"x".repeat(16_385), "application/x-www-form-urlencoded").await,
         StatusCode::BAD_REQUEST
     );
+    // With no keys held and the provider unavailable, a notice is not
+    // taken on trust.
     l.provider.key_phase.store(2, Ordering::SeqCst);
+    l.lab.store.forget_provider_metadata().await;
     assert_eq!(send(&l, &good).await, StatusCode::SERVICE_UNAVAILABLE);
     alive(&l, &owner, true).await;
     let receipts: i64 = sqlx::query_scalar("SELECT count(*) FROM browser_logout_events")
@@ -305,6 +308,7 @@ async fn provider_logout_refuses_invalid_claims_signatures_and_framing() {
     l.provider.key_delay_ms.store(2100, Ordering::SeqCst);
     let mut expiring = claims(&l.provider, Some("owner"), None);
     expiring["exp"] = json!(expiring["iat"].as_i64().unwrap() + 2);
+    l.lab.store.forget_provider_metadata().await;
     let reads = l.provider.key_reads.load(Ordering::SeqCst);
     assert_eq!(
         send(&l, &token(&l.provider, &expiring)).await,

@@ -49,6 +49,19 @@ pub struct BrowserAuthConfig {
     #[serde(default)]
     pub provider_logout_url: Option<String>,
 }
+/// How long the provider's metadata and keys are used before they are
+/// fetched again, and how soon they may be fetched again for a key that is
+/// not among them.
+const METADATA_FRESH: std::time::Duration = std::time::Duration::from_secs(300);
+const METADATA_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
+
+struct Discovered {
+    /// When it was fetched, and when it was last fetched for a key not held.
+    fetched: std::time::Instant,
+    refreshed: Option<std::time::Instant>,
+    metadata: CoreProviderMetadata,
+}
+
 pub struct BrowserAuth {
     /// Development sign-in from Tailscale Serve, in place of the provider.
     tailscale: Option<tailscale::TailscaleIdentityConfig>,
@@ -57,6 +70,8 @@ pub struct BrowserAuth {
     allowed: Vec<String>,
     origin: String,
     dev: bool,
+    /// The provider's metadata and keys as last fetched.
+    discovered: tokio::sync::Mutex<Option<Discovered>>,
 }
 impl<'a> openidconnect::AsyncHttpClient<'a> for BrowserAuth {
     type Error = Error;
@@ -125,6 +140,7 @@ impl BrowserAuth {
             allowed,
             origin,
             dev,
+            discovered: Default::default(),
         })
     }
     fn context(&self) -> String {
@@ -200,7 +216,52 @@ impl BrowserAuth {
         *result.headers_mut() = headers;
         Ok(result)
     }
+    /// The provider's metadata and signing keys, fetched at most every five
+    /// minutes. Every sign-in, callback and logout notice needs them, and
+    /// anyone may start a sign-in or post a notice: fetched each time, those
+    /// became two requests to the provider apiece, from this host.
     async fn metadata(&self) -> Result<CoreProviderMetadata> {
+        self.discover(false).await
+    }
+    /// [`metadata`](Self::metadata) for a token signed with a key that is
+    /// not among those held: the provider may have changed its keys since.
+    /// Fetched again, though not more than once in ten seconds, whoever
+    /// asks: a made-up key id buys no more requests than that.
+    async fn metadata_refreshed(&self) -> Result<CoreProviderMetadata> {
+        self.discover(true).await
+    }
+    async fn discover(&self, refresh: bool) -> Result<CoreProviderMetadata> {
+        // Held across the fetch: those who arrive meanwhile wait for its
+        // answer rather than each asking the provider.
+        let mut discovered = self.discovered.lock().await;
+        if let Some(held) = &*discovered {
+            let usable = if refresh {
+                // Fetched again for a key not held, unless it just was.
+                held.refreshed
+                    .is_some_and(|at| at.elapsed() < METADATA_REFRESH)
+            } else {
+                held.fetched.elapsed() < METADATA_FRESH
+            };
+            if usable {
+                return Ok(held.metadata.clone());
+            }
+        }
+        let metadata = self.fetch_metadata().await?;
+        let now = std::time::Instant::now();
+        *discovered = Some(Discovered {
+            fetched: now,
+            refreshed: refresh.then_some(now),
+            metadata: metadata.clone(),
+        });
+        Ok(metadata)
+    }
+    /// Forgets the provider's metadata, so that the next use fetches it.
+    /// Public for tests, which change what their provider serves.
+    #[doc(hidden)]
+    pub async fn forget_provider_metadata(&self) {
+        *self.discovered.lock().await = None;
+    }
+    async fn fetch_metadata(&self) -> Result<CoreProviderMetadata> {
         let metadata = CoreProviderMetadata::discover_async(
             IssuerUrl::new(self.config.issuer.clone())
                 .map_err(|_| Error::invalid("invalid issuer"))?,
@@ -368,7 +429,7 @@ impl BrowserAuth {
             // exchange above. Refresh trusted metadata/JWKS once, then verify
             // the same response fully. Never exchange the code a second time.
             refreshed_client = CoreClient::from_provider_metadata(
-                self.metadata().await?,
+                self.metadata_refreshed().await?,
                 ClientId::new(self.config.client_id.clone()),
                 self.config.client_secret.clone().map(ClientSecret::new),
             );
@@ -457,9 +518,17 @@ impl BrowserAuth {
         query: &str,
         headers: &HeaderMap,
     ) -> Result<Response> {
-        static EXCHANGES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
+        // Apart: anyone can start sign-ins, and those must not take the
+        // places of the callbacks that finish the ones already under way.
+        static LOGINS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
+        static CALLBACKS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
         let _permit = if matches!(path, "/auth/login" | "/auth/callback") {
-            Some(EXCHANGES.try_acquire().map_err(|_| {
+            let places = if path == "/auth/login" {
+                &LOGINS
+            } else {
+                &CALLBACKS
+            };
+            Some(places.try_acquire().map_err(|_| {
                 Error::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "sign-in capacity exhausted",
