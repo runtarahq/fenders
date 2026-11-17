@@ -49,6 +49,21 @@ pub(crate) struct Warm {
     /// Its pipe's end signal ([`Run::signalled`]).
     signalled: Arc<std::sync::atomic::AtomicBool>,
     since: Instant,
+    /// The host memory its VM may take, as a run's is counted.
+    memory_mib: i64,
+}
+
+/// Whether one more warm shim of `memory_mib` may be started: a waiting VM
+/// is a VM. With the runs that live and the shims that wait it must fit the
+/// node's instances, and its memory where the node was told its own.
+fn warm_fits(
+    (runs, run_memory): (usize, i64),
+    (waiting, waiting_memory): (usize, i64),
+    memory_mib: i64,
+    (instances, node_memory): (usize, Option<i64>),
+) -> bool {
+    runs + waiting < instances
+        && node_memory.is_none_or(|limit| run_memory + waiting_memory + memory_mib <= limit)
 }
 
 /// The warm shims, by artifact and guest configuration ([`warm_key`]).
@@ -63,6 +78,41 @@ pub(crate) struct WarmPool {
 impl WarmPool {
     fn len(&self) -> usize {
         self.shims.values().map(Vec::len).sum::<usize>() + self.reserved.len()
+    }
+    fn memory_mib(&self) -> i64 {
+        self.shims
+            .values()
+            .flatten()
+            .map(|warm| warm.memory_mib)
+            .sum()
+    }
+    /// Drops the warm shim that has waited longest; false when none waits.
+    /// Dropped, its standard input closes and it ends itself.
+    fn drop_oldest(&mut self) -> bool {
+        let Some(pool) = self
+            .shims
+            .iter()
+            .filter_map(|(pool, shims)| {
+                shims
+                    .iter()
+                    .map(|shim| shim.since)
+                    .min()
+                    .map(|at| (at, pool))
+            })
+            .min()
+            .map(|(_, pool)| pool.clone())
+        else {
+            return false;
+        };
+        if let Some(shims) = self.shims.get_mut(&pool) {
+            if let Some(index) = (0..shims.len()).min_by_key(|index| shims[*index].since) {
+                shims.remove(index);
+            }
+            if shims.is_empty() {
+                self.shims.remove(&pool);
+            }
+        }
+        true
     }
     fn holds_uid(&self, uid: u32) -> bool {
         self.reserved.iter().any(|(reserved, _)| *reserved == uid)
@@ -180,6 +230,9 @@ pub(crate) fn run_id(key: &str) -> String {
 fn is_run_id(name: &str) -> bool {
     name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
+
+/// Host memory counted for a run beyond its VM's: its shim and launcher.
+const RUN_OVERHEAD_MIB: i64 = 24;
 
 /// The CPU time a run's shim may use in each 100 ms beyond its VM's share.
 const SHIM_CPU_USEC: u64 = 50_000;
@@ -613,6 +666,18 @@ impl Node {
                 if held >= self.warm_runs || warm.len() >= MAX_WARM_TOTAL {
                     return;
                 }
+                // Counted as a run is: one that would not fit is not started.
+                let live = table.values().filter(|run| run.ended.is_none());
+                let runs = live.clone().count();
+                let run_memory: i64 = live.map(|run| run.shape.1 + RUN_OVERHEAD_MIB).sum();
+                if !warm_fits(
+                    (runs, run_memory),
+                    (warm.len(), warm.memory_mib()),
+                    n(&guest["host_memory_mib"]) + RUN_OVERHEAD_MIB,
+                    (self.max_instances, self.memory_mib),
+                ) {
+                    return;
+                }
                 warm.next += 1;
                 // Named for this agent: a previous one's may still be leaving.
                 let name = format!("{WARM_PREFIX}{}-{}", std::process::id(), warm.next);
@@ -656,6 +721,7 @@ impl Node {
                         serving,
                         signalled,
                         since: Instant::now(),
+                        memory_mib: n(&guest["host_memory_mib"]) + RUN_OVERHEAD_MIB,
                     })
                 }
                 Ok((None, _, _)) => return,
@@ -812,8 +878,29 @@ impl Node {
                 self.start_cold(id, key, run, guest, artifact)
             }
         };
+        // A run that started beside waiting shims may have taken the node
+        // past its instances: those that waited longest give way.
+        if let (Ok(table), Ok(mut warm)) = (lock(&self.runs), lock(&self.warm)) {
+            let runs = table.values().filter(|run| run.ended.is_none()).count();
+            while runs + warm.len() > self.max_instances && warm.drop_oldest() {}
+        }
         self.fill_warm(&pool, guest, artifact);
         started
+    }
+
+    /// The host memory of the warm shims that wait, counted as runs' is.
+    pub fn warm_memory_mib(&self) -> i64 {
+        lock(&self.warm).map_or(0, |warm| warm.memory_mib())
+    }
+
+    /// Discards every warm shim that waits. They hold the environment of the
+    /// launches they were made like, secret values among it, and the memory
+    /// of a VM each: discarded when a run is stopped (what it was given may
+    /// have been taken back) and when a run needs their room.
+    pub fn discard_warm(&self) {
+        if let Ok(mut warm) = lock(&self.warm) {
+            warm.shims.clear();
+        }
     }
 
     fn start_cold(
@@ -1222,6 +1309,9 @@ impl Node {
             ));
         }
         let status = self.status(id)?;
+        // A run is stopped when what it was given is taken back: shims
+        // waiting with the same environment do not outlast that.
+        self.discard_warm();
         if !terminal(s(&status["state"])) {
             let cgroup = lock(&self.runs)?.get(id).and_then(|run| run.cgroup.clone());
             let cgroup = self.run_cgroup(cgroup.as_deref().unwrap_or(id));
@@ -1261,6 +1351,22 @@ mod tests {
         assert!(pool.holds_uid(600_007));
         assert!(!pool.holds_uid(600_008));
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn a_waiting_shim_is_counted_as_a_run_is() {
+        // Four instances, 1024 MiB: two runs of 280 MiB and one shim waiting.
+        let node = (4, Some(1024));
+        assert!(warm_fits((2, 560), (1, 280), 152, node));
+        // No instance left, though memory is.
+        assert!(!warm_fits((2, 560), (2, 300), 100, node));
+        assert!(!warm_fits((4, 100), (0, 0), 10, node));
+        // No memory left, though an instance is.
+        assert!(!warm_fits((2, 560), (1, 280), 185, node));
+        assert!(warm_fits((2, 560), (1, 280), 184, node));
+        // A node not told its memory counts instances alone.
+        assert!(warm_fits((2, 9000), (1, 9000), 9000, (4, None)));
+        assert!(!warm_fits((3, 0), (1, 0), 0, (4, None)));
     }
 
     #[test]

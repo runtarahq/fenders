@@ -31,6 +31,9 @@ struct Fixture {
     /// Milliseconds each create takes before it commits, outside `guard`,
     /// as a real node's durable writes and spawn do.
     create_delay_ms: std::sync::atomic::AtomicU64,
+    /// Creates within that delay now, and the most there were at once.
+    creating: std::sync::atomic::AtomicUsize,
+    most_creating: std::sync::atomic::AtomicUsize,
     /// Set when the backend serves the outbound byte limit: its launcher.
     budget_launcher: std::sync::OnceLock<String>,
 }
@@ -49,6 +52,8 @@ impl Fixture {
             inspection_mode: AtomicU8::new(0),
             compile_scopes: Mutex::new(Vec::new()),
             create_delay_ms: std::sync::atomic::AtomicU64::new(0),
+            creating: Default::default(),
+            most_creating: Default::default(),
             budget_launcher: std::sync::OnceLock::new(),
         }
     }
@@ -118,7 +123,10 @@ impl Backend for Fixture {
     fn create(&self, spec: &Value, key: &str) -> Result<Value> {
         let delay = self.create_delay_ms.load(Ordering::SeqCst);
         if delay > 0 {
+            let now = self.creating.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most_creating.fetch_max(now, Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(delay));
+            self.creating.fetch_sub(1, Ordering::SeqCst);
         }
         let _guard = self.guard.lock().unwrap();
         if let Some(id) = self.lookup_key(key)? {
@@ -652,17 +660,18 @@ async fn assignments_apply_at_once_so_slow_creations_overlap() {
     ];
     l.fixture.create_delay_ms.store(250, Ordering::SeqCst);
     let agent = l.agent(400, 4096);
-    let started = std::time::Instant::now();
     agent.step().await.unwrap();
-    let took = started.elapsed();
     assert_eq!(
         l.fixture.list().unwrap().len(),
         ids.len(),
         "every run created"
     );
+    // Counted, not timed: how long four creations take depends on what else
+    // the machine is doing, and whether they were under way at once does not.
+    let at_once = l.fixture.most_creating.load(Ordering::SeqCst);
     assert!(
-        took < std::time::Duration::from_millis(4 * 250 * 3 / 4),
-        "four 250 ms creations took {took:?}, as if one after another"
+        at_once > 1,
+        "four 250 ms creations ran one after another (most at once: {at_once})"
     );
     drop(agent);
     l.finish().await;

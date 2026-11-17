@@ -204,6 +204,7 @@ fn entry() -> Result<()> {
     )?
     .with_disk_free_mib(args.disk_free_mib)?
     .with_run_uids(args.run_uid_base)?
+    .with_memory_mib(args.memory_mib)
     .with_warm_runs(args.warm_runs)?
     .with_egress_budget(args.egress_budget)
     .with_compiler_limits(fenders_node::core::CompilerLimits {

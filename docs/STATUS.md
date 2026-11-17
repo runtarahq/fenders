@@ -188,11 +188,12 @@ as both control plane and node.
   A node refuses to start when one of them is an account's or within a
   subordinate uid range of its host, or when another node on the host
   already runs from the same base.
-- With `--warm-runs`, up to 32 booted shims wait outside the node's instance
-  and memory accounting, and each holds the environment (secret values
-  included) of the launch it was made like for up to ten minutes. A removed
-  connection stops runs, not waiting shims: those are never claimed by a
-  launch whose configuration differs, and lapse.
+- With `--warm-runs`, booted shims wait for runs like the ones they were
+  made after, up to 32. Each is counted against the node's instances and
+  memory as a run is, and gives way when a run needs its room. Each holds
+  the environment (secret values included) of the launch it was made like,
+  for up to ten minutes; all are discarded when any run on the node is
+  stopped, as a removed connection stops runs.
 - A node's compiled-artifact budget (512 MiB by default) is shared by every
   workspace it compiles for, and an entry is kept for an hour once made: a
   workspace that fills it has the next upload refused for everyone on that

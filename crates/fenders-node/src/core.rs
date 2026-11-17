@@ -466,6 +466,9 @@ pub struct Node {
     /// compiled artifact each uses: counted against instance and disk
     /// capacity and pinned in the artifact cache until they are in `runs`.
     creating: Mutex<std::collections::HashMap<String, PathBuf>>,
+    /// The host memory this node may give its runs, when it was told: warm
+    /// shims are started only within it.
+    memory_mib: Option<i64>,
     /// Held for as long as this node gives out uids from its base.
     run_uid_lock: Option<fs::File>,
     /// Warm shims kept per artifact and guest configuration (0: none).
@@ -592,6 +595,7 @@ impl Node {
             endings: Default::default(),
             meters: Default::default(),
             creating: Default::default(),
+            memory_mib: None,
             run_uid_lock: None,
             warm_runs: 0,
             egress_budget: false,
@@ -688,6 +692,7 @@ impl Node {
             endings: Default::default(),
             meters: Default::default(),
             creating: Default::default(),
+            memory_mib: None,
             run_uid_lock: None,
             warm_runs: 0,
             egress_budget: false,
@@ -697,6 +702,13 @@ impl Node {
         // The runs a previous agent started, from their shims.
         node.reattach()?;
         Ok(node)
+    }
+    /// The host memory this node's runs may take in all, as its agent
+    /// counts it: warm shims, which wait outside the agent's admissions, are
+    /// started only where they fit it beside the runs.
+    pub fn with_memory_mib(mut self, memory_mib: i64) -> Self {
+        self.memory_mib = Some(memory_mib);
+        self
     }
     /// Runs take their uids from `base` on, one each. Refused when any of
     /// them is an account's on this host or within a range given to a user
