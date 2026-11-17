@@ -186,6 +186,16 @@ const VMM_KVM_REQUESTS: &[u64] = &[
     0x4018_aee2, // KVM_GET_DEVICE_ATTR
 ];
 const COMMON: &str = "read write readv writev pread64 pwrite64 close close_range fstat newfstatat stat lstat statx lseek open openat access faccessat faccessat2 readlink readlinkat getdents64 mmap mprotect munmap mremap madvise brk rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack futex futex_time64 set_robust_list set_tid_address rseq getrandom clock_gettime clock_gettime64 clock_nanosleep clock_nanosleep_time64 nanosleep getpid getppid gettid getuid geteuid getgid getegid getresuid getresgid getrusage getrlimit sysinfo uname sched_getaffinity sched_yield fcntl fcntl64 dup dup2 dup3 restart_syscall exit exit_group execve fadvise64 fadvise64_64 ftruncate fsync fdatasync poll ppoll ppoll_time64 select pselect6 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait epoll_pwait2 eventfd eventfd2";
+/// The launcher's own calls, whatever their arguments: what its source
+/// makes and what a traced command run and HTTP run showed it and its C
+/// library making, and no more. It is not the compiler's list: the launcher
+/// opens no path by the older calls, asks nothing of users, groups or the
+/// host's name, and has no use for `select`, `dup2` or `close_range`.
+/// Socket calls, `fcntl`, `ioctl`, `prctl` and the rest that are allowed by
+/// argument are added beside these. `execve` is here because the filter is
+/// loaded before the launcher is executed; the launcher's own filter then
+/// refuses it.
+const VMM: &str = "read write readv writev pread64 pwrite64 close fstat newfstatat statx lseek openat access readlinkat getdents64 mmap mprotect munmap mremap madvise brk rt_sigaction rt_sigprocmask rt_sigreturn futex set_robust_list set_tid_address rseq getrandom clock_gettime clock_nanosleep nanosleep getpid gettid getrusage sched_getaffinity sched_yield dup restart_syscall exit exit_group execve fadvise64 ftruncate fsync fdatasync poll ppoll epoll_create1 epoll_ctl epoll_wait epoll_pwait eventfd2";
 fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
     unsafe {
         let init: libloading::Symbol<unsafe extern "C" fn(u32) -> *mut c_void> = library
@@ -229,11 +239,7 @@ fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
         };
         let masked = |arg, a, b| Compare { arg, op: 7, a, b };
         let result = (|| {
-            for name in COMMON.split_whitespace() {
-                // The launcher's descriptor control is allowed by command.
-                if profile == "vmm" && name.starts_with("fcntl") {
-                    continue;
-                }
+            for name in (if profile == "vmm" { VMM } else { COMMON }).split_whitespace() {
                 rule(name, &[], allow)?;
             }
             rule("prlimit64", &[eq(0, 0), eq(2, 0)], allow)?;

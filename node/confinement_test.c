@@ -14,6 +14,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/sysinfo.h>
+#include <sys/utsname.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -115,6 +117,19 @@ int main(int argc,char **argv) {
         CHECK(fcntl(fd,F_SETLK,&lock)==-1 && errno==EPERM);
         close(fd);
         puts("PASS VMM socket options, message flags and descriptor commands by argument");
+        // Calls the compiler's profile has and the launcher has no use for.
+        struct utsname host;int pair[2]={0,1};struct sysinfo memory;
+        CHECK(uname(&host)==-1 && errno==EPERM);
+        CHECK(syscall(SYS_getuid)==-1 && errno==EPERM);
+        CHECK(syscall(SYS_getppid)==-1 && errno==EPERM);
+        CHECK(sysinfo(&memory)==-1 && errno==EPERM);
+        CHECK(syscall(SYS_dup2,pair[0],9)==-1 && errno==EPERM);
+        CHECK(syscall(SYS_close_range,100,200,0)==-1 && errno==EPERM);
+        CHECK(syscall(SYS_open,"/dev/null",O_RDONLY)==-1 && errno==EPERM);
+        CHECK(syscall(SYS_stat,"/",&host)==-1 && errno==EPERM);
+        CHECK(syscall(SYS_readlink,"/proc/self/exe",data,sizeof(data))==-1 && errno==EPERM);
+        CHECK(syscall(SYS_select,0,NULL,NULL,NULL,NULL)==-1 && errno==EPERM);
+        puts("PASS VMM has a call list of its own, without the compiler's extras");
         // One more filter may be added, as the launcher adds its own.
         struct sock_filter allow={BPF_RET|BPF_K,0,0,SECCOMP_RET_ALLOW};
         struct sock_fprog program={.len=1,.filter=&allow};
