@@ -148,7 +148,7 @@ const CLIENT_REUSE: Duration = Duration::from_secs(55);
 /// header read timeout, which closes a connection no request arrives on.
 const CLIENT_IDLE: Duration = Duration::from_secs(8);
 /// Idle connections a client keeps, so a burst does not hold the server's
-/// 128 connection slots after it: a node's agent and its forwarder hold at
+/// connection slots after it: a node's agent and its forwarder hold at
 /// most this many each, which the server closes 10 s after their handshake.
 const CLIENT_IDLE_CONNECTIONS: usize = 4;
 /// How long a client keeps a connection for more requests: [`CLIENT_REUSE`]
@@ -275,6 +275,138 @@ pub async fn serve_tls_until(
 ) -> Result<()> {
     serve_tls_for(listener, config, router, Duration::from_secs(80), shutdown).await
 }
+/// Who may hold a listener's connections.
+///
+/// A connection is first a handshake, then one that is served. The two are
+/// budgeted apart, and each also for every peer address, so that sockets
+/// which never finish a handshake (they need no certificate and no credential
+/// to open) take nothing from the connections of peers that did, and one
+/// address cannot hold a listener's whole capacity. An IPv6 peer is its /64.
+#[derive(Clone)]
+pub struct Admission(Arc<Budget>);
+
+struct Budget {
+    handshakes: usize,
+    peer_handshakes: usize,
+    serving: usize,
+    peer_serving: usize,
+    held: std::sync::Mutex<Held>,
+}
+
+#[derive(Default)]
+struct Held {
+    handshakes: usize,
+    serving: usize,
+    /// Handshakes and served connections of each peer that holds any.
+    peers: std::collections::HashMap<std::net::IpAddr, (usize, usize)>,
+}
+
+/// One connection's place in a listener's budget, given back when dropped.
+pub struct Slot {
+    budget: Arc<Budget>,
+    peer: std::net::IpAddr,
+    served: bool,
+}
+
+impl Admission {
+    /// At most `handshakes` connections in their handshake and `serving`
+    /// served, of which one peer holds at most a quarter and `peer_serving`.
+    pub fn new(handshakes: usize, serving: usize, peer_serving: usize) -> Self {
+        Self(Arc::new(Budget {
+            handshakes,
+            peer_handshakes: (handshakes / 4).max(1),
+            serving,
+            peer_serving,
+            held: Default::default(),
+        }))
+    }
+
+    /// A place for a connection `peer` just opened, or `None` when the
+    /// listener, or that peer, has as many handshakes as it may.
+    pub fn handshake(&self, peer: std::net::IpAddr) -> Option<Slot> {
+        let peer = match peer {
+            std::net::IpAddr::V6(address) => match address.to_ipv4_mapped() {
+                Some(mapped) => mapped.into(),
+                None => {
+                    let mut segments = address.segments();
+                    segments[4..].fill(0);
+                    std::net::Ipv6Addr::from(segments).into()
+                }
+            },
+            v4 => v4,
+        };
+        let mut held = self.0.held.lock().unwrap_or_else(|e| e.into_inner());
+        if held.handshakes >= self.0.handshakes {
+            return None;
+        }
+        let of_peer = held.peers.entry(peer).or_default();
+        if of_peer.0 >= self.0.peer_handshakes {
+            if *of_peer == (0, 0) {
+                held.peers.remove(&peer);
+            }
+            return None;
+        }
+        of_peer.0 += 1;
+        held.handshakes += 1;
+        Some(Slot {
+            budget: self.0.clone(),
+            peer,
+            served: false,
+        })
+    }
+}
+
+impl Slot {
+    /// The handshake is done: its place becomes one of a served connection.
+    /// False when the listener, or the peer, already has as many as it may.
+    pub fn established(&mut self) -> bool {
+        if self.served {
+            return true;
+        }
+        let mut held = self.budget.held.lock().unwrap_or_else(|e| e.into_inner());
+        let of_peer = held.peers.get(&self.peer).map_or(0, |peer| peer.1);
+        if held.serving >= self.budget.serving || of_peer >= self.budget.peer_serving {
+            return false;
+        }
+        held.handshakes -= 1;
+        held.serving += 1;
+        if let Some(peer) = held.peers.get_mut(&self.peer) {
+            peer.0 -= 1;
+            peer.1 += 1;
+        }
+        self.served = true;
+        true
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut held = self.budget.held.lock().unwrap_or_else(|e| e.into_inner());
+        if self.served {
+            held.serving -= 1;
+        } else {
+            held.handshakes -= 1;
+        }
+        if let Some(peer) = held.peers.get_mut(&self.peer) {
+            if self.served {
+                peer.1 -= 1;
+            } else {
+                peer.0 -= 1;
+            }
+            if *peer == (0, 0) {
+                held.peers.remove(&self.peer);
+            }
+        }
+    }
+}
+
+/// Handshakes in progress, connections served and connections served for one
+/// peer address, on a node-control or management listener. A node holds a
+/// long poll and a few kept connections; many nodes may share an address.
+const HANDSHAKES: usize = 128;
+const SERVED: usize = 512;
+const SERVED_PER_PEER: usize = 128;
+
 /// How long a listener waits after a failed accept before the next.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
@@ -302,12 +434,12 @@ async fn serve_tls_for(
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let acceptor = tokio_rustls::TlsAcceptor::from(config);
-    let capacity = Arc::new(tokio::sync::Semaphore::new(128));
+    let admission = Admission::new(HANDSHAKES, SERVED, SERVED_PER_PEER);
     let mut connections = tokio::task::JoinSet::new();
     let (stopping, stop) = tokio::sync::watch::channel(false);
     tokio::pin!(shutdown);
     loop {
-        let (socket, _) = tokio::select! {
+        let (socket, peer) = tokio::select! {
             biased;
             _ = &mut shutdown => break,
             _ = connections.join_next(), if !connections.is_empty() => continue,
@@ -316,7 +448,7 @@ async fn serve_tls_for(
                 None => continue,
             },
         };
-        let Ok(permit) = capacity.clone().try_acquire_owned() else {
+        let Some(mut slot) = admission.handshake(peer.ip()) else {
             drop(socket);
             continue;
         };
@@ -325,12 +457,16 @@ async fn serve_tls_for(
         let router = router.clone();
         let mut stop = stop.clone();
         connections.spawn(async move {
-            let _permit = permit;
             let Ok(Ok(tls)) =
                 tokio::time::timeout(Duration::from_secs(10), acceptor.accept(socket)).await
             else {
                 return;
             };
+            // Only a peer that finished its handshake (with its certificate,
+            // where one is required) takes a served connection's place.
+            if !slot.established() {
+                return;
+            }
             let leaf = tls.get_ref().1.peer_certificates().and_then(|c| c.first());
             let pin = leaf.map(|c| digest(c.as_ref()));
             let key = leaf.and_then(|c| key_pin(c.as_ref()));
@@ -882,6 +1018,7 @@ mod tests {
     /// and can cut them all.
     struct Relay {
         address: std::net::SocketAddr,
+        server: std::net::SocketAddr,
         connections: Arc<std::sync::atomic::AtomicUsize>,
         live: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     }
@@ -942,6 +1079,7 @@ mod tests {
             });
             Self {
                 address,
+                server,
                 connections,
                 live,
             }
@@ -1001,6 +1139,74 @@ mod tests {
         client
             .request_bytes("POST", "/echo", &vec![b'x'; size], &[], 1024)
             .await
+    }
+
+    #[test]
+    fn handshakes_and_served_connections_are_budgeted_apart_and_for_each_peer() {
+        let ip = |last: u8| std::net::IpAddr::from([10, 0, 0, last]);
+        // 8 handshakes (2 a peer), 4 served (2 a peer).
+        let admission = Admission::new(8, 4, 2);
+        // One address stalls its handshakes: it gets its share, no more.
+        let stalled: Vec<_> = (0..4).filter_map(|_| admission.handshake(ip(1))).collect();
+        assert_eq!(stalled.len(), 2);
+        // Others are served all the same, up to their own share.
+        let mut served = Vec::new();
+        for peer in [2, 3] {
+            for _ in 0..2 {
+                let mut slot = admission.handshake(ip(peer)).unwrap();
+                assert!(slot.established());
+                served.push(slot);
+            }
+        }
+        let mut over = admission.handshake(ip(2)).unwrap();
+        assert!(!over.established(), "a peer's share of served connections");
+        drop(over);
+        let mut full = admission.handshake(ip(4)).unwrap();
+        assert!(!full.established(), "the listener's served connections");
+        drop(full);
+        // A place given back is there to take, and nothing is left counted.
+        served.pop();
+        let mut next = admission.handshake(ip(4)).unwrap();
+        assert!(next.established());
+        drop((stalled, served, next));
+        let held = admission.0.held.lock().unwrap();
+        assert_eq!((held.handshakes, held.serving, held.peers.len()), (0, 0, 0));
+        drop(held);
+        // An IPv6 peer is its /64, and a mapped address the IPv4 one.
+        let admission = Admission::new(4, 4, 4);
+        let v6 = |tail: u16| std::net::IpAddr::from([0x2001, 0xdb8, 0, 1, 0, 0, 0, tail]);
+        let _one = admission.handshake(v6(1)).unwrap();
+        assert!(admission.handshake(v6(2)).is_none());
+        assert!(
+            admission
+                .handshake("2001:db8:0:2::1".parse().unwrap())
+                .is_some()
+        );
+        let _mapped = admission
+            .handshake("::ffff:10.0.0.9".parse().unwrap())
+            .unwrap();
+        assert!(admission.handshake(ip(9)).is_none());
+    }
+
+    #[tokio::test]
+    async fn sockets_that_never_finish_a_handshake_leave_other_peers_served() {
+        let (relay, client, _dir) = served(echo()).await;
+        // More idle sockets than the listener has handshakes for, from another
+        // address than the client's: none sends a byte.
+        let server = relay.server;
+        let mut idle = Vec::new();
+        for _ in 0..HANDSHAKES + 32 {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.bind("127.0.0.2:0".parse().unwrap()).unwrap();
+            idle.push(socket.connect(server).await.unwrap());
+        }
+        for size in [1, 2, 3] {
+            assert_eq!(
+                call(&client, size).await.unwrap(),
+                size.to_string().as_bytes()
+            );
+        }
+        drop(idle);
     }
 
     #[tokio::test]

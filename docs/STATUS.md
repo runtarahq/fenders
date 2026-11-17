@@ -134,6 +134,15 @@ as both control plane and node.
 - Scale-out reacts in seconds and by one execution at a time; a burst beyond
   the queue (64 requests an app) is answered 503.
 - The rate limit is counted in memory: a restart forgets the last minute.
+- Connections are limited per listener and per peer address, with unfinished
+  handshakes budgeted apart from served connections: 512 served (128 an
+  address) on the management and node-control listeners, 8192 (2048 an
+  address) on the gateway and the run channel, where a connection that makes
+  no request for two minutes is closed. These are constants. They stop one
+  address, or sockets that never complete a handshake, from holding a
+  listener; they do not stop many addresses acting together. Put a proxy or
+  a firewall in front of a listener that faces the internet, and do not
+  expose the node-control and run-channel ports beyond the nodes.
 - Executions of one app on two nodes were shown only in tests with stand-in
   nodes.
 - A run lives at most 24 hours; a cold start is a full launch.
