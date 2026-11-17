@@ -29,8 +29,12 @@ Creation holds the admission lock, exports a consistent PostgreSQL snapshot,
 validates the encryption key and referenced artifact hashes, and stages the
 matching state and dump. Running apps are not frozen. Mutations may time out;
 recover their original receipts before retrying with the same idempotency key.
-Private staging contains plaintext: use an encrypted operator disk and protected
-temporary storage. Cleanup is not a secure-erasure guarantee.
+Staging contains plaintext, the encryption key and the whole database among it.
+It is a directory under `TMPDIR` that only the user running the tool can enter,
+and every file in it is that user's alone, whatever the umask. It is still
+plaintext on disk: use an encrypted operator disk and protected temporary
+storage. Cleanup is not a secure-erasure guarantee. The backup key file must be
+a regular file with no group or other access.
 
 Published archives use authenticated AES-GCM chunks with a per-archive derived
 key, sequence numbers and final marker. Restore rejects corrupt, reordered or

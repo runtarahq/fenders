@@ -47,6 +47,10 @@ async fn main() {
     }
 }
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Everything these tools write is a key or holds one.
+    unsafe {
+        libc::umask(0o077);
+    }
     let args = Args::parse();
     if let Action::Key { output } = args.command {
         backup::random_key(&output)?;
