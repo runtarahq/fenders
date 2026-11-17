@@ -1398,6 +1398,18 @@ struct Limit {
     control: Arc<Control>,
 }
 
+/// Whether the VMM behind `control` says it enforces the outbound byte limit
+/// it was started under. Asked a few times: it answers once it has started.
+async fn launcher_enforces(control: &Control) -> bool {
+    for _ in 0..5 {
+        match control.command("status\n", false).await {
+            Ok(status) => return status["egress_budget_enabled"] == true,
+            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+    }
+    false
+}
+
 /// For a launch under the outbound byte limit: its [`Limit`]
 /// ([`budget::enforce`]) and where that reads the VM's meter. `None` for any
 /// other launch, whose `hold` (there is none) is dropped.
@@ -1454,7 +1466,16 @@ fn limit_outbound(
                 .map(|_| ())
         }
     };
+    let checking = control.clone();
     let task = tokio::spawn(async move {
+        // A launcher that does not say it enforces the limit would let the
+        // guest send unmetered while this shim went on asking for grants:
+        // the run ends instead, and its guest is never released.
+        if !launcher_enforces(&checking).await {
+            tracing::error!("the launcher does not enforce the outbound byte limit");
+            std::mem::forget(hold);
+            return budget::Stop::Unmeasured;
+        }
         let stop = budget::enforce(&id, seen, ask, apply, move || drop(hold)).await;
         tracing::warn!(
             code = stop.code(),
@@ -1650,6 +1671,44 @@ mod tests {
                 Some(4)
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_launcher_that_does_not_enforce_the_byte_limit_is_not_trusted_with_it() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        for (answer, enforces) in [
+            ("{\"error\":null,\"egress_budget_enabled\":true}\n", true),
+            ("{\"error\":null,\"egress_budget_enabled\":false}\n", false),
+            // An older launcher: its status says nothing of a limit.
+            ("{\"error\":null,\"paused\":false}\n", false),
+            // One that does not know the command.
+            ("{\"error\":\"invalid-command\"}\n", false),
+        ] {
+            let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+            let control = Control {
+                socket: tokio::sync::Mutex::new((tokio::io::BufReader::new(ours), 0)),
+                closing: Default::default(),
+            };
+            let launcher = tokio::spawn(async move {
+                let (read, mut write) = theirs.into_split();
+                let mut commands = tokio::io::BufReader::new(read).lines();
+                while let Ok(Some(command)) = commands.next_line().await {
+                    assert_eq!(command, "status");
+                    if write.write_all(answer.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            assert_eq!(launcher_enforces(&control).await, enforces, "{answer}");
+            launcher.abort();
+        }
+        // One that never answers.
+        let (ours, _silent) = tokio::net::UnixStream::pair().unwrap();
+        let control = Control {
+            socket: tokio::sync::Mutex::new((tokio::io::BufReader::new(ours), 0)),
+            closing: Default::default(),
+        };
+        assert!(!launcher_enforces(&control).await);
     }
 
     #[tokio::test(start_paused = true)]
