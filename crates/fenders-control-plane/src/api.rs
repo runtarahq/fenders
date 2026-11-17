@@ -1367,6 +1367,16 @@ async fn gateway_dispatch_tracked(
         )
         .await?;
     let meter = std::sync::Arc::new(Meter::new(state.store.clone(), &lease));
+    // From here the request holds a reservation. If this call is dropped (its
+    // client went away), nothing below runs: the guard settles it then, for
+    // what passed, so that it neither counts as in flight until it lapses
+    // nor is charged the whole of what it had reserved.
+    let settle = Settle {
+        store: state.store.clone(),
+        lease: lease.clone(),
+        meter: meter.clone(),
+        armed: true,
+    };
     use crate::http_exchange::{Message, Offer, pipe, pump};
     // The app's shim takes the request from the exchange and posts the
     // answer there: no node is called. Neither body is held whole.
@@ -1396,10 +1406,10 @@ async fn gateway_dispatch_tracked(
         *dispatched = true;
         let (tx, request_body) = pipe();
         let admit = meter.clone();
-        upload = Some(tokio::spawn(pump(body, tx, Some(GATEWAY_UPLOAD_IDLE), move |bytes| {
+        upload = Some(AbortOnDrop(tokio::spawn(pump(body, tx, Some(GATEWAY_UPLOAD_IDLE), move |bytes| {
             let admit = admit.clone();
             async move { admit.admit(Way::In, bytes).await }
-        })));
+        }))));
         let offered = state
             .store
             .exchange
@@ -1477,9 +1487,7 @@ async fn gateway_dispatch_tracked(
                 };
                 // A request body the app did not read to its end is not
                 // waited for.
-                if let Some(upload) = upload {
-                    upload.abort();
-                }
+                drop(upload);
                 // A response cut short was not what the app sent: recorded
                 // without a status, as an outcome that is not known.
                 let recorded = whole.then_some(status);
@@ -1489,30 +1497,70 @@ async fn gateway_dispatch_tracked(
                 {
                     eprintln!("gateway request {lease} was not settled: {}", error.message);
                 }
+                // Settled here: this task is not dropped with the client's
+                // connection, and held the guard until now.
+                settle.done();
             });
             Ok(response)
         }
         Err(error) => {
-            if let Some(upload) = upload {
-                upload.abort();
-            }
+            drop(upload);
+            settle.done();
+            // What an app never took was not transferred to it; what it took
+            // and did not answer is charged what passed, not what was held.
+            let used = if *dispatched { meter.passed().await } else { 0 };
             // Never given to the app (nothing ran), or failed by it: the
             // outcome is known. Otherwise it may have run.
             if known {
-                // What an app never took was not transferred to it.
-                let used = if *dispatched { meter.passed().await } else { 0 };
                 state
                     .store
                     .ingress_complete(&lease, Some(used), Some(error.status.as_u16()))
                     .await?;
             } else {
-                state
-                    .store
-                    .ingress_finish(&lease, (!*dispatched).then_some(0))
-                    .await?;
+                state.store.ingress_finish(&lease, Some(used)).await?;
             }
             Err(error)
         }
+    }
+}
+
+/// Settles an admitted request whose handling was dropped before it reached
+/// an outcome.
+struct Settle {
+    store: Store,
+    lease: String,
+    meter: std::sync::Arc<crate::ingress::Meter>,
+    armed: bool,
+}
+impl Settle {
+    /// The request was settled by the code that held this.
+    fn done(mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for Settle {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let (store, lease, meter) = (self.store.clone(), self.lease.clone(), self.meter.clone());
+        tokio::spawn(async move {
+            let used = meter.passed().await;
+            if let Err(error) = store.ingress_finish(&lease, Some(used)).await {
+                eprintln!(
+                    "abandoned gateway request {lease} was not settled: {}",
+                    error.message
+                );
+            }
+        });
+    }
+}
+
+/// A task that ends with whoever held it.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

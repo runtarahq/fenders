@@ -1126,6 +1126,30 @@ async fn an_app_serves_once_its_shim_asks_and_its_requests_go_through_the_run_ch
         .await
         .unwrap();
     assert_eq!(after, before + 1, "only the target that fits was admitted");
+    // That one was abandoned by its client while it waited to be taken. It
+    // is settled at once rather than held until its reservation lapses, and
+    // nothing is charged for what never passed.
+    let mut held = 1i64;
+    for _ in 0..200 {
+        held = sqlx::query_scalar("SELECT count(*) FROM ingress_reservations WHERE tenant_id=$1")
+            .bind(&l.tenant)
+            .fetch_one(&l.store.pool)
+            .await
+            .unwrap();
+        if held == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(held, 0, "an abandoned request keeps no reservation");
+    let charged: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(bytes),0)::bigint FROM traffic_usage WHERE tenant_id=$1",
+    )
+    .bind(&l.tenant)
+    .fetch_one(&l.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(charged, counted, "an abandoned request is charged nothing");
 
     // A command's launch takes no requests, and neither does this one once
     // it is stopped: its credential is for a generation that is gone.
