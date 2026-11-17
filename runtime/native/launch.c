@@ -63,6 +63,16 @@ static _Thread_local struct virtual_thread *current_thread;
 static long clone_virtual_thread(int,struct kvm_regs *,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
 static void exit_virtual_thread(void);
 static void *run_virtual_thread(void *);
+// One thread ends the process. A guest's threads, the control thread and any
+// failed check may all decide to at once; `exit` run by two of them at a time
+// flushes streams and runs the meter's last line under each other. The first
+// goes on to exit; the rest wait to be ended with it.
+static _Atomic int exiting;
+__attribute__((noreturn)) static void exit_once(int code) {
+    if(atomic_exchange(&exiting,1))for(;;)pause();
+    (exit)(code);
+}
+#define exit(code) exit_once(code)
 #include "diagnostics.inc"
 static void fail(const char *msg) {fprintf(DIAGNOSTICS,"%s: %s\n",msg,strerror(errno));exit(1);}
 #define CHECK(x) do {if((x)<0) fail(#x);} while(0)

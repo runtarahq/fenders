@@ -68,6 +68,10 @@ static void exit_virtual_thread(void) {
         syscall(SYS_futex,tid,FUTEX_WAKE|FUTEX_PRIVATE_FLAG,INT_MAX,NULL,NULL,0);
     }
     pthread_mutex_lock(&lifecycle_lock);current_thread->active=0;
+    int remaining=0;for(unsigned i=0;i<thread_count;i++)remaining+=virtual_threads[i].active;
     pthread_cond_broadcast(&lifecycle_changed);pthread_mutex_unlock(&lifecycle_lock);
+    // The last guest thread gone, there is no guest: the launcher does not
+    // stay behind with only its meter and control threads.
+    if(!remaining){fprintf(DIAGNOSTICS,"guest exit 0; every thread exited\n");exit(0);}
     close(current_thread->cpu);munmap(current_thread->run,vcpu_map_size);pthread_exit(NULL);
 }
