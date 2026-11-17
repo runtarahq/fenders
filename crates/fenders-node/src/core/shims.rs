@@ -967,6 +967,9 @@ impl Node {
         if let Some(cpu) = next_vm_cpu() {
             spec.insert("cpu".into(), json!(cpu));
         }
+        if self.share_cores {
+            spec.insert("share_core".into(), json!(true));
+        }
         spec.insert("guest".into(), guest.clone());
     }
 

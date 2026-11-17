@@ -37,6 +37,12 @@ struct Args {
     /// are meant to reach services beside it, as a local environment's is.
     #[arg(long)]
     local_destinations: bool,
+    /// Let two runs' VMs run on the two hardware threads of one core at the
+    /// same moment. By default they never do (each VM has a core-scheduling
+    /// cookie of its own), and a sibling stands idle when its core's run has
+    /// nothing for it.
+    #[arg(long)]
+    share_cores: bool,
     /// Warm shims (VM booted, component loaded, each for one run) kept per
     /// artifact and guest configuration a run used.
     #[arg(long, default_value_t = 0)]
@@ -125,7 +131,7 @@ struct Args {
 }
 /// What this host's settings mean for runs that share it, said once at
 /// start. Neither stops the node: both are the operator's to decide.
-fn host_notes() {
+fn host_notes(share_cores: bool) {
     let on = |path: &str| {
         std::fs::read_to_string(path).is_ok_and(|v| matches!(v.trim(), "1" | "Y" | "y"))
     };
@@ -141,11 +147,18 @@ fn host_notes() {
         }
     }
     // Each run's VM has a core-scheduling cookie of its own (the shim asks
-    // for one), so two runs never share a core at the same moment.
+    // for one), so two runs never share a core at the same moment, unless
+    // the node was started with --share-cores.
     if on("/sys/devices/system/cpu/smt/active") {
-        tracing::info!(
-            "sibling hardware threads are active: runs are kept off each other's cores, and a sibling stands idle when its core's run has nothing for it"
-        );
+        if share_cores {
+            tracing::warn!(
+                "sibling hardware threads are active and --share-cores is set: two runs may run on one core at the same moment"
+            );
+        } else {
+            tracing::info!(
+                "sibling hardware threads are active: runs are kept off each other's cores, and a sibling stands idle when its core's run has nothing for it (--share-cores lets them share)"
+            );
+        }
     }
 }
 fn main() {
@@ -226,7 +239,7 @@ fn entry() -> Result<()> {
             )
         })
         .transpose()?;
-    host_notes();
+    host_notes(args.share_cores);
     let mut node = Node::new(
         &args.state.join("node"),
         &args.build,
@@ -237,6 +250,7 @@ fn entry() -> Result<()> {
     .with_run_uids(args.run_uid_base)?
     .with_memory_mib(args.memory_mib)
     .with_local_destinations(args.local_destinations)
+    .with_shared_cores(args.share_cores)
     .with_warm_runs(args.warm_runs)?
     .with_egress_budget(args.egress_budget)
     .with_compiler_limits(fenders_node::core::CompilerLimits {

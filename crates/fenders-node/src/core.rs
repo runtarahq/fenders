@@ -472,6 +472,8 @@ pub struct Node {
     /// The host memory this node may give its runs, when it was told: warm
     /// shims are started only within it.
     memory_mib: Option<i64>,
+    /// Whether two runs' VMs may run on one core's hardware threads at once.
+    share_cores: bool,
     /// Held for as long as this node gives out uids from its base.
     run_uid_lock: Option<fs::File>,
     /// Warm shims kept per artifact and guest configuration (0: none).
@@ -624,6 +626,7 @@ impl Node {
             meters: Default::default(),
             creating: Default::default(),
             memory_mib: None,
+            share_cores: false,
             run_uid_lock: None,
             warm_runs: 0,
             egress_budget: false,
@@ -721,6 +724,7 @@ impl Node {
             meters: Default::default(),
             creating: Default::default(),
             memory_mib: None,
+            share_cores: false,
             run_uid_lock: None,
             warm_runs: 0,
             egress_budget: false,
@@ -736,6 +740,16 @@ impl Node {
     /// on its own host, as a developer's is. It holds for the process.
     pub fn with_local_destinations(self, allowed: bool) -> Self {
         LOCAL_DESTINATIONS.store(allowed, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+    /// Lets two runs' VMs run on the two hardware threads of one core at the
+    /// same moment. By default each VM has a core-scheduling cookie of its
+    /// own and they never do, which leaves a sibling idle when its core's
+    /// run has nothing for it: a node whose tenants trust each other, or
+    /// whose processor's sibling threads leak nothing that matters to it,
+    /// may prefer the capacity.
+    pub fn with_shared_cores(mut self, shared: bool) -> Self {
+        self.share_cores = shared;
         self
     }
     /// The host memory this node's runs may take in all, as its agent

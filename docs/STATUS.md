@@ -225,7 +225,8 @@ as both control plane and node.
   core-scheduling cookie of its own: two runs never share a core at the
   same moment, and a sibling stands idle when its core's run has nothing
   for it. Capacity counted in logical CPUs is then less than it reads when
-  every CPU is busy with a different run.
+  every CPU is busy with a different run. A node started with
+  `--share-cores` lets runs share a core, and says so in its log.
 - The kernel holds a VM's cgroup to the run's own destinations (its
   `tcp_allow` pairs and the resolver's port 53, no IPv6) when the shim is
   root, as a node's is. A shim that is not root has the launcher's check

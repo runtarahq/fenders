@@ -264,8 +264,11 @@ fn vmm() -> Result<()> {
             .collect();
         drop_to(uid, gid, &kvm)?;
     }
-    // The VM shares no core with another run's at the same moment.
-    fenders_node::confinement::core_alone().map_err(os("a core-scheduling cookie"))?;
+    // The VM shares no core with another run's at the same moment, unless
+    // its node was started to let runs share.
+    if std::env::var_os("FENDERS_SHIM_SHARE_CORE").is_none() {
+        fenders_node::confinement::core_alone().map_err(os("a core-scheduling cookie"))?;
+    }
     undumpable()?;
     // Set after the uid change, which clears it: the VMM dies with its shim.
     check(
@@ -938,6 +941,9 @@ fn start(
     }
     if let Some(cpu) = spec.cpu {
         command.env("FENDERS_VMM_CPU", cpu.to_string());
+    }
+    if spec.share_core {
+        command.env("FENDERS_SHIM_SHARE_CORE", "1");
     }
     if let Some(hold) = hold {
         inheritable(hold.as_raw_fd())?;
