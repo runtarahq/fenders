@@ -720,3 +720,53 @@ async fn global_operator_activity_is_bounded_private_and_cursor_stable() {
     );
     lab.finish().await;
 }
+
+/// The operator credential is the one in the state directory's file: it does
+/// not lapse while it is, and replacing the file ends the one before it.
+#[tokio::test]
+async fn the_operator_credential_is_the_files_and_replacing_the_file_ends_the_old_one() {
+    let l = Lab::new().await;
+    let path = l.store.bootstrap().await.unwrap();
+    let first = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(first, l.token);
+    // As a control plane first started more than thirty days ago had it.
+    sqlx::query("UPDATE credentials SET expires=now()-interval '1 day' WHERE role='operator'")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        l.store.authenticate(&first).await.unwrap_err().status,
+        StatusCode::UNAUTHORIZED
+    );
+    // The next start makes it valid again, and it stays valid.
+    l.store.bootstrap().await.unwrap();
+    assert!(l.store.authenticate(&first).await.is_ok());
+    let lapses: bool = sqlx::query_scalar(
+        "SELECT bool_or(expires<'infinity') FROM credentials WHERE role='operator' AND NOT revoked",
+    )
+    .fetch_one(&l.store.pool)
+    .await
+    .unwrap();
+    assert!(!lapses);
+
+    // Replaced: a new credential, and the old one is refused.
+    std::fs::remove_file(&path).unwrap();
+    let second = std::fs::read_to_string(l.store.bootstrap().await.unwrap()).unwrap();
+    assert_ne!(second, first);
+    assert!(l.store.authenticate(&second).await.is_ok());
+    assert_eq!(
+        l.store.authenticate(&first).await.unwrap_err().status,
+        StatusCode::UNAUTHORIZED
+    );
+    // One that was revoked is not revived by a start, whatever the file says.
+    sqlx::query("UPDATE credentials SET revoked=true WHERE role='operator'")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    l.store.bootstrap().await.unwrap();
+    assert_eq!(
+        l.store.authenticate(&second).await.unwrap_err().status,
+        StatusCode::UNAUTHORIZED
+    );
+    l.finish().await;
+}

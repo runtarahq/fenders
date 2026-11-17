@@ -66,7 +66,9 @@ as both control plane and node.
   retention.
 - The operator credential is one bearer token, written to
   `STATE/operator.token` at first start. It is not scoped; whoever holds it
-  can do anything.
+  can do anything. It is valid for as long as it is that file's: to replace
+  one that leaked, delete the file and start the control plane again, which
+  writes a new one and revokes the old.
 - An API key or tenant credential lives at most 30 days. A host product
   re-issues them with the operator credential. One issued with a tenant
   credential lives no longer than that credential, and ends when it is

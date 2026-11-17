@@ -291,8 +291,16 @@ impl Store {
         if !credential.starts_with("fnd_op_") || credential.len() > 256 {
             return Err(Error::invalid("invalid operator credential file"));
         }
-        sqlx::query("INSERT INTO credentials (id,token_hash,name,role,expires) VALUES ($1,$2,'bootstrap','operator',now()+interval '30 days') ON CONFLICT (token_hash) DO NOTHING")
+        // The file is the operator credential: it is valid for as long as it
+        // is the file's, not for thirty days from the first start (after
+        // which nothing could issue or renew a tenant's credentials). One
+        // that was revoked, as a restore revokes every credential, stays so.
+        sqlx::query("INSERT INTO credentials (id,token_hash,name,role,expires) VALUES ($1,$2,'bootstrap','operator','infinity') ON CONFLICT (token_hash) DO UPDATE SET expires='infinity' WHERE NOT credentials.revoked")
             .bind(uid()).bind(digest(credential)).execute(&mut *tx).await?;
+        // And only it: a credential the file held before is revoked, so that
+        // replacing the file and starting again is how one that leaked ends.
+        sqlx::query("UPDATE credentials SET revoked=true WHERE role='operator' AND name='bootstrap' AND token_hash<>$1 AND NOT revoked")
+            .bind(digest(credential)).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(path)
     }
