@@ -125,7 +125,66 @@ static void meter_pipe(void) {
     assert(fcntl(pipefd[1],F_GETFD)&FD_CLOEXEC);
     puts("PASS meter pipe: initial and cumulative totals, final line on exit, close-on-exec");
 }
+// The last line against threads still sending: nothing is admitted after it,
+// and a line with nothing in flight is exactly what the peer received.
+static _Atomic int final_guest;
+static void *final_sender(void *unused) {
+    (void)unused;
+    for(;;) {
+        long sent=network_send((uint64_t)atomic_load(&final_guest),"z",1,0);release_calls();
+        if(sent!=1){assert(sent==-EBADF);return NULL;}
+    }
+}
+static void *final_sink(void *arg) {
+    int fd=*(int *)arg;char drain[4096];ssize_t n;uint64_t *total=calloc(1,sizeof(*total));
+    while((n=read(fd,drain,sizeof(drain)))>0)*total+=(uint64_t)n;
+    return total;
+}
+static void *final_unlocked(void *unused) {(void)unused;meter_final();return NULL;}
+static void meter_final_closes(void) {
+    int pipefd[2];assert(!pipe(pipefd));
+    char text[16];snprintf(text,sizeof(text),"%d",pipefd[1]);setenv("FENDERS_METER_FD",text,1);
+    network_meter_start();fcntl(pipefd[0],F_SETFL,O_NONBLOCK);
+    unsigned complete=0;
+    for(unsigned round=0;round<200;round++) {
+        int pair[2];assert(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
+        uint64_t before;int measured;network_usage(&before,&measured);
+        atomic_store(&final_guest,guest_network_fd(pair[0],SOCK_STREAM));
+        pthread_t sink,senders[4];assert(!pthread_create(&sink,NULL,final_sink,&pair[1]));
+        // Every fourth round one sender, which is caught between writes
+        // often enough for lines with nothing in flight to be seen too.
+        unsigned count=round%4?4:1;
+        for(unsigned i=0;i<count;i++)assert(!pthread_create(&senders[i],NULL,final_sender,NULL));
+        usleep(200+round*7%900);
+        meter_final();
+        char lines[65536];ssize_t total=0,n;
+        while((n=read(pipefd[0],lines+total,sizeof(lines)-1-(size_t)total))>0)total+=n;
+        lines[total]=0;assert(total>0 && lines[total-1]=='\n');lines[total-1]=0;
+        char *last=strrchr(lines,'\n');last=last?last+1:lines;
+        unsigned long long bytes,inflight,refusals;
+        assert(sscanf(last,"final %llu %llu %d %llu",&bytes,&inflight,&measured,&refusals)==4);
+        for(unsigned i=0;i<count;i++)assert(!pthread_join(senders[i],NULL));
+        // Admission stays closed.
+        assert(network_send((uint64_t)atomic_load(&final_guest),"z",1,0)==-EBADF);release_calls();
+        guest_close((uint64_t)atomic_load(&final_guest));
+        uint64_t *received;assert(!pthread_join(sink,(void **)&received));
+        assert(*received>=bytes-before && *received<=bytes-before+inflight);
+        if(!inflight){assert(*received==bytes-before);++complete;}
+        free(received);close(pair[1]);
+        pthread_mutex_lock(&fd_lock);network_closed=0;pthread_mutex_unlock(&fd_lock);
+    }
+    // Without the lock, the line never reads as complete.
+    pthread_mutex_lock(&fd_lock);
+    pthread_t waiter;assert(!pthread_create(&waiter,NULL,final_unlocked,NULL));
+    assert(!pthread_join(waiter,NULL));
+    pthread_mutex_unlock(&fd_lock);
+    char lines[4096];ssize_t n=read(pipefd[0],lines,sizeof(lines)-1);assert(n>0);lines[n-1]=0;
+    char *last=strrchr(lines,'\n');last=last?last+1:lines;
+    unsigned long long bytes,inflight;assert(sscanf(last,"final %llu %llu",&bytes,&inflight)==2 && inflight==1);
+    printf("PASS meter final: admission closed with the totals, %u of 200 lines complete and exact, unlocked line incomplete\n",complete);
+}
 int main(int argc,char **argv) {
+    if(argc==2 && !strcmp(argv[1],"--meter-final")){meter_final_closes();return 0;}
     if(argc==2 && !strcmp(argv[1],"--budget")){budget_tests();return 0;}
     if(argc==2 && !strcmp(argv[1],"--budget-wait")){budget_wait_tests();return 0;}
     if(argc==2 && !strcmp(argv[1],"--meter")){meter_pipe();return 0;}

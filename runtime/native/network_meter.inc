@@ -15,21 +15,27 @@ static int meter_fd=-1;
 static _Atomic int meter_dirty;
 static void network_refused(uint64_t reason) {network_refusals|=reason;}
 static void network_publish_locked(void) {atomic_store(&meter_dirty,1);}
-static int meter_line(char *line,size_t capacity,const char *kind) {
+// Set under fd_lock as the VMM exits: no write is admitted after the totals
+// its last line gives.
+static int network_closed;
+// `unsettled` is added to the writes in flight: a line that could not be made
+// under fd_lock says so by never reading as complete.
+static int meter_line(char *line,size_t capacity,const char *kind,uint64_t unsettled) {
     int length=snprintf(line,capacity,"%s %llu %llu %d %llu",kind,
         (unsigned long long)__atomic_load_n(&network_tx_bytes,__ATOMIC_RELAXED),
-        (unsigned long long)__atomic_load_n(&network_tx_inflight,__ATOMIC_RELAXED),
+        (unsigned long long)(__atomic_load_n(&network_tx_inflight,__ATOMIC_RELAXED)+unsettled),
         __atomic_load_n(&network_tx_measured,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&network_refusals,__ATOMIC_RELAXED));
     if(network_budget_enabled)length+=snprintf(line+length,capacity-(size_t)length," %llu",
         (unsigned long long)__atomic_load_n(&network_tx_wanted,__ATOMIC_RELAXED));
     line[length++]='\n';return length;
 }
-static void meter_write(const char *kind) {
-    char line[128];int length=meter_line(line,sizeof(line),kind);
+static void meter_write_line(const char *kind,uint64_t unsettled) {
+    char line[128];int length=meter_line(line,sizeof(line),kind,unsettled);
     // A full pipe drops this line: the next carries the same totals and more.
     if(write(meter_fd,line,(size_t)length)<0 && errno!=EAGAIN)meter_fd=-1;
 }
+static void meter_write(const char *kind) {meter_write_line(kind,0);}
 static void *meter_thread(void *unused) {
     (void)unused;
     for(;;) {
@@ -38,12 +44,20 @@ static void *meter_thread(void *unused) {
     }
     return NULL;
 }
-// On exit (guest exit, fatal signal report, failure): the final totals, read
-// without fd_lock, which another thread may hold as the process ends.
+// On exit (guest exit, fatal signal report, failure): the final totals. The
+// guest's other threads run until the process ends, so admission is closed
+// and the totals read under fd_lock: a line with nothing in flight is then
+// everything this run sent. The exiting thread, or one that will never run
+// again, may hold fd_lock; the lock is waited for briefly, and without it the
+// line says a write is in flight, which a reader takes as incomplete.
 static void meter_final(void) {
-    if(meter_fd<0)return;
+    struct timespec until;clock_gettime(CLOCK_REALTIME,&until);
+    until.tv_nsec+=100000000;if(until.tv_nsec>=1000000000){until.tv_nsec-=1000000000;++until.tv_sec;}
+    int held=!pthread_mutex_timedlock(&fd_lock,&until);
+    if(held)network_closed=1;
     struct pollfd ready={.fd=meter_fd,.events=POLLOUT};
-    if(poll(&ready,1,100)==1)meter_write("final");
+    if(meter_fd>=0 && poll(&ready,1,100)==1)meter_write_line("final",held?0:1);
+    if(held){pthread_cond_broadcast(&network_changed);pthread_mutex_unlock(&fd_lock);}
 }
 static void network_meter_start(void) {
     const char *text=getenv("FENDERS_METER_FD");if(!text)return;
@@ -77,14 +91,14 @@ static long network_begin_tx(struct descriptor *desc,size_t size) {
     if(!desc->network)return 0;
     pthread_mutex_lock(&fd_lock);
     long error=0;
-    if(desc->network->revoked)error=-EBADF;
+    if(desc->network->revoked || network_closed)error=-EBADF;
     else if(UINT64_MAX-network_tx_reserved<size)error=-EAGAIN;
     else if(network_budget_enabled) {
         uint64_t reason,until=0;
         while((reason=network_budget_shortfall_locked(size))) {
             uint64_t now=network_now();
             if(!until)until=now+network_budget_wait;
-            if(reason==4 || now>=until || desc->network->revoked)break;
+            if(reason==4 || now>=until || desc->network->revoked || network_closed)break;
             uint64_t wanted=UINT64_MAX-network_tx_bytes<network_tx_reserved ||
                 UINT64_MAX-network_tx_bytes-network_tx_reserved<size?UINT64_MAX:network_tx_bytes+network_tx_reserved+size;
             if(wanted>network_tx_wanted) {
@@ -99,7 +113,7 @@ static long network_begin_tx(struct descriptor *desc,size_t size) {
             pthread_cond_timedwait(&network_changed,&fd_lock,&tick);
             if(!--network_tx_waiting)__atomic_store_n(&network_tx_wanted,0,__ATOMIC_RELAXED);
         }
-        if(desc->network->revoked)error=-EBADF;
+        if(desc->network->revoked || network_closed)error=-EBADF;
         else if(reason){network_refused(reason);error=-EDQUOT;}
     }
     if(error){pthread_mutex_unlock(&fd_lock);network_publish_locked();return error;}
