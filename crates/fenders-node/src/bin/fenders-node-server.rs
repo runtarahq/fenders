@@ -78,7 +78,9 @@ fn entry() -> Result<(), Box<dyn std::error::Error>> {
             .as_bytes(),
         )?;
     }
-    let token = std::fs::read_to_string(&token_file)?;
+    // The token is whoever's that wrote the file: one this server did not
+    // make, in a directory someone else could write, is not taken.
+    let token = fenders_node::core::private_text(&token_file)?;
     if token.trim().len() < 32 {
         return Err("invalid token file".into());
     }

@@ -49,10 +49,40 @@ pub fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
 pub fn load(path: &Path) -> Result<Value> {
     serde_json::from_slice(&fs::read(path)?).map_err(|_| Error::internal())
 }
+/// Makes `path` a directory of this user's alone. One that is already there
+/// must be this user's own and no link: a directory someone else made, or a
+/// link to one, would be theirs to fill whatever its mode was set to.
 pub fn private_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
     fs::create_dir_all(path)?;
+    let found = fs::symlink_metadata(path)?;
+    if !found.is_dir() || found.uid() != unsafe { libc::geteuid() } {
+        return Err(Error::invalid(
+            "a state directory must be a directory of the user the node runs as, not a link",
+        ));
+    }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
+}
+
+/// The contents of `path`, a secret this user keeps: a regular file, no
+/// link, this user's own, that no one else can read.
+pub fn private_text(path: &Path) -> Result<String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let found = file.metadata()?;
+    if !found.is_file() || found.uid() != unsafe { libc::geteuid() } || found.mode() & 0o077 != 0 {
+        return Err(Error::invalid(
+            "a secret file must be a regular file of the user the node runs as, with no group or other access",
+        ));
+    }
+    let mut text = String::new();
+    (&mut file).take(4096).read_to_string(&mut text)?;
+    Ok(text)
 }
 pub fn flock(path: &Path) -> Result<fs::File> {
     use std::os::fd::AsRawFd;
@@ -62,6 +92,7 @@ pub fn flock(path: &Path) -> Result<fs::File> {
         .create(true)
         .truncate(false)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(conflict("state is already owned by another process"));
@@ -934,8 +965,47 @@ impl Node {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn state_and_secrets_are_this_users_own_and_never_a_link() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        // Made, or found as this user's: private from then on.
+        let state = root.path().join("state/inner");
+        private_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o777)).unwrap();
+        private_dir(&state).unwrap();
+        assert_eq!(
+            fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // A link, even to a directory of this user's, is not a state directory.
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&state, &link).unwrap();
+        assert!(private_dir(&link).is_err());
+        assert!(private_dir(&root.path().join("state/file")).is_ok());
+        fs::write(root.path().join("plain"), "x").unwrap();
+        assert!(private_dir(&root.path().join("plain")).is_err());
+
+        // A secret: this user's regular file that nobody else can read.
+        let token = state.join("token");
+        fenders_node_protocol::pki::private_file(&token, b"a-token-of-this-users-own").unwrap();
+        assert_eq!(private_text(&token).unwrap(), "a-token-of-this-users-own");
+        let linked = state.join("linked-token");
+        std::os::unix::fs::symlink(&token, &linked).unwrap();
+        assert!(private_text(&linked).is_err());
+        fs::set_permissions(&token, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(private_text(&token).is_err());
+        // The lock file is not followed through a link either.
+        let lock = state.join("lock");
+        std::os::unix::fs::symlink(root.path().join("elsewhere"), &lock).unwrap();
+        assert!(flock(&lock).is_err());
+        assert!(!root.path().join("elsewhere").exists());
+    }
+
+    #[test]
     fn compiler_failure_requires_explicit_exit_and_matching_bounded_receipt() {
         use super::*;
+
         let hash = "a".repeat(64);
         let receipt = json!({"format_version":1,"runtime":fenders_node_protocol::artifacts::RUNTIME,"digest":hash,"bytes":8,"error":"unsupported-imports"});
         let bytes = serde_json::to_vec(&receipt).unwrap();
