@@ -142,6 +142,7 @@ up() {
     --control-pin "$(jq -er .control "$state/pins.json")" \
     --ca "$state/pki/ca.pem" --cert "$state/pki/node.pem" --key "$state/pki/node.key" \
     --cpu-percent 400 --memory-mib 4096 --max-instances 8 --port $node_port \
+    --local-destinations \
     --metrics-listen 127.0.0.1:19464 ${WARM_RUNS:+--warm-runs "$WARM_RUNS"} "${budget[@]}" > /dev/null 2>> "$state/node.log" < /dev/null &
   sleep 1
   pgrep -f "$stage/build/fenders-node --state" | head -1 > "$state/node.pid"

@@ -352,6 +352,7 @@ pub fn validate_spec(value: &Value) -> Result<Value> {
         if parsed.port() == 0 || parsed.to_string() != string {
             return Err(Error::invalid("invalid TCP endpoint"));
         }
+        destination(*parsed.ip())?;
         tcp.insert(string.to_owned());
     }
     out["tcp_allow"] = json!(tcp);
@@ -396,9 +397,11 @@ pub fn validate_spec(value: &Value) -> Result<Value> {
     }
     out["dns_server"] = value["dns_server"].clone();
     if !out["dns_server"].is_null() {
-        text(&out["dns_server"])?
-            .parse::<std::net::Ipv4Addr>()
-            .map_err(|_| Error::invalid("invalid DNS server"))?;
+        destination(
+            text(&out["dns_server"])?
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| Error::invalid("invalid DNS server"))?,
+        )?;
     }
     if let Some(deadline) = value.get("network_deadline_ns") {
         let deadline = integer(deadline, 0, i64::MAX)?;
@@ -509,6 +512,31 @@ static SPAWNING: Mutex<()> = Mutex::new(());
 /// shared one host CPU (CPU 0 on Runtara Cloud's dev node, which capped it
 /// near 27 runs/s with the other eleven half idle). Runs are dealt the CPUs
 /// the node may use in turn.
+/// Whether a run may be given this host's own addresses as destinations
+/// ([`Node::with_local_destinations`]).
+static LOCAL_DESTINATIONS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// A run's destination is another host. The node's own loopback services,
+/// the link-local range (a cloud's instance metadata among it), and the
+/// unspecified, multicast and broadcast addresses are refused here whatever
+/// the launch spec's author allows: a control plane has a policy of its own
+/// for this, and the node does not depend on it having been set right.
+fn destination(ip: std::net::Ipv4Addr) -> Result<()> {
+    if on_this_host_or_link(ip) && !LOCAL_DESTINATIONS.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(Error::invalid(
+            "a destination on this host or its link is refused by this node",
+        ));
+    }
+    Ok(())
+}
+/// Loopback, link-local, unspecified, multicast or broadcast.
+fn on_this_host_or_link(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.octets()[0] == 0
+}
 fn next_vm_cpu() -> Option<usize> {
     static CPUS: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -702,6 +730,13 @@ impl Node {
         // The runs a previous agent started, from their shims.
         node.reattach()?;
         Ok(node)
+    }
+    /// Lets runs be given loopback and link-local destinations, which a node
+    /// refuses otherwise: for a node whose runs are meant to reach services
+    /// on its own host, as a developer's is. It holds for the process.
+    pub fn with_local_destinations(self, allowed: bool) -> Self {
+        LOCAL_DESTINATIONS.store(allowed, std::sync::atomic::Ordering::Relaxed);
+        self
     }
     /// The host memory this node's runs may take in all, as its agent
     /// counts it: warm shims, which wait outside the agent's admissions, are
@@ -1232,6 +1267,13 @@ mod tests {
             json!({"run_context":{"trigger":"schedule","trigger_time":"2026-10-21T09:00:00Z","run_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","schedule":"* * * * *","schedule_timezone":"Mars/Base"}}),
             json!({"tcp_allow":["example.test:5432"]}),
             json!({"tcp_allow":["127.0.0.1:0"]}),
+            // This host and its link are not a run's destinations.
+            json!({"tcp_allow":["127.0.0.1:5432"]}),
+            json!({"tcp_allow":["169.254.169.254:80"]}),
+            json!({"tcp_allow":["0.0.0.0:80"]}),
+            json!({"tcp_allow":["224.0.0.1:80"]}),
+            json!({"dns_server":"127.0.0.53"}),
+            json!({"dns_server":"169.254.169.253"}),
             json!({"http_allow":["https://user:pass@example.test/"]}),
             json!({"http_allow":["https://example.test/path"]}),
             json!({"surprise":true}),
@@ -1302,5 +1344,33 @@ mod tests {
             validate_spec(&json!({"artifact":"a".repeat(64),"egress_budget":true})).unwrap()["egress_budget"],
             true
         );
+    }
+}
+#[cfg(test)]
+mod destination_tests {
+    #[test]
+    fn a_runs_destination_is_not_this_host_or_its_link() {
+        let local = |ip: &str| super::on_this_host_or_link(ip.parse().unwrap());
+        for ip in [
+            "127.0.0.1",
+            "127.0.0.53",
+            "169.254.169.254",
+            "0.0.0.0",
+            "0.1.2.3",
+            "224.0.0.1",
+            "255.255.255.255",
+        ] {
+            assert!(local(ip), "{ip}");
+        }
+        // Other hosts, a private network's among them, are destinations.
+        for ip in [
+            "10.50.0.2",
+            "192.168.1.9",
+            "172.16.4.4",
+            "1.1.1.1",
+            "169.253.0.1",
+        ] {
+            assert!(!local(ip), "{ip}");
+        }
     }
 }

@@ -100,6 +100,7 @@ sudo "$stage/build/fenders-node" --state "$stage/state" --build "$stage/build" -
   --control "https://127.0.0.1:$((base + 1))" --control-pin "$(jq -er .control "$out/pins.json")" \
   --ca "$out/pki/ca.pem" --cert "$out/pki/node.pem" --key "$out/pki/node.key" \
   --cpu-percent 200 --memory-mib 1024 --max-instances 4 --port "$node_port" \
+  --local-destinations \
   --run-uid-base 610000 \
   > /dev/null 2> "$out/node.log" &
 node_pid=$!

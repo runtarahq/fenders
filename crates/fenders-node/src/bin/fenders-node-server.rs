@@ -62,6 +62,8 @@ fn entry() -> Result<(), Box<dyn std::error::Error>> {
             args.max_instances,
         )?
         .with_run_uids(args.run_uid_base)?
+        // A developer's own node, whose runs reach services beside it.
+        .with_local_destinations(true)
         .with_compiler_limits(fenders_node::core::CompilerLimits {
             memory_mib: args.compiler_memory_mib,
             cpu_percent: args.compiler_cpu_percent,

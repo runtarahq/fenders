@@ -32,6 +32,11 @@ struct Args {
     /// on one host need different bases.
     #[arg(long, default_value_t = 600_000)]
     run_uid_base: u32,
+    /// Let runs be given destinations on this host and its link (loopback,
+    /// link-local), which the node refuses otherwise. For a node whose runs
+    /// are meant to reach services beside it, as a local environment's is.
+    #[arg(long)]
+    local_destinations: bool,
     /// Warm shims (VM booted, component loaded, each for one run) kept per
     /// artifact and guest configuration a run used.
     #[arg(long, default_value_t = 0)]
@@ -231,6 +236,7 @@ fn entry() -> Result<()> {
     .with_disk_free_mib(args.disk_free_mib)?
     .with_run_uids(args.run_uid_base)?
     .with_memory_mib(args.memory_mib)
+    .with_local_destinations(args.local_destinations)
     .with_warm_runs(args.warm_runs)?
     .with_egress_budget(args.egress_budget)
     .with_compiler_limits(fenders_node::core::CompilerLimits {
