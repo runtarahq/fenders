@@ -218,6 +218,8 @@ fn entry() -> Result<()> {
     }
     let _ = (&args, Path::new(""));
     let args = Args::parse();
+    // Before anything is opened or made: a host the node will not run on.
+    host_notes(args.share_cores, args.nested_virtualization)?;
     fenders_node::log::init(args.log_format);
     let inherited_listener = fenders_node::activation::descriptor(args.listen_fd)?
         .map(|fd| {
@@ -258,7 +260,6 @@ fn entry() -> Result<()> {
             )
         })
         .transpose()?;
-    host_notes(args.share_cores, args.nested_virtualization)?;
     let mut node = Node::new(
         &args.state.join("node"),
         &args.build,
@@ -559,7 +560,7 @@ mod quota_args_tests {
         assert!(nested(true, true).unwrap());
         // And the flag is one the node takes.
         let mut args = arguments();
-        args.push("--nested-virtualization".into());
+        args.push("--nested-virtualization");
         assert!(Args::try_parse_from(args).unwrap().nested_virtualization);
         assert!(
             !Args::try_parse_from(arguments())

@@ -32,6 +32,9 @@ fn attempt(root: &Path) -> String {
         .arg("--key")
         .arg(root.join("pki/node.key"))
         .args(["--cpu-percent", "100", "--memory-mib", "128"])
+        // What is tested is who owns the state, on any host: one whose KVM
+        // has nested virtualization enabled is refused for that first.
+        .arg("--nested-virtualization")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
