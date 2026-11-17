@@ -1439,25 +1439,40 @@ async fn gateway_dispatch_tracked(
     }
     // Admitted before any of the body is read: its bytes are reserved, a
     // block at a time, as they are passed on.
-    let (route, lease) = state
-        .store
-        .ingress_wait_request(
-            host,
-            0,
-            listed.then_some((parts.method.as_str(), parts.uri.path())),
-        )
-        .await?;
-    let meter = std::sync::Arc::new(Meter::new(state.store.clone(), &lease));
-    // From here the request holds a reservation. If this call is dropped (its
-    // client went away), nothing below runs: the guard settles it then, for
-    // what passed, so that it neither counts as in flight until it lapses
-    // nor is charged the whole of what it had reserved.
-    let settle = Settle {
-        store: state.store.clone(),
-        lease: lease.clone(),
-        meter: meter.clone(),
-        armed: true,
+    //
+    // From its admission the request holds a reservation, and a guard that
+    // settles it if this call is dropped (its client went away) before it
+    // reaches an outcome: for what passed, so that it neither counts as in
+    // flight until it lapses nor is charged the whole of what it had
+    // reserved. The two are made in a task of their own, which a client that
+    // goes away does not stop: dropped here between the reservation being
+    // committed and its guard being made, a request would have had the one
+    // and not the other.
+    let admission = {
+        let store = state.store.clone();
+        let host = host.to_owned();
+        let listed = listed.then(|| {
+            (
+                parts.method.as_str().to_owned(),
+                parts.uri.path().to_owned(),
+            )
+        });
+        tokio::spawn(async move {
+            let listed = listed
+                .as_ref()
+                .map(|(method, path)| (method.as_str(), path.as_str()));
+            let (route, lease) = store.ingress_wait_request(&host, 0, listed).await?;
+            let meter = std::sync::Arc::new(Meter::new(store.clone(), &lease));
+            let settle = Settle {
+                store,
+                lease: lease.clone(),
+                meter: meter.clone(),
+                armed: true,
+            };
+            Ok::<_, Error>((route, lease, meter, settle))
+        })
     };
+    let (route, lease, meter, settle) = admission.await.map_err(|_| Error::internal())??;
     use crate::http_exchange::{Message, Offer, pipe, pump};
     // The app's shim takes the request from the exchange and posts the
     // answer there: no node is called. Neither body is held whole.
