@@ -35,3 +35,8 @@ fenders-control-plane = { path = "../fenders-control-plane" }
 fenders-component = { path = "../fenders-component" }
 sqlx.workspace = true
 time = "0.3"
+
+# Confinement is applied by a single-threaded process: no test harness.
+[[test]]
+name = "shim_confinement"
+harness = false

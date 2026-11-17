@@ -44,7 +44,7 @@ as both control plane and node.
 | WebSocket | The gateway holds connections for an app and gives it their events as requests | Shown with a headless browser as the client; that check is not in this repository yet |
 | The shim alone | One component under `fenders-shim` against a stub run channel, with no node or control plane | `scripts/shim_standalone.sh` |
 | The control plane | Tenants, projects, members, invitations, API keys, secrets, uploads and inspection, apps and schedules, usage accounting, backup and restore | `make test` |
-| Confinement | Confined compilation and the artifact cache; the launcher's Landlock and seccomp; per-run cgroups and uids | `make verify-confinement`, `scripts/verify_network_native.sh` |
+| Confinement | Confined compilation and the artifact cache; the launcher's Landlock and seccomp; the shim's own (read-only filesystem, its run channel's port, a refusal list); per-run cgroups and uids | `make verify-confinement`, `scripts/verify_network_native.sh`, `cargo test -p fenders-node --test shim_confinement` |
 
 ## Does not work
 
@@ -170,6 +170,14 @@ as both control plane and node.
   database, not against writing it.
 - The launcher's control socket also accepts pause and resume; a shim sends
   it only grants and status, over a socket pair nothing else holds.
+
+### Confinement
+
+- A run's shim is confined once it has started its VMM: no new privileges, a
+  read-only filesystem, TCP only to its run channel's port and a resolver's,
+  and system calls it has no use for refused. That refusal is a list, not
+  the allowlist the compiler and the VMM have: a call not on it is allowed.
+  A warm shim is confined when it is claimed, not while it waits.
 
 ### Tests
 

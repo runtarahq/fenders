@@ -78,11 +78,16 @@ fn privileges() -> Result<()> {
     Ok(())
 }
 fn landlock(paths: &[(PathBuf, u64)], ports: &[u16]) -> Result<i64> {
+    // Abstract Unix sockets and signals of other domains are both out of
+    // reach.
+    landlock_scoped(paths, ports, 3)
+}
+fn landlock_scoped(paths: &[(PathBuf, u64)], ports: &[u16], scoped: u64) -> Result<i64> {
     let abi = abi()?;
     let attr = Ruleset {
         fs: (1 << 16) - 1,
         net: 3,
-        scoped: 3,
+        scoped,
     };
     let fd = check(unsafe { libc::syscall(444, &attr, std::mem::size_of::<Ruleset>(), 0) })? as i32;
     struct Fd(i32);
@@ -326,6 +331,126 @@ pub fn apply(
     seccomp(&library, profile, dns)?;
     Ok(abi)
 }
+/// What a run's shim is confined to once it has started its VMM and dropped
+/// to the run's uid, for the rest of its life. It relays and reports; it
+/// needs to read, to speak to its run channel on `ports`, and to signal its
+/// VMM. So:
+///
+/// - no new privileges, and no capabilities;
+/// - Landlock: the filesystem read-only (nothing created, written, removed
+///   or executed), TCP connections only to `ports`, no TCP listening, no
+///   abstract Unix socket of another domain. Signals are not scoped: its
+///   VMM, started before this, is not in its domain;
+/// - seccomp: what such a process has no use for is refused (see
+///   [`SHIM_REFUSED`]), with every other call allowed. An allowlist, as the
+///   compiler and the VMM have, would be tighter; the shim is an async
+///   runtime with TLS, and what that calls changes with its dependencies.
+///
+/// Call it in the shim's single thread, before any other is started.
+pub fn apply_shim(ports: &[u16]) -> Result<i64> {
+    if std::fs::read_dir("/proc/self/task")?.count() != 1 {
+        return Err(Error::invalid(
+            "confinement requires a single-threaded process",
+        ));
+    }
+    let library = unsafe { Library::new("libseccomp.so.2") }
+        .map_err(|_| Error::invalid("libseccomp is required"))?;
+    privileges()?;
+    // READ_FILE and READ_DIR, everywhere; nothing else, anywhere.
+    let abi = landlock_scoped(&[(PathBuf::from("/"), 4 | 8)], ports, 1)?;
+    seccomp_refusing(&library)?;
+    Ok(abi)
+}
+
+/// System calls a run's shim is refused. Not what it must not reach (its uid
+/// and Landlock decide that) but what widens what a process can do to the
+/// kernel or to other processes.
+const SHIM_REFUSED: &str = "execve execveat ptrace process_vm_readv process_vm_writev kcmp pidfd_getfd process_madvise mount umount2 pivot_root chroot unshare setns bpf perf_event_open userfaultfd io_uring_setup io_uring_enter io_uring_register keyctl add_key request_key init_module finit_module delete_module kexec_load kexec_file_load open_by_handle_at name_to_handle_at swapon swapoff reboot acct quotactl quotactl_fd fanotify_init personality shmget shmat shmdt shmctl semget semop semtimedop semctl msgget msgsnd msgrcv msgctl mq_open mq_unlink mq_timedsend mq_timedreceive mq_notify mq_getsetattr memfd_secret mbind set_mempolicy migrate_pages move_pages setuid setgid setreuid setregid setresuid setresgid setgroups setfsuid setfsgid capset fsopen fsconfig fsmount fspick move_mount open_tree mount_setattr landlock_create_ruleset";
+
+fn seccomp_refusing(library: &Library) -> Result<()> {
+    unsafe {
+        let init: libloading::Symbol<unsafe extern "C" fn(u32) -> *mut c_void> = library
+            .get(b"seccomp_init")
+            .map_err(|_| Error::internal())?;
+        let resolve: libloading::Symbol<unsafe extern "C" fn(*const libc::c_char) -> i32> = library
+            .get(b"seccomp_syscall_resolve_name")
+            .map_err(|_| Error::internal())?;
+        let add: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, u32, i32, u32, *const Compare) -> i32,
+        > = library
+            .get(b"seccomp_rule_add_array")
+            .map_err(|_| Error::internal())?;
+        let load: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> i32> = library
+            .get(b"seccomp_load")
+            .map_err(|_| Error::internal())?;
+        let release: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = library
+            .get(b"seccomp_release")
+            .map_err(|_| Error::internal())?;
+        // Allowed unless a rule refuses it.
+        let context = init(0x7fff0000);
+        if context.is_null() {
+            return Err(Error::internal());
+        }
+        let refuse = 0x00050000 | libc::EPERM as u32;
+        let rule = |name: &str, cmp: &[Compare], action: u32| -> Result<()> {
+            let name = CString::new(name).unwrap();
+            let number = resolve(name.as_ptr());
+            // A call this architecture or this libseccomp does not know is
+            // not one the shim could make by name either.
+            if number < 0 {
+                return Ok(());
+            }
+            if add(context, action, number, cmp.len() as u32, cmp.as_ptr()) != 0 {
+                return Err(Error::internal());
+            }
+            Ok(())
+        };
+        let compare = |arg, op, a, b| Compare { arg, op, a, b };
+        let result = (|| {
+            for name in SHIM_REFUSED.split_whitespace() {
+                rule(name, &[], refuse)?;
+            }
+            // Threads, not processes in new namespaces: one rule for each
+            // namespace flag of `clone`, and `clone3` as unknown, so that
+            // libc falls back to `clone`.
+            rule("clone3", &[], 0x00050000 | libc::ENOSYS as u32)?;
+            for flag in [
+                0x00020000u64, // CLONE_NEWNS
+                0x02000000,    // CLONE_NEWCGROUP
+                0x04000000,    // CLONE_NEWUTS
+                0x08000000,    // CLONE_NEWIPC
+                0x10000000,    // CLONE_NEWUSER
+                0x20000000,    // CLONE_NEWPID
+                0x40000000,    // CLONE_NEWNET
+                0x00000080,    // CLONE_NEWTIME
+            ] {
+                rule("clone", &[compare(0, 7, flag, flag)], refuse)?;
+            }
+            // Sockets: Unix, IPv4, IPv6, and netlink's routing protocol,
+            // which the resolver asks for the host's addresses. Families 3
+            // to 9, and every family over IPv6 but that one, are refused.
+            for family in 3..=9u64 {
+                rule("socket", &[compare(0, 4, family, 0)], refuse)?;
+            }
+            for family in 11..=15u64 {
+                rule("socket", &[compare(0, 4, family, 0)], refuse)?;
+            }
+            rule("socket", &[compare(0, 5, 17, 0)], refuse)?;
+            rule(
+                "socket",
+                &[compare(0, 4, 16, 0), compare(2, 1, 0, 0)],
+                refuse,
+            )?;
+            if load(context) != 0 {
+                return Err(Error::internal());
+            }
+            Ok(())
+        })();
+        release(context);
+        result
+    }
+}
+
 pub fn probe() -> Result<serde_json::Value> {
     let library = unsafe { Library::new("libseccomp.so.2") }
         .map_err(|_| Error::invalid("libseccomp is required"))?;

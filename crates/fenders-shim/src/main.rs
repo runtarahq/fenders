@@ -471,6 +471,16 @@ struct End {
     signal: Option<i32>,
 }
 
+/// Confines the shim for the rest of its life
+/// ([`fenders_node::confinement::apply_shim`]): it may connect to its run
+/// channel's port, and to a resolver's.
+fn confine(spec: &Spec) -> Result<()> {
+    let channel = spec.channel.endpoint.port_or_known_default().unwrap_or(443);
+    fenders_node::confinement::apply_shim(&[channel, 53])
+        .map(|_| ())
+        .map_err(|error| format!("confining the shim: {}", error.message))
+}
+
 /// Drops the shim to the run's uid (when started as root) and makes it
 /// non-dumpable: it holds the credential.
 fn unprivileged(machine: &Machine) -> Result<()> {
@@ -917,6 +927,17 @@ fn finish(
     link: Option<(std::os::unix::net::UnixListener, Arc<link::Link>)>,
     hold: Option<OwnedFd>,
 ) -> i32 {
+    // From here the shim relays for the guest and reports for the run: it
+    // is confined to that before it starts a thread or reads anything the
+    // guest sent.
+    if let Err(error) = confine(spec) {
+        tracing::error!("{error}");
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        return 1;
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
