@@ -40,3 +40,8 @@ time = "0.3"
 [[test]]
 name = "shim_confinement"
 harness = false
+
+# Needs root to load its programs: no harness, and it says when it skipped.
+[[test]]
+name = "destination_limits"
+harness = false

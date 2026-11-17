@@ -923,6 +923,26 @@ fn start(
     ] {
         inheritable(fd)?;
     }
+    // The kernel holds the VM's cgroup to the run's own destinations, which
+    // Landlock (port numbers, and nothing of datagrams) cannot: whatever
+    // became of the launcher, it reaches no other. Loading that takes root;
+    // a shim without it has the launcher's check and Landlock's ports.
+    if root {
+        let addresses = tcp
+            .iter()
+            .map(|a| a.parse())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| "tcp_allow is not IPv4 addresses and ports")?;
+        let resolver = match guest["dns_server"].as_str() {
+            Some(ip) => Some(
+                ip.parse()
+                    .map_err(|_| "dns_server is not an IPv4 address")?,
+            ),
+            None => None,
+        };
+        fenders_node::destinations::limit(&vm, &addresses, resolver)
+            .map_err(os("limiting the VM's destinations"))?;
+    }
     let mut child = command.spawn().map_err(os("starting the VMM"))?;
     // Only the VMM keeps the meter's write end, so the pipe ends with it.
     drop((runtime, component, env, guest_end, meter_write));

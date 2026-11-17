@@ -3,6 +3,7 @@ pub mod agent;
 #[cfg(target_os = "linux")]
 pub mod confinement;
 pub mod core;
+pub mod destinations;
 pub mod durable;
 pub mod guest_env;
 pub mod host_origin;
