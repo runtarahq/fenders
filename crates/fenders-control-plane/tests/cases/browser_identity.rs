@@ -1136,6 +1136,47 @@ async fn browser_sessions_rotate_expire_and_observe_multiple_project_grants() {
     );
     let fresh = l.login("user").await;
     assert_eq!(fresh.user, browser.user);
+    // A session left unused for half an hour is over, though its eight
+    // hours are not; one in use is kept, its use written down once a minute.
+    let used = |ago: &'static str| {
+        let pool = l.lab.store.pool.clone();
+        async move {
+            sqlx::query(&format!(
+                "UPDATE browser_sessions SET last_used=now()-interval '{ago}'"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    let session = || async {
+        l.request(&fresh, "GET", "/auth/session", None, false)
+            .await
+            .0
+    };
+    used("29 minutes").await;
+    assert_eq!(session().await, StatusCode::OK);
+    let recent: bool = sqlx::query_scalar(
+        "SELECT bool_or(last_used>now()-interval '1 minute') FROM browser_sessions",
+    )
+    .fetch_one(&l.lab.store.pool)
+    .await
+    .unwrap();
+    assert!(recent, "its use was written down");
+    used("31 minutes").await;
+    assert_eq!(session().await, StatusCode::UNAUTHORIZED);
+    let (status, _) = l
+        .request(
+            &fresh,
+            "GET",
+            &format!("/v1/tenants/{}/projects", l.lab.tenant),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    used("1 second").await;
+    assert_eq!(session().await, StatusCode::OK);
     sqlx::query("UPDATE browser_sessions SET expires=now()-interval '1 second'")
         .execute(&l.lab.store.pool)
         .await

@@ -15,6 +15,11 @@ pub struct SessionSecret {
     pub csrf: String,
 }
 
+/// When a session was last used, for ending one left idle.
+pub(crate) const SESSION_IDLE_MIGRATION: &str = "ALTER TABLE browser_sessions ADD COLUMN IF NOT EXISTS last_used timestamptz NOT NULL DEFAULT now()";
+/// A session that was used in the last thirty minutes.
+const SESSION_IN_USE: &str = "s.last_used>now()-interval '30 minutes'";
+
 impl Store {
     /// Explicit operator migration of a verified identity. Stable user IDs keep
     /// workspace grants intact; neither matching emails nor claims grant access.
@@ -172,7 +177,7 @@ impl Store {
             (None, None) => Ok(()),
 
             (Some(session), Some(member)) => {
-                let valid=one(tx,"SELECT EXISTS(SELECT 1 FROM workspace_memberships m JOIN browser_sessions s ON s.user_id=m.user_id JOIN customer_users u ON u.id=s.user_id WHERE s.id=$1 AND m.id=$2 AND s.expires>now() AND NOT u.disabled AND (NOT u.email_required OR u.email_verified) AND NOT m.revoked AND m.role=$3 AND m.tenant_id=$4 AND m.project_id IS NOT DISTINCT FROM $5 AND u.id=$6) AS valid",args![session,member,p.role.as_str(),p.tenant_id,p.project_id,p.id]).await?;
+                let valid=one(tx,"SELECT EXISTS(SELECT 1 FROM workspace_memberships m JOIN browser_sessions s ON s.user_id=m.user_id JOIN customer_users u ON u.id=s.user_id WHERE s.id=$1 AND m.id=$2 AND s.expires>now() AND s.last_used>now()-interval '30 minutes' AND NOT u.disabled AND (NOT u.email_required OR u.email_verified) AND NOT m.revoked AND m.role=$3 AND m.tenant_id=$4 AND m.project_id IS NOT DISTINCT FROM $5 AND u.id=$6) AS valid",args![session,member,p.role.as_str(),p.tenant_id,p.project_id,p.id]).await?;
                 if valid["valid"] == true {
                     Ok(())
                 } else {
@@ -373,9 +378,20 @@ impl Store {
             return Err(Error::unauthorized());
         }
         let mut tx = self.transaction(false, false).await?;
-        let row=optional(&mut tx,"SELECT s.*,u.issuer,u.subject,u.email,u.email_verified,u.email_required FROM browser_sessions s JOIN customer_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires>now() AND NOT u.disabled",args![digest(secret)]).await?.ok_or_else(Error::unauthorized)?;
+        // A session ends eight hours after sign-in, and sooner when it is
+        // left unused: one in a browser that was walked away from is not
+        // good for the rest of the working day.
+        let row=optional(&mut tx,&format!("SELECT s.*,u.issuer,u.subject,u.email,u.email_verified,u.email_required,s.last_used<now()-interval '1 minute' AS used_a_while_ago FROM browser_sessions s JOIN customer_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires>now() AND {SESSION_IN_USE} AND NOT u.disabled"),args![digest(secret)]).await?.ok_or_else(Error::unauthorized)?;
         if csrf.is_some_and(|v| v.len() > 256 || digest(v) != row["csrf_hash"]) {
             return Err(Error::new(StatusCode::FORBIDDEN, "invalid CSRF token"));
+        }
+        drop(tx);
+        // Used now. Written at most once a minute for a session, so that a
+        // request is not a write.
+        if row["used_a_while_ago"] == true {
+            let mut tx = self.transaction(true, false).await?;
+            exec(&mut tx,"UPDATE browser_sessions SET last_used=now() WHERE id=$1 AND last_used<now()-interval '1 minute'",args![row["id"]]).await?;
+            tx.commit().await?;
         }
         Ok(row)
     }

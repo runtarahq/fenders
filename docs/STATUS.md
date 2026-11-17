@@ -87,7 +87,7 @@ as both control plane and node.
   provider's metadata and signing keys are held for five minutes, and
   fetched again at most every ten seconds for a token signed with a key not
   among them: a key the provider withdraws is trusted for up to five minutes
-  more. At most 10,000 sign-ins may be pending at once, for everyone
+  more. A session lasts eight hours from sign-in, and thirty minutes unused. At most 10,000 sign-ins may be pending at once, for everyone
   together: a flood of started sign-ins can hold the others out until its
   five-minute entries lapse.
 - `--tailscale-identity` is a **development-only** sign-in that trusts a
