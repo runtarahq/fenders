@@ -61,7 +61,10 @@ target/release/fenders-backup restore \
 
 Check the backup ID and `mode: fenced`. Database restoration and fencing commit
 in one transaction. Old API credentials are revoked, browser sessions/logins are
-removed, nodes are disabled and draining, and apps/deployments are stopped.
+removed, pending invitations are withdrawn and their unsent mail cancelled,
+nodes are disabled and draining, and apps/deployments are stopped. Memberships
+are restored as they were at the snapshot: one removed since then is a member
+again, and must be removed again.
 Reserved executions become unreachable with advanced generations and retain
 quota. Pending operations fail explicitly; commands are never replayed.
 HTTP serving and scheduled dispatch are disabled. Public HTTPS policy is disabled

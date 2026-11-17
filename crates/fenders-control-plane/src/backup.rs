@@ -556,6 +556,14 @@ END $http_runs$;
 DELETE FROM ingress_reservations WHERE app_id IS NOT NULL AND execution_id IS NULL;
 DELETE FROM browser_sessions;
 DELETE FROM browser_logins;
+-- An invitation open at the snapshot may have been withdrawn since, and its
+-- mail may be queued again: none is honoured or sent after a restore.
+DO $invitations$ BEGIN
+ IF to_regclass('workspace_invitations') IS NOT NULL THEN
+  UPDATE workspace_invitations SET status='revoked',revision=revision+1,decided_at=now() WHERE status='pending';
+  UPDATE invitation_outbox SET state='cancelled',lease=NULL WHERE state IN ('queued','sending','failed');
+ END IF;
+END $invitations$;
 UPDATE recovery_barrier SET active=true,backup_id='{id}',restored=now(),activated=NULL WHERE singleton;
 INSERT INTO audit(actor,action,detail) VALUES('restore','control.restore','{{"backup_id":"{id}"}}');
 "#).as_bytes())?;
