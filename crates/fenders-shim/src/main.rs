@@ -321,6 +321,19 @@ fn vmm_group(gid: u32) -> Option<u32> {
     (gid != 0).then_some(gid)
 }
 
+/// What an endpoint's status for a batch of output means for the batch.
+/// Asked to wait (408) or to slow down (429) is not a refusal; any other
+/// client error, or 501, is one for good; no answer or a server's failure
+/// is tried again.
+fn output_answer(status: Option<u16>) -> output::Sent {
+    match status {
+        Some(200..=299) => output::Sent::Accepted,
+        Some(408 | 429) => output::Sent::Retry,
+        Some(code @ (400..=499 | 501)) => output::Sent::Refused(code),
+        _ => output::Sent::Retry,
+    }
+}
+
 /// The shim's ends of a capturing VM's output pipes ([`output`]), taken by
 /// [`finish`]: set only for a launch that asked for its output.
 static OUTPUT: std::sync::Mutex<Option<output::Pipes>> = std::sync::Mutex::new(None);
@@ -1469,15 +1482,13 @@ fn capture_output(
         async move {
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            match relay.send(&Method::POST, output::PATH, headers, body).await {
-                Ok((code, _, _)) if code.is_success() => output::Sent::Accepted,
-                // It does not serve output, or this launch may send none:
-                // asking again would change nothing.
-                Ok((code, _, _)) if code.is_client_error() || code.as_u16() == 501 => {
-                    output::Sent::Refused(code.as_u16())
-                }
-                _ => output::Sent::Retry,
-            }
+            output_answer(
+                relay
+                    .send(&Method::POST, output::PATH, headers, body)
+                    .await
+                    .ok()
+                    .map(|(code, _, _)| code.as_u16()),
+            )
         }
     };
     Some((
@@ -1713,5 +1724,20 @@ mod tests {
     fn a_vmm_is_never_given_the_root_group() {
         assert_eq!(vmm_group(0), None);
         assert_eq!(vmm_group(993), Some(993));
+    }
+
+    #[test]
+    fn an_endpoint_that_says_wait_has_not_refused_output() {
+        use output::Sent;
+        assert!(matches!(output_answer(Some(204)), Sent::Accepted));
+        for wait in [408, 429] {
+            assert!(matches!(output_answer(Some(wait)), Sent::Retry));
+        }
+        for refusal in [400, 403, 404, 501] {
+            assert!(matches!(output_answer(Some(refusal)), Sent::Refused(code) if code == refusal));
+        }
+        for failure in [None, Some(500), Some(503)] {
+            assert!(matches!(output_answer(failure), Sent::Retry));
+        }
     }
 }
