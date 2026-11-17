@@ -1086,6 +1086,27 @@ async fn an_app_serves_once_its_shim_asks_and_its_requests_go_through_the_run_ch
             .unwrap();
     assert_eq!(recorded, ("failed".to_owned(), Some(502)));
 
+    // A sample request is audited as what was asked of the app: its method
+    // and its path, without the query.
+    l.store
+        .app_sample_hostname_for(
+            &l.operator,
+            &l.tenant,
+            &l.project,
+            &app,
+            "DELETE",
+            "/orders/7?token=never-kept",
+        )
+        .await
+        .unwrap();
+    let sampled: Value = sqlx::query_scalar(
+        "SELECT detail FROM audit WHERE action='app.http-sample' ORDER BY sequence DESC LIMIT 1",
+    )
+    .fetch_one(&l.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(sampled, json!({"method":"DELETE","path":"/orders/7"}));
+
     // A target too long to fit a head the shim reads is refused before it is
     // admitted: no reservation, nothing offered to the app.
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM app_http_runs")

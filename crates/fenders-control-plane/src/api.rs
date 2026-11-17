@@ -339,7 +339,9 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             ],
         ) => {
             let sample = parse::<HttpSample>(&bytes)?;
-            let hostname = store.app_sample_hostname(&p, tenant, project, app).await?;
+            let hostname = store
+                .app_sample_hostname_for(&p, tenant, project, app, &sample.method, &sample.path)
+                .await?;
             http_sample(&state, &hostname, sample).await?
         }
         ("GET", ["v1", "me"]) => serde_json::to_value(&p).map_err(|_| Error::internal())?,
