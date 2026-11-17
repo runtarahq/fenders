@@ -59,6 +59,22 @@ async fn invitation_requires_verified_consent_and_never_replays_membership() {
         l.request(&outsider, "GET", &endpoint, None, true).await.0,
         StatusCode::NOT_FOUND
     );
+    // The person invited sees what is offered, and none of the workspace's
+    // own bookkeeping of it; the owner who sent it sees that too.
+    let (status, seen) = l.request(&recipient, "GET", &endpoint, None, true).await;
+    assert_eq!(status, StatusCode::OK, "{seen}");
+    assert_eq!(seen["id"], row["id"]);
+    assert!(seen["workspace_name"].is_string() && seen["role"].is_string());
+    for internal in ["request_key", "inviter_id", "recipient_id", "membership_id"] {
+        assert!(seen.get(internal).is_none(), "{internal}");
+    }
+    assert!(row.get("inviter_id").is_some());
+    let (status, listed) = l
+        .request(&recipient, "GET", "/v1/invitations", None, true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["items"][0]["id"], row["id"]);
+    assert!(listed["items"][0].get("inviter_id").is_none());
     assert_eq!(
         l.request(
             &outsider,
