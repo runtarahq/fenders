@@ -76,3 +76,28 @@ fn the_worker_unit_takes_away_what_the_agent_has_no_use_for() {
     // An operator's own flags reach the node.
     assert!(UNIT.contains("$FENDERS_NODE_OPTIONS"));
 }
+
+#[test]
+fn ci_names_its_actions_by_commit_and_checks_advisories() {
+    let ci = include_str!("../../../.github/workflows/ci.yml");
+    let uses: Vec<&str> = ci
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- uses: "))
+        .collect();
+    assert!(!uses.is_empty());
+    for action in uses {
+        let reference = action
+            .split_once('@')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap();
+        assert!(
+            reference.len() == 40 && reference.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{action} is not named by a commit"
+        );
+    }
+    assert!(ci.contains("cargo audit --file"));
+    assert!(ci.contains("schedule:"));
+}
