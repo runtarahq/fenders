@@ -181,6 +181,19 @@ fn is_run_id(name: &str) -> bool {
     name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// The SHA-256 of the compiled component in artifact directory `artifact`,
+/// as its `artifact.json` recorded it.
+fn compiled_digest(artifact: &Path) -> Option<String> {
+    let recorded: Value =
+        serde_json::from_slice(&fs::read(artifact.join("artifact.json")).ok()?).ok()?;
+    let digest = recorded["compiled_sha256"].as_str()?;
+    (digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    .then(|| digest.to_owned())
+}
+
 /// The longest line a shim's standard output is read for: `ended`, or
 /// `meter` and a few counters.
 const MAX_SHIM_LINE: usize = 1024;
@@ -821,10 +834,15 @@ impl Node {
         guest: &Value,
         artifact: &Path,
     ) {
-        spec.insert(
-            "artifact".into(),
-            json!({"component": artifact.join("component.cwasm")}),
-        );
+        // The digest recorded when the component was compiled: the shim
+        // checks what it opens against it, so that what the guest loads as
+        // native code is what the compiler wrote, not only what the cache's
+        // file permissions kept.
+        let mut component = json!({"component": artifact.join("component.cwasm")});
+        if let Some(digest) = compiled_digest(artifact) {
+            component["component_sha256"] = json!(digest);
+        }
+        spec.insert("artifact".into(), component);
         spec.insert("runtime".into(), json!({"dir": self.build}));
         spec.insert("uid".into(), json!(uid));
         spec.insert("gid".into(), json!(uid));
@@ -1304,6 +1322,22 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_launch_names_the_digest_its_component_was_compiled_to() {
+        let artifact = tempfile::tempdir().unwrap();
+        assert_eq!(compiled_digest(artifact.path()), None);
+        let digest = "ab".repeat(32);
+        for (recorded, expected) in [
+            (json!({"compiled_sha256": digest}), Some(digest.clone())),
+            (json!({"compiled_sha256": "AB".repeat(32)}), None),
+            (json!({"compiled_sha256": "abc"}), None),
+            (json!({"compiled_bytes": 1}), None),
+        ] {
+            std::fs::write(artifact.path().join("artifact.json"), recorded.to_string()).unwrap();
+            assert_eq!(compiled_digest(artifact.path()), expected, "{recorded}");
+        }
     }
 
     #[test]
