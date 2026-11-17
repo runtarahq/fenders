@@ -118,28 +118,66 @@ impl<B: Body<Data = Bytes> + Unpin> Body for Prefixed<B> {
     }
 }
 
-/// Reads a message's head from the start of `body`: the head, and what was
-/// read past it. `None` when the body does not start with a head.
-pub async fn read_head<B>(body: &mut B) -> Option<(Value, Bytes)>
+/// What the start of a body turned out to be.
+#[derive(Debug)]
+pub enum Head {
+    /// A head, and what was read past it.
+    Message(Value, Bytes),
+    /// A framed head longer than this shim takes. Its endpoint frames heads,
+    /// so it does serve; this one message is not for the guest.
+    Oversized,
+    /// Not a head at all.
+    Garbage,
+}
+
+/// The longest declared head still read as a framed one that is too large.
+/// A body of text is not mistaken for one: its first four bytes, read as a
+/// length, are over 512 MiB.
+const PLAUSIBLE_HEAD: usize = 16 * 1024 * 1024;
+
+/// Reads a message's head from the start of `body`.
+pub async fn read_framed<B>(body: &mut B) -> Head
 where
     B: Body<Data = Bytes> + Unpin,
 {
     let mut read = Vec::new();
     loop {
         if read.len() >= 4 {
-            let length = u32::from_be_bytes(read[..4].try_into().ok()?) as usize;
+            let length = u32::from_be_bytes([read[0], read[1], read[2], read[3]]) as usize;
+            if length > PLAUSIBLE_HEAD {
+                return Head::Garbage;
+            }
             if length > MAX_HEAD {
-                return None;
+                return Head::Oversized;
             }
             if read.len() >= 4 + length {
-                let head = serde_json::from_slice(&read[4..4 + length]).ok()?;
-                return Some((head, Bytes::copy_from_slice(&read[4 + length..])));
+                return match serde_json::from_slice(&read[4..4 + length]) {
+                    Ok(head) => Head::Message(head, Bytes::copy_from_slice(&read[4 + length..])),
+                    Err(_) => Head::Garbage,
+                };
             }
         }
-        match body.frame().await?.ok()?.into_data() {
-            Ok(data) => read.extend_from_slice(&data),
-            Err(_) => continue,
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                if let Ok(data) = frame.into_data() {
+                    read.extend_from_slice(&data);
+                }
+            }
+            _ => return Head::Garbage,
         }
+    }
+}
+
+/// Reads a message's head from the start of `body`: the head, and what was
+/// read past it. `None` when the body does not start with a head this shim
+/// takes.
+pub async fn read_head<B>(body: &mut B) -> Option<(Value, Bytes)>
+where
+    B: Body<Data = Bytes> + Unpin,
+{
+    match read_framed(body).await {
+        Head::Message(head, rest) => Some((head, rest)),
+        _ => None,
     }
 }
 
@@ -286,8 +324,16 @@ async fn pull(calls: Arc<Calls>, mut guest: Guest, timeout: Duration) -> Option<
         unreachable = Duration::from_millis(100);
         let (parts, mut body) = response.into_parts();
         let (head, rest) = match parts.status {
-            StatusCode::OK => match read_head(&mut body).await {
-                Some(request) if request.0["id"].is_string() => request,
+            StatusCode::OK => match read_framed(&mut body).await {
+                Head::Message(head, rest) if head["id"].is_string() => (head, rest),
+                // A request too large to take is refused, whoever sent it and
+                // whenever: it says nothing about whether the endpoint serves,
+                // and must never end a run that would have served the next.
+                Head::Oversized => {
+                    served = true;
+                    tokio::time::sleep(RETRY).await;
+                    continue;
+                }
                 // An endpoint that answers anything with 200 is not serving.
                 _ if !served => return Some(Stop::Unserved),
                 _ => {
@@ -387,6 +433,21 @@ mod tests {
         for bad in [&b"{}"[..], &[0, 0, 0, 9, b'{'], &[255, 255, 255, 255, 1]] {
             let mut stream = Full::new(Bytes::copy_from_slice(bad));
             assert!(read_head(&mut stream).await.is_none());
+        }
+        // A framed head over the limit is told apart from what is no head:
+        // the first is a request to refuse, the second an endpoint that does
+        // not serve.
+        let mut long = ((MAX_HEAD + 1) as u32).to_be_bytes().to_vec();
+        long.push(b'{');
+        let mut stream = Full::new(Bytes::from(long));
+        assert!(matches!(read_framed(&mut stream).await, Head::Oversized));
+        for garbage in [
+            &b"<html>"[..],
+            &b"{\"error\":1}"[..],
+            &[0, 0, 0, 2, b'n', b'o'],
+        ] {
+            let mut stream = Full::new(Bytes::copy_from_slice(garbage));
+            assert!(matches!(read_framed(&mut stream).await, Head::Garbage));
         }
     }
 

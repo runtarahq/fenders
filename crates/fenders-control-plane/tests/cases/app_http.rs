@@ -1086,6 +1086,47 @@ async fn an_app_serves_once_its_shim_asks_and_its_requests_go_through_the_run_ch
             .unwrap();
     assert_eq!(recorded, ("failed".to_owned(), Some(502)));
 
+    // A target too long to fit a head the shim reads is refused before it is
+    // admitted: no reservation, nothing offered to the app.
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM app_http_runs")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    for (target, expected) in [
+        (format!("/{}", "a".repeat(9000)), StatusCode::URI_TOO_LONG),
+        (
+            format!("/?q={}", "a".repeat(9000)),
+            StatusCode::URI_TOO_LONG,
+        ),
+        (
+            format!("/{}", "a".repeat(8000)),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let fits = expected != StatusCode::URI_TOO_LONG;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(if fits { 1 } else { 30 }),
+            gateway.clone().oneshot(
+                Request::builder()
+                    .uri(target)
+                    .header("Host", host.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await;
+        match response {
+            Ok(response) => assert_eq!(response.unwrap().status(), expected),
+            // One that fits is admitted and waits for the app to take it.
+            Err(_) => assert!(fits),
+        }
+    }
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM app_http_runs")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before + 1, "only the target that fits was admitted");
+
     // A command's launch takes no requests, and neither does this one once
     // it is stopped: its credential is for a generation that is gone.
     l.lifecycle(&app, "stopped", "stop").await;

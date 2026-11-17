@@ -1250,6 +1250,19 @@ async fn gateway_dispatch(State(state): State<ApiState>, req: Request) -> Result
     if req.uri().path().starts_with(crate::websocket::RESERVED) {
         return Err(Error::missing());
     }
+    // A request's head is given to the app's shim in one bounded frame: a
+    // target that could not fit beside its headers is refused here, before
+    // anything is admitted or an execution is woken for it.
+    if req
+        .uri()
+        .path_and_query()
+        .is_some_and(|target| target.as_str().len() > GATEWAY_MAX_TARGET)
+    {
+        return Err(Error::new(
+            StatusCode::URI_TOO_LONG,
+            "request target too long",
+        ));
+    }
     if crate::websocket::wanted(req.headers()) {
         let (parts, body) = req.into_parts();
         let host = gateway_host(&parts, &state.domain)?;
@@ -1366,6 +1379,14 @@ async fn gateway_dispatch_tracked(
             headers.insert((*name).to_owned(), json!(value));
         }
         let head = json!({"id":lease,"method":parts.method.as_str(),"path":parts.uri.path_and_query().map(|p|p.as_str()).unwrap_or("/"),"headers":headers});
+        // A head its shim would refuse to read is never offered: nothing ran.
+        if !crate::http_exchange::head_fits(&head) {
+            known = true;
+            return Err(Error::new(
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                "request head too large",
+            ));
+        }
         let timeout = std::time::Duration::from_millis(
             s(&route["request_timeout_ms"]).parse().unwrap_or(10_000),
         );
@@ -1495,6 +1516,8 @@ async fn gateway_dispatch_tracked(
     }
 }
 
+/// The longest path and query the gateway passes to an app.
+const GATEWAY_MAX_TARGET: usize = 8 * 1024;
 /// How long the gateway waits for the next piece of a request's body.
 const GATEWAY_UPLOAD_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long a response may send nothing, and how long it may last in all.

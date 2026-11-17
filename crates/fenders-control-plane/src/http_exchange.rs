@@ -40,6 +40,12 @@ pub struct Message {
     pub body: Body,
 }
 
+/// Whether `head` is one a reader of this framing accepts: the shim, like
+/// `read_head` here, refuses a head over `MAX_HEAD`.
+pub fn head_fits(head: &Value) -> bool {
+    head.to_string().len() <= MAX_HEAD
+}
+
 /// A head as it is sent before a body: its length (4 bytes, big endian),
 /// then the head as JSON.
 pub fn head_frame(head: &Value) -> Bytes {
@@ -541,6 +547,18 @@ impl Exchange {
 
 #[cfg(test)]
 mod tests {
+    /// A head its reader would refuse does not fit, and so is never sent.
+    #[test]
+    fn a_head_its_reader_would_refuse_does_not_fit() {
+        let head = |target: usize| serde_json::json!({"method":"GET","path":"a".repeat(target),"headers":{}});
+        assert!(super::head_fits(&head(1024)));
+        assert!(super::head_fits(&head(super::MAX_HEAD - 64)));
+        assert!(!super::head_fits(&head(super::MAX_HEAD)));
+        // The same bound as the one a head is read under.
+        let frame = super::head_frame(&head(super::MAX_HEAD));
+        assert!(u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize > super::MAX_HEAD);
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -589,6 +607,11 @@ mod tests {
                 .is_none()
         );
         assert_eq!(&head_frame(&json!({}))[..], &[0, 0, 0, 2, b'{', b'}']);
+        // A head a reader would refuse is known before it is sent.
+        assert!(head_fits(&json!({"path": "a".repeat(MAX_HEAD - 16)})));
+        assert!(!head_fits(&json!({"path": "a".repeat(MAX_HEAD)})));
+        let long = head_frame(&json!({"path": "a".repeat(MAX_HEAD)}));
+        assert!(read_head(&mut Body::from(long)).await.is_none());
     }
 
     #[tokio::test(start_paused = true)]
