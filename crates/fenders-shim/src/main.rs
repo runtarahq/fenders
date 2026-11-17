@@ -373,11 +373,14 @@ fn read_meter(
 ) -> Option<std::thread::JoinHandle<String>> {
     let read = METER.lock().ok()?.take()?;
     Some(std::thread::spawn(move || {
-        use std::io::BufRead;
         let mut last = String::new();
-        for line in std::io::BufReader::new(fs::File::from(read)).lines() {
-            match line {
-                Ok(line) => {
+        let mut meter = std::io::BufReader::new(fs::File::from(read));
+        loop {
+            match launcher_line(&mut meter) {
+                // One longer than a meter line is: passed by, not kept.
+                Ok(Some(None)) => continue,
+                Ok(None) => break,
+                Ok(Some(Some(line))) => {
                     if let (Some(limit), Some(meter)) = (&limit, budget_meter(&line)) {
                         let _ = limit.send(meter);
                     }
@@ -397,6 +400,44 @@ fn read_meter(
         }
         last
     }))
+}
+
+/// The longest line read from the VMM: a meter line, or a control answer.
+const MAX_LAUNCHER_LINE: usize = 4096;
+
+/// The next line of what the VMM writes, without its newline. The VMM runs
+/// the guest and is trusted with less than the shim: a line is read up to
+/// [`MAX_LAUNCHER_LINE`], and one over it, or not UTF-8, is read past and
+/// not kept (`Some(None)`). `None` at the end.
+fn launcher_line(input: &mut impl std::io::BufRead) -> std::io::Result<Option<Option<String>>> {
+    use std::io::{BufRead as _, Read as _};
+    let mut line = Vec::new();
+    let read = input
+        .by_ref()
+        .take(MAX_LAUNCHER_LINE as u64 + 1)
+        .read_until(b'\n', &mut line)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if line.last() == Some(&b'\n') {
+        line.pop();
+        return Ok(Some(String::from_utf8(line).ok()));
+    }
+    if line.len() <= MAX_LAUNCHER_LINE {
+        // The end, without a newline.
+        return Ok(Some(String::from_utf8(line).ok()));
+    }
+    // Over the bound: pass by the rest of it, a piece at a time.
+    loop {
+        line.clear();
+        let read = input
+            .by_ref()
+            .take(MAX_LAUNCHER_LINE as u64)
+            .read_until(b'\n', &mut line)?;
+        if read == 0 || line.last() == Some(&b'\n') {
+            return Ok(Some(None));
+        }
+    }
 }
 
 /// One line to the launcher on stdout (a pipe to it, when it has one):
@@ -1239,7 +1280,9 @@ fn serve_requests(
 /// The control socket of a VM under the outbound byte limit: one command at
 /// a time, a line each way.
 struct Control {
-    socket: tokio::sync::Mutex<tokio::net::UnixStream>,
+    /// The socket, and how many answers are still owed to commands that
+    /// stopped waiting for theirs.
+    socket: tokio::sync::Mutex<(tokio::io::BufReader<tokio::net::UnixStream>, usize)>,
     /// Set once the run is ending: no grant is passed on after that.
     closing: std::sync::atomic::AtomicBool,
 }
@@ -1248,23 +1291,45 @@ impl Control {
     /// Sends `command` and gives the launcher's status, unless it names an
     /// error. A grant (`closing` false) is not sent once the run is ending.
     async fn command(&self, command: &str, closing: bool) -> std::result::Result<Value, String> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        let mut socket = self.socket.lock().await;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let mut held = self.socket.lock().await;
         if !closing && self.closing.load(Ordering::SeqCst) {
             return Err("the run is ending".into());
         }
+        let (socket, owed) = &mut *held;
+        // Answers come in the order of their commands. One that arrives
+        // after its command stopped waiting is that command's, not the next
+        // one's: it is read past here, never taken for this command's.
         let exchange = async {
-            socket.write_all(command.as_bytes()).await?;
-            let mut line = Vec::new();
-            tokio::io::BufReader::new(&mut *socket)
-                .read_until(b'\n', &mut line)
-                .await?;
-            Ok::<_, std::io::Error>(line)
+            socket.get_mut().write_all(command.as_bytes()).await?;
+            loop {
+                let mut line = Vec::new();
+                let read = (&mut *socket)
+                    .take(MAX_LAUNCHER_LINE as u64 + 1)
+                    .read_until(b'\n', &mut line)
+                    .await?;
+                if read == 0 {
+                    return Err(std::io::ErrorKind::UnexpectedEof.into());
+                }
+                if line.last() != Some(&b'\n') {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the launcher's answer was too long",
+                    ));
+                }
+                if *owed == 0 {
+                    return Ok::<_, std::io::Error>(line);
+                }
+                *owed -= 1;
+            }
         };
         match tokio::time::timeout(Duration::from_secs(2), exchange).await {
             Ok(Ok(line)) => budget::applied(&line),
             Ok(Err(error)) => Err(error.to_string()),
-            Err(_) => Err("the launcher did not answer".into()),
+            Err(_) => {
+                *owed += 1;
+                Err("the launcher did not answer".into())
+            }
         }
     }
 
@@ -1294,7 +1359,10 @@ fn limit_outbound(
     let (control, launcher) = CONTROL.lock().ok()?.take()?;
     control.set_nonblocking(true).ok()?;
     let control = Arc::new(Control {
-        socket: tokio::sync::Mutex::new(tokio::net::UnixStream::from_std(control).ok()?),
+        socket: tokio::sync::Mutex::new((
+            tokio::io::BufReader::new(tokio::net::UnixStream::from_std(control).ok()?),
+            0,
+        )),
         closing: Default::default(),
     });
     let (meter, seen) = tokio::sync::watch::channel(budget::Meter::default());
@@ -1474,6 +1542,89 @@ async fn post_failed(spec: &Spec, relay: &relay::Relay, end: &End) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_from_the_vmm_is_read_up_to_a_bound() {
+        let mut input = b"{\"bytes\":1}\n".to_vec();
+        input.extend(std::iter::repeat_n(b'x', 3 * MAX_LAUNCHER_LINE + 7));
+        input.extend_from_slice(b"\nnext\n");
+        input.extend(std::iter::repeat_n(b'y', MAX_LAUNCHER_LINE));
+        input.extend_from_slice(b"\n\xff\nlast");
+        let mut reader = std::io::BufReader::with_capacity(64, &input[..]);
+        let mut lines = Vec::new();
+        while let Some(line) = launcher_line(&mut reader).unwrap() {
+            lines.push(line.map(|line| line.len()));
+        }
+        // The first, the one over the bound (passed by), the next, one of
+        // exactly the bound, one that is not text, and a last without newline.
+        assert_eq!(
+            lines,
+            [
+                Some(11),
+                None,
+                Some(4),
+                Some(MAX_LAUNCHER_LINE),
+                None,
+                Some(4)
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_answer_from_the_launcher_is_not_taken_for_the_next_commands() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let control = Control {
+            socket: tokio::sync::Mutex::new((tokio::io::BufReader::new(ours), 0)),
+            closing: Default::default(),
+        };
+        // A launcher that answers its first command after the shim stopped
+        // waiting, and the rest at once, each with the command it answers.
+        let launcher = tokio::spawn(async move {
+            let (read, mut write) = theirs.into_split();
+            let mut commands = tokio::io::BufReader::new(read).lines();
+            let mut first = true;
+            while let Ok(Some(command)) = commands.next_line().await {
+                if std::mem::take(&mut first) {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                let answer = format!("{{\"error\":null,\"answers\":\"{command}\"}}\n");
+                if write.write_all(answer.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        assert_eq!(
+            control.command("one\n", false).await.unwrap_err(),
+            "the launcher did not answer"
+        );
+        // The answer to `one` arrives now. `two` gets its own.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            control.command("two\n", false).await.unwrap()["answers"],
+            "two"
+        );
+        assert_eq!(
+            control.command("three\n", false).await.unwrap()["answers"],
+            "three"
+        );
+        // An answer longer than any is: refused, not held.
+        launcher.abort();
+        let (ours, mut theirs) = tokio::net::UnixStream::pair().unwrap();
+        let control = Control {
+            socket: tokio::sync::Mutex::new((tokio::io::BufReader::new(ours), 0)),
+            closing: Default::default(),
+        };
+        let flood = tokio::spawn(async move {
+            let _ = theirs.write_all(&vec![b'x'; 4 * MAX_LAUNCHER_LINE]).await;
+            theirs
+        });
+        assert_eq!(
+            control.command("status\n", false).await.unwrap_err(),
+            "the launcher's answer was too long"
+        );
+        drop(flood);
+    }
 
     #[test]
     fn the_meter_report_is_the_last_totals_and_complete_only_when_final() {
