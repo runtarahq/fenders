@@ -102,6 +102,62 @@ fn ci_names_its_actions_by_commit_and_checks_advisories() {
     assert!(ci.contains("schedule:"));
 }
 
+/// The version and source of `name` in the workspace lockfile.
+fn locked(name: &str) -> Vec<(String, bool)> {
+    let lock = include_str!("../../../Cargo.lock");
+    lock.split("[[package]]")
+        .filter(|package| package.contains(&format!("\nname = \"{name}\"\n")))
+        .map(|package| {
+            let version = package.split("version = \"").nth(1).unwrap();
+            (
+                version[..version.find('"').unwrap()].to_owned(),
+                package.contains("\nsource = "),
+            )
+        })
+        .collect()
+}
+fn at_least(version: &str, wanted: [u64; 3]) -> bool {
+    let parts: Vec<u64> = version.split('.').map(|p| p.parse().unwrap()).collect();
+    parts.as_slice() >= wanted.as_slice()
+}
+
+#[test]
+fn the_lockfile_holds_no_release_with_an_advisory_this_audit_found() {
+    // Each is in the lockfile, at or past the release that fixed it.
+    for (name, fixed) in [
+        ("wasmtime", [50, 0, 1]),
+        ("rustls", [0, 23, 46]),
+        ("libsqlite3-sys", [0, 39, 0]),
+        ("crypto-bigint", [0, 6, 0]),
+    ] {
+        let found = locked(name);
+        assert!(!found.is_empty(), "{name}");
+        for (version, _) in found {
+            assert!(at_least(&version, fixed), "{name} {version}");
+        }
+    }
+    // The two crates the workspace replaces come from its own tree, not the
+    // registry: rsa without its private-key operation, and an empty crate
+    // for SQLx's SQLite driver.
+    for name in ["rsa", "sqlx-sqlite"] {
+        assert_eq!(
+            locked(name)
+                .iter()
+                .map(|(_, registry)| *registry)
+                .collect::<Vec<_>>(),
+            [false],
+            "{name}"
+        );
+    }
+    // Nothing is listed as an advisory that cannot be acted on.
+    let listed = include_str!("../../../.cargo/audit.toml");
+    assert!(listed.lines().any(|line| line.trim() == "ignore = []"));
+    let rsa = include_str!("../../../runtime/vendor/rsa-verify-only/src/algorithms/rsa.rs");
+    let decrypt = &rsa[rsa.find("pub fn rsa_decrypt<").unwrap()..];
+    let body = &decrypt[..decrypt.find("\n}\n").unwrap()];
+    assert!(body.trim_end().ends_with("Err(Error::Decryption)") && !body.contains("modpow"));
+}
+
 #[test]
 fn the_launcher_is_built_with_its_hardening_named() {
     let build = include_str!("../../../scripts/build_node.sh");

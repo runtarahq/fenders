@@ -49,3 +49,5 @@ fenders-component = { path = "../fenders-component" }
 wat = "=1.239.0"
 tower = { version = "=0.5.3", features = ["util"] }
 tempfile = "3"
+# Only for tests/rsa_verify_only.rs: the workspace patches this crate.
+rsa = { version = "0.9", features = ["getrandom"] }
