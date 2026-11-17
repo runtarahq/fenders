@@ -118,11 +118,15 @@ fn cgroup_leaves(cgroup: &Path, guest: &Value) -> Result<PathBuf> {
         .filter(|c| available.split_whitespace().any(|a| a == **c))
         .map(|c| format!("+{c}"))
         .collect();
-    if !wanted.is_empty() {
-        fs::write(cgroup.join("cgroup.subtree_control"), wanted.join(" ")).map_err(os(
-            "enabling controllers (is the shim alone in its run's cgroup?)",
-        ))?;
+    if wanted.len() != 3 {
+        return Err(format!(
+            "the run's cgroup has controllers `{}`: cpu, memory and pids are all required",
+            available.trim()
+        ));
     }
+    fs::write(cgroup.join("cgroup.subtree_control"), wanted.join(" ")).map_err(os(
+        "enabling controllers (is the shim alone in its run's cgroup?)",
+    ))?;
     fs::create_dir(&vm).map_err(os("creating the vm cgroup"))?;
     let mib = |field: &str| guest[field].as_i64().unwrap_or(0) * 1024 * 1024;
     for (name, value) in [
@@ -138,10 +142,11 @@ fn cgroup_leaves(cgroup: &Path, guest: &Value) -> Result<PathBuf> {
         ("memory.oom.group", "1".to_owned()),
         ("pids.max", "16".to_owned()),
     ] {
-        let file = vm.join(name);
-        if file.exists() {
-            fs::write(&file, value).map_err(os(name))?;
-        }
+        // A limit that cannot be set is not skipped: a VM would otherwise
+        // start with none, and nothing would say so.
+        fs::write(vm.join(name), value).map_err(|error| {
+            format!("limiting the vm cgroup ({name}): {error}; its cpu, memory and pids controllers must be enabled")
+        })?;
     }
     Ok(vm)
 }
@@ -1542,6 +1547,41 @@ async fn post_failed(spec: &Spec, relay: &relay::Relay, end: &End) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vm_is_not_started_without_its_limits() {
+        let guest = json!({"cpu_percent": 150, "host_memory_mib": 96});
+        // A cgroup without the cpu controller: refused, nothing skipped.
+        let partial = tempfile::tempdir().unwrap();
+        fs::write(partial.path().join("cgroup.controllers"), "memory pids\n").unwrap();
+        let refused = cgroup_leaves(partial.path(), &guest).unwrap_err();
+        assert!(
+            refused.contains("cpu, memory and pids are all required"),
+            "{refused}"
+        );
+        assert!(!partial.path().join("vm").exists());
+
+        // With all three, every limit is written to the VM's leaf.
+        let whole = tempfile::tempdir().unwrap();
+        fs::write(
+            whole.path().join("cgroup.controllers"),
+            "cpuset cpu io memory pids\n",
+        )
+        .unwrap();
+        let vm = cgroup_leaves(whole.path(), &guest).unwrap();
+        let read = |name: &str| fs::read_to_string(vm.join(name)).unwrap();
+        assert_eq!(read("cpu.max"), "150000 100000");
+        assert_eq!(read("memory.max"), (96 * 1024 * 1024).to_string());
+        assert_eq!(read("memory.swap.max"), "0");
+        assert_eq!(read("pids.max"), "16");
+        assert_eq!(
+            fs::read_to_string(whole.path().join("cgroup.subtree_control")).unwrap(),
+            "+cpu +memory +pids"
+        );
+
+        // A second shim in the same cgroup is refused.
+        assert!(cgroup_leaves(whole.path(), &guest).is_err());
+    }
 
     #[test]
     fn a_line_from_the_vmm_is_read_up_to_a_bound() {
