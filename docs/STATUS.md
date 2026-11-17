@@ -22,7 +22,12 @@ as both control plane and node.
   `command`, or `http` for an app that serves requests.
 - Every further capability is opt-in per launch spec (`output`,
   `egress_budget`, `mode: http`). A launch that does not ask takes the plain
-  path: output to `/dev/null`, no extra pipe, socket, task or call.
+  path: output to `/dev/null`, and no extra socket or call. Every launch has
+  one pipe for its launcher's own messages, which its shim logs: the first
+  64 KiB and the last 16 lines.
+- A node does not start on a host whose KVM has nested virtualization
+  enabled, unless told `--nested-virtualization`: no run uses it, and it is
+  host kernel code a guest has no business near.
 - Outbound access is the static policy in the launch spec: `tcp_allow`,
   `http_allow`, trust, and for public HTTPS origins the addresses they resolved
   to. It does not change while a run lives; a permission is taken back by

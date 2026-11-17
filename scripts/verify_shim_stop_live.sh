@@ -7,6 +7,8 @@
 #   bash scripts/verify_shim_stop_live.sh [OUTPUT_DIR]
 #
 # Passes when
+#  - the launcher's own messages are in the shim's log, for a launch that
+#    asked for no output;
 #  - the run ends and the shim is still there a few seconds later, holding
 #    its end for its launcher (it would for an hour);
 #  - sent SIGTERM then, the shim is gone within two seconds, and its cgroup
@@ -103,12 +105,16 @@ if [[ $held == true ]]; then
   fi
 fi
 # Its scope goes with its last process: no such cgroup is no process left.
+# This launch asked for no output: its launcher's own messages still reach
+# the shim's log.
+said=false
+grep -q 'launcher line="guest exit 0' "$out/shim.log" && said=true
 left=$( (sudo sh -c "cat /sys/fs/cgroup/system.slice/$unit.scope/cgroup.procs /sys/fs/cgroup/system.slice/$unit.scope/*/cgroup.procs" 2>/dev/null || true) | wc -l)
-jq -n --arg state "$state" --argjson held "$held" --argjson stopped_in "$stopped_in" \
+jq -n --arg state "$state" --argjson said "$said" --argjson held "$held" --argjson stopped_in "$stopped_in" \
   --argjson left "$left" --slurpfile ended "$out/ended.json" '
   {run: {state: $state, exit_code: $ended[0].exit_code},
-   shim_held_the_end: $held, stopped_within_seconds: $stopped_in, processes_left: $left}
-  | .passed = (.run.state == "exited" and .shim_held_the_end
+   launcher_messages_logged: $said, shim_held_the_end: $held, stopped_within_seconds: $stopped_in, processes_left: $left}
+  | .passed = (.run.state == "exited" and .launcher_messages_logged and .shim_held_the_end
       and (.stopped_within_seconds != null and .stopped_within_seconds < 2)
       and .processes_left == 0)' | tee "$out/result.json"
 jq -e .passed "$out/result.json" > /dev/null

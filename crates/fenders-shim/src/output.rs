@@ -81,6 +81,12 @@ pub struct VmEnds {
     pub diagnostics: OwnedFd,
 }
 
+/// A pipe for the launcher's own messages alone, for a launch that keeps
+/// no output: the shim's end, then the VM's.
+pub fn diagnostics_pipe() -> Result<(OwnedFd, OwnedFd), String> {
+    pipe()
+}
+
 fn pipe() -> Result<(OwnedFd, OwnedFd), String> {
     let mut ends = [0; 2];
     if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {

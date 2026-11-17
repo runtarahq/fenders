@@ -398,6 +398,10 @@ fn kill_vmm(vmm: Option<&OwnedFd>, pid: libc::pid_t, reaped: bool) -> bool {
 /// [`finish`]: set only for a launch that asked for its output.
 static OUTPUT: std::sync::Mutex<Option<output::Pipes>> = std::sync::Mutex::new(None);
 
+/// The shim's end of the launcher's messages pipe, for a launch that keeps
+/// no output (one that does has it among [`OUTPUT`]'s).
+static DIAGNOSTICS: std::sync::Mutex<Option<OwnedFd>> = std::sync::Mutex::new(None);
+
 /// The read end of the VMM's meter pipe (cumulative outbound totals), taken
 /// by [`finish`] once the shim is unprivileged.
 static METER: std::sync::Mutex<Option<OwnedFd>> = std::sync::Mutex::new(None);
@@ -896,7 +900,10 @@ fn start(
         .env("FENDERS_LIFETIME_SECONDS", "0")
         .stdin(Stdio::null());
     // The guest's output goes nowhere unless the launch asked for it: then to
-    // two pipes, with a third for the launcher's own messages.
+    // two pipes. The launcher's own messages have a pipe either way: what it
+    // says when it ends a guest (an exit it did not expect, a pointer outside
+    // the guest) is in the shim's log for every run.
+    let mut diagnostics_only = None;
     let captured = if output::wanted(guest) {
         let (pipes, vm_ends) = output::pipes()?;
         inheritable(vm_ends.diagnostics.as_raw_fd())?;
@@ -909,7 +916,13 @@ fn start(
             .stderr(Stdio::from(vm_ends.stderr));
         Some((pipes, vm_ends.diagnostics))
     } else {
-        command.stdout(Stdio::null()).stderr(Stdio::null());
+        let (shim_end, vm_end) = output::diagnostics_pipe()?;
+        inheritable(vm_end.as_raw_fd())?;
+        command
+            .env("FENDERS_DIAGNOSTICS_FD", vm_end.as_raw_fd().to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        diagnostics_only = Some((shim_end, vm_end));
         None
     };
     // Under the outbound byte limit the VMM admits only granted bytes, and
@@ -994,6 +1007,12 @@ fn start(
         drop(vm_diagnostics);
         if let Ok(mut slot) = OUTPUT.lock() {
             *slot = Some(pipes);
+        }
+    }
+    if let Some((shim_end, vm_end)) = diagnostics_only {
+        drop(vm_end);
+        if let Ok(mut slot) = DIAGNOSTICS.lock() {
+            *slot = Some(shim_end);
         }
     }
     if let Ok(mut slot) = METER.lock() {
@@ -1094,6 +1113,11 @@ fn finish(
                 };
                 let meter = read_meter(link.clone(), limit_meter);
                 let captured = capture_output(spec, &relay);
+                let launcher_says = DIAGNOSTICS
+                    .lock()
+                    .ok()
+                    .and_then(|mut slot| slot.take())
+                    .map(|pipe| tokio::spawn(output::diagnostics(pipe)));
                 let requests = serve_requests(spec, &relay);
                 if let Some(link) = &link {
                     link.update(|status| {
@@ -1119,6 +1143,9 @@ fn finish(
                 .await;
                 if let Some(captured) = captured {
                     close_output(captured).await;
+                }
+                if let Some(launcher_says) = launcher_says {
+                    let _ = tokio::time::timeout(Duration::from_secs(1), launcher_says).await;
                 }
                 if let Some(meter) = meter {
                     egress = tokio::task::spawn_blocking(move || meter.join().unwrap_or_default())
