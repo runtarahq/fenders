@@ -8,6 +8,12 @@ use std::collections::HashSet;
 pub(super) const BUDGET: u64 = 512 * 1024 * 1024;
 const IDLE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const PRESSURE_GRACE: Duration = Duration::from_secs(60 * 60);
+/// How long an entry is kept whatever the pressure: long enough for the
+/// launch its upload was for to pin it. Between this and [`PRESSURE_GRACE`]
+/// an entry goes only when an upload would otherwise be refused: one
+/// workspace's fresh entries then make room for the next upload instead of
+/// keeping every workspace's out for an hour.
+const PRESSURE_FLOOR: Duration = Duration::from_secs(60);
 const PARTIAL_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_REMOVE: usize = 8;
 // Bound inventory work. Ambiguous/incomplete inventories never authorize deletion.
@@ -131,6 +137,8 @@ fn collect_at(node: &Node, required: u64, now: SystemTime) -> Result<Collection>
         .is_ok_and(|v| v.lines().any(|line| line == "populated 0"));
     let mut total = 0u64;
     let mut candidates = Vec::new();
+    // Complete entries past the floor and within the grace: the last resort.
+    let mut recent = Vec::new();
     for compiler in fs::read_dir(&root)? {
         count(&mut seen)?;
         let compiler = compiler?;
@@ -211,6 +219,8 @@ fn collect_at(node: &Node, required: u64, now: SystemTime) -> Result<Collection>
                 || !complete && compiler_empty && age >= PARTIAL_GRACE
             {
                 candidates.push((updated, path, bytes, !complete || age >= IDLE, retired));
+            } else if complete && age >= PRESSURE_FLOOR {
+                recent.push((updated, path, bytes));
             }
         }
     }
@@ -236,6 +246,25 @@ fn collect_at(node: &Node, required: u64, now: SystemTime) -> Result<Collection>
             fs::rename(&path, &tombstone)?;
             fs::File::open(parent)?.sync_all()?;
         }
+        fs::remove_dir_all(tombstone)?;
+        fs::File::open(parent)?.sync_all()?;
+        total = total.saturating_sub(bytes);
+        removed += 1;
+    }
+    // Still no room for what is asked: the oldest of the recent entries go,
+    // only as many as it takes.
+    recent.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    for (_, path, bytes) in recent {
+        if removed == MAX_REMOVE
+            || required == 0
+            || total.saturating_add(required) <= node.artifact_cache_bytes
+        {
+            break;
+        }
+        let parent = path.parent().unwrap();
+        let tombstone = parent.join(format!(".evicted-{}", uid()));
+        fs::rename(&path, &tombstone)?;
+        fs::File::open(parent)?.sync_all()?;
         fs::remove_dir_all(tombstone)?;
         fs::File::open(parent)?.sync_all()?;
         total = total.saturating_sub(bytes);
@@ -403,6 +432,41 @@ mod tests {
             n.upload(b"\0asm\x0d\0\x01\0").unwrap_err().status,
             StatusCode::INSUFFICIENT_STORAGE
         );
+    }
+    #[test]
+    fn recent_entries_make_room_for_an_upload_rather_than_keep_it_out() {
+        let root = tempfile::tempdir().unwrap();
+        let n = node(root.path());
+        let mib = 1024 * 1024;
+        // One workspace filled the budget minutes ago: four entries of 120
+        // MiB, none an hour old, and one just made.
+        let minutes = |m: u64| Duration::from_secs(m * 60);
+        let first = entry(&n, 'a', 1, 120 * mib, minutes(30));
+        let second = entry(&n, 'a', 2, 120 * mib, minutes(20));
+        let third = entry(&n, 'a', 3, 120 * mib, minutes(10));
+        let pinned = entry(&n, 'a', 4, 120 * mib, minutes(40));
+        run(&n, &pinned, "running");
+        let fresh = entry(&n, 'a', 5, 20 * mib, Duration::from_secs(5));
+        // Tidying, with nothing asked for, leaves them all: they are recent.
+        let tidied = collect(&n, 0).unwrap();
+        assert_eq!(tidied.removed, 0);
+        // An upload that needs 128 MiB: the oldest unpinned recent entries
+        // go, only as many as it takes. 500 MiB held of 512: one must go.
+        let made = collect(&n, 128 * mib).unwrap();
+        assert!(made.fits);
+        assert_eq!(made.removed, 1);
+        assert!(!first.exists());
+        // The other recent ones, the run's own and the one just made stay.
+        assert!(second.exists() && third.exists() && pinned.exists() && fresh.exists());
+        // A larger one takes the next oldest too.
+        let made = collect(&n, 240 * mib).unwrap();
+        assert!(made.fits);
+        assert!(!second.exists() && third.exists());
+        // What cannot be made room for is still refused: only the pinned
+        // entry and those under a minute old are left to keep.
+        let refused = collect(&n, BUDGET).unwrap();
+        assert!(!refused.fits);
+        assert!(pinned.exists() && fresh.exists());
     }
     #[test]
     fn a_run_still_being_created_pins_its_artifact_until_it_is_in_runs() {

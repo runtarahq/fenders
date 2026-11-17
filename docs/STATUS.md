@@ -195,9 +195,10 @@ as both control plane and node.
   for up to ten minutes; all are discarded when any run on the node is
   stopped, as a removed connection stops runs.
 - A node's compiled-artifact budget (512 MiB by default) is shared by every
-  workspace it compiles for, and an entry is kept for an hour once made: a
-  workspace that fills it has the next upload refused for everyone on that
-  node until entries age. Compiles are taken up in turn among workspaces.
+  workspace it compiles for. An entry not in use is kept for an hour, but
+  one over a minute old gives way when an upload would otherwise be refused:
+  a workspace that fills the budget makes the next compile again, it does
+  not keep it out. Compiles are taken up in turn among workspaces.
 - Any enrolled node may be given any workspace's upload to compile, and its
   verdict is taken: a node is trusted with components as it is with
   secrets.
