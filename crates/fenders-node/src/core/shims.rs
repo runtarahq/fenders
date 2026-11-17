@@ -181,6 +181,47 @@ fn is_run_id(name: &str) -> bool {
     name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// The longest line a shim's standard output is read for: `ended`, or
+/// `meter` and a few counters.
+const MAX_SHIM_LINE: usize = 1024;
+
+/// The next line of `input`, without its newline: `Some(None)` for one over
+/// `max` bytes or not UTF-8, which is read past and not kept, and `None` at
+/// the end of input.
+fn bounded_line(
+    input: &mut impl std::io::BufRead,
+    max: usize,
+) -> std::io::Result<Option<Option<String>>> {
+    let mut line = Vec::new();
+    let mut over = false;
+    loop {
+        let buffered = match input.fill_buf() {
+            Ok(buffered) => buffered,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if buffered.is_empty() {
+            // The end: a last line without a newline counts if it fits.
+            return Ok((!line.is_empty() || over)
+                .then(|| (!over).then(|| String::from_utf8(line).ok()).flatten()));
+        }
+        let newline = buffered.iter().position(|byte| *byte == b'\n');
+        let taken = newline.unwrap_or(buffered.len());
+        if !over && line.len() + taken <= max {
+            line.extend_from_slice(&buffered[..taken]);
+        } else {
+            over = true;
+            line = Vec::new();
+        }
+        input.consume(taken + usize::from(newline.is_some()));
+        if newline.is_some() {
+            return Ok(Some(
+                (!over).then(|| String::from_utf8(line).ok()).flatten(),
+            ));
+        }
+    }
+}
+
 /// The abstract address of run `id`'s link.
 fn link_address(id: &str) -> std::io::Result<SocketAddr> {
     SocketAddr::from_abstract_name(format!("fenders/run/{id}").as_bytes())
@@ -901,13 +942,17 @@ impl Node {
                         // The shim streams its outbound totals as they change
                         // and says when its run ended; its pipe closing (the
                         // shim gone) is looked into as an end too.
-                        use std::io::BufRead;
                         let run = || serving.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                        for line in std::io::BufReader::new(stdout).lines() {
-                            let Ok(line) = line else { break };
+                        // A shim runs as its run's uid and may be anything by
+                        // the time it writes here: a line is read up to a
+                        // bound, and one over it is passed by, not held.
+                        let mut stdout = std::io::BufReader::new(stdout);
+                        while let Ok(Some(line)) = bounded_line(&mut stdout, MAX_SHIM_LINE) {
+                            let Some(line) = line else { continue };
                             if let Some(totals) = line.strip_prefix("meter ") {
                                 if let (Ok(totals), Some(run)) =
                                     (serde_json::from_str::<Value>(totals), run())
+                                    && totals.is_object()
                                 {
                                     meters
                                         .lock()
@@ -1259,6 +1304,43 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_shims_output_is_read_a_bounded_line_at_a_time() {
+        let mut input = Vec::new();
+        input.extend_from_slice(b"meter {\"bytes\":1}\n");
+        // A megabyte with no newline, then one: never held, and passed by.
+        input.extend(std::iter::repeat_n(b'x', 1 << 20));
+        input.extend_from_slice(b"\nended\n");
+        input.extend_from_slice(&[0xff, 0xfe, b'\n']);
+        input.extend_from_slice(b"\n");
+        input.extend_from_slice(b"last");
+        // Read through a small buffer, so lines span several fills.
+        let mut reader = std::io::BufReader::with_capacity(7, &input[..]);
+        let mut lines = Vec::new();
+        while let Some(line) = bounded_line(&mut reader, 32).unwrap() {
+            lines.push(line);
+        }
+        assert_eq!(
+            lines,
+            [
+                Some("meter {\"bytes\":1}".to_owned()),
+                None,
+                Some("ended".to_owned()),
+                None,
+                Some(String::new()),
+                Some("last".to_owned()),
+            ]
+        );
+        // Exactly the bound fits; one byte more does not.
+        let mut reader = &b"abcd\nabcde\n"[..];
+        assert_eq!(
+            bounded_line(&mut reader, 4).unwrap(),
+            Some(Some("abcd".into()))
+        );
+        assert_eq!(bounded_line(&mut reader, 4).unwrap(), Some(None));
+        assert_eq!(bounded_line(&mut reader, 4).unwrap(), None);
     }
 
     #[test]
