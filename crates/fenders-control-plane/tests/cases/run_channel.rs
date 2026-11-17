@@ -459,3 +459,50 @@ async fn a_launch_under_the_outbound_byte_limit_is_granted_bytes_over_its_run_ch
     assert_eq!(grant(3, "shim-7", 1).await.0, StatusCode::CONFLICT);
     l.finish().await;
 }
+
+/// A node the operator disabled holds the credentials of the runs it was
+/// given. They are refused while it is disabled.
+#[tokio::test]
+async fn a_disabled_nodes_launches_are_refused_on_the_run_channel() {
+    let mut l = Lab::new().await;
+    l.store = l.store.clone().with_run_channel(
+        RunChannel::new("https://control.test:9093", "fixture ca".into(), None).unwrap(),
+    );
+    let node = l.node("worker").await;
+    let op = l.create("held", json!({"artifact_id":l.artifact})).await;
+    l.store.schedule().await.unwrap();
+    let e = l.run(&op).await;
+    let (id, generation) = (s(&e["id"]), n(&e["generation"]));
+    let spec = l
+        .store
+        .assignment(s(&node["id"]), id, generation)
+        .await
+        .unwrap()["spec"]
+        .clone();
+    let credential = s(&spec["channel"]["credential"]);
+    let router = run_channel::router(l.store.clone());
+    let path = format!("/run/{id}/{generation}/v1/run/http/next");
+    let authorized = || async {
+        l.store
+            .run_channel_authorize(id, generation, credential)
+            .await
+            .map_err(|error| error.status)
+    };
+    assert_eq!(authorized().await, Ok(()));
+    l.store
+        .node_mode(&l.operator, s(&node["id"]), json!({"disabled":true}))
+        .await
+        .unwrap();
+    assert_eq!(authorized().await, Err(StatusCode::FORBIDDEN));
+    assert_eq!(
+        call(&router, "POST", &path, Some(credential)).await,
+        StatusCode::FORBIDDEN
+    );
+    // Enabled again, its runs are its own again: nothing was lost.
+    l.store
+        .node_mode(&l.operator, s(&node["id"]), json!({"disabled":false}))
+        .await
+        .unwrap();
+    assert_eq!(authorized().await, Ok(()));
+    l.finish().await;
+}

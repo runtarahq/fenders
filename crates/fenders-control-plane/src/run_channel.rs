@@ -256,13 +256,22 @@ impl Store {
             return Err(Error::unauthorized());
         }
         let mut tx = self.transaction(false, false).await?;
-        optional(
+        let launch = optional(
             &mut tx,
-            "SELECT id FROM executions WHERE id=$1 AND generation=$2 AND reserved",
+            "SELECT n.disabled FROM executions e LEFT JOIN nodes n ON n.id=e.node_id WHERE e.id=$1 AND e.generation=$2 AND e.reserved",
             args![execution, generation],
         )
         .await?
         .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
+        // A disabled node is told nothing more and heard from no more, so
+        // nothing moves its runs on: their credentials, which it holds, are
+        // refused for as long as it is disabled.
+        if launch["disabled"] != false {
+            return Err(Error::new(
+                StatusCode::FORBIDDEN,
+                "the launch's node is disabled",
+            ));
+        }
         Ok(())
     }
 }
