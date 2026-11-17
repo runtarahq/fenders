@@ -215,7 +215,34 @@ static void resolver_only(void) {
     close(resolver);close(other);memset(&dns_server,0,sizeof(dns_server));
     puts("PASS a datagram socket, bound or sending, hears only the resolver");
 }
+// Sockets and connections are made no faster than the run's rate.
+static void open_rate(void) {
+    int server=socket(AF_INET,SOCK_STREAM,0);assert(server>=0);
+    struct sockaddr_in address={.sin_family=AF_INET,.sin_addr={.s_addr=htonl(INADDR_LOOPBACK)}};
+    assert(!bind(server,(void *)&address,sizeof(address)) && !listen(server,4096));
+    socklen_t size=sizeof(address);assert(!getsockname(server,(void *)&address,&size));
+    tcp_allow[0]=address;tcp_allow_count=1;
+    uint64_t started=network_now();unsigned made=0,refused=0;
+    // As a guest does it: a socket, a connection, a close, over and over.
+    while(network_now()-started<1000000000ull) {
+        if(!network_open_admitted()){++refused;usleep(100);continue;}
+        int guest=guest_network_fd(socket(AF_INET,SOCK_STREAM,0),SOCK_STREAM);assert(guest>=3);
+        long connected=network_connect((uint64_t)guest,&address);release_calls();
+        if(connected==0) {
+            ++made;int peer=accept(server,NULL,NULL);assert(peer>=0);close(peer);
+        } else {assert(connected==-EAGAIN);++refused;}
+        guest_close((uint64_t)guest);
+    }
+    // Two calls a connection: the burst and one second of the rate, no more.
+    assert(refused>0 && made>=NETWORK_OPENS_BURST/2 && made<=(NETWORK_OPENS_BURST+NETWORK_OPENS_PER_SECOND)/2+1);
+    // And a refused connect is retried once there is room, to the same peer.
+    usleep(2*NETWORK_OPEN_NS/1000+1000);
+    assert(network_open_admitted());
+    close(server);tcp_allow_count=0;
+    printf("PASS sockets and connections: %u made in a second, the rest refused with EAGAIN\n",made);
+}
 int main(int argc,char **argv) {
+    if(argc==2 && !strcmp(argv[1],"--open-rate")){open_rate();return 0;}
     if(argc==2 && !strcmp(argv[1],"--resolver")){resolver_only();return 0;}
     if(argc==2 && !strcmp(argv[1],"--meter-final")){meter_final_closes();return 0;}
     if(argc==2 && !strcmp(argv[1],"--budget")){budget_tests();return 0;}

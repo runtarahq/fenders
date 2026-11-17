@@ -101,6 +101,28 @@ static int destination_allowed_locked(int type,const struct sockaddr_in *address
     if(type==SOCK_DGRAM)return dns_server.sin_addr.s_addr!=INADDR_ANY && address->sin_addr.s_addr==dns_server.sin_addr.s_addr && address->sin_port==dns_server.sin_port;
     return type==SOCK_STREAM && network_contains(tcp_allow,tcp_allow_count,address);
 }
+// How fast a guest may make sockets and connect them. Neither sends a byte
+// the meter counts, yet each costs the host what no cgroup accounts to the
+// run: connection-tracking entries, ports held after a close, and connection
+// attempts sent from the node's address. A run has NETWORK_OPENS_BURST of
+// these calls at once and NETWORK_OPENS_PER_SECOND after; past that a call is
+// refused with EAGAIN, as a caller that should try again is.
+#define NETWORK_OPENS_BURST 1000u
+#define NETWORK_OPENS_PER_SECOND 200u
+#define NETWORK_OPEN_NS (1000000000ull/NETWORK_OPENS_PER_SECOND)
+static uint64_t network_opens_spent,network_opens_refused;
+static int network_open_admitted(void) {
+    pthread_mutex_lock(&fd_lock);
+    // `spent` is the time by which what was used is paid back: never further
+    // behind now than a whole burst.
+    uint64_t now=network_now(),floor=now>NETWORK_OPENS_BURST*NETWORK_OPEN_NS?now-NETWORK_OPENS_BURST*NETWORK_OPEN_NS:0;
+    if(network_opens_spent<floor)network_opens_spent=floor;
+    int admitted=network_opens_spent+NETWORK_OPEN_NS<=now;
+    if(admitted)network_opens_spent+=NETWORK_OPEN_NS;
+    else if(!network_opens_refused++)fprintf(DIAGNOSTICS,"sockets and connections refused: more than %u at once and %u a second\n",NETWORK_OPENS_BURST,NETWORK_OPENS_PER_SECOND);
+    pthread_mutex_unlock(&fd_lock);
+    return admitted;
+}
 static int guest_network_fd(int host,int type) {
     if(host<0)return -errno;
     struct network_connection *connection=calloc(1,sizeof(*connection));
@@ -129,6 +151,8 @@ static long network_connect(uint64_t guest,const struct sockaddr_in *address) {
     }
     connection->peer=*address;connection->assigned=1;
     pthread_mutex_unlock(&fd_lock);
+    // A socket may be connected again after a refusal: each attempt counts.
+    if(!network_open_admitted())return -EAGAIN;
     return result(connect(desc->fd,(const void *)address,sizeof(*address)));
 }
 // A datagram socket hears only the resolver: bound or about to send, it is

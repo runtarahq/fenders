@@ -27,6 +27,9 @@ as both control plane and node.
   `http_allow`, trust, and for public HTTPS origins the addresses they resolved
   to. It does not change while a run lives; a permission is taken back by
   stopping the run.
+- A run makes sockets and connects them at up to 1,000 calls at once and 200
+  a second after (a connection is two); past that a call is refused with
+  `EAGAIN`. The numbers are the launcher's, not a tenant's to set.
 - The node keeps nothing about a run on disk. A lost run is recovered by its
   control plane.
 

@@ -435,6 +435,7 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 41:
         if(a!=AF_INET || (b&~(SOCK_CLOEXEC|SOCK_NONBLOCK|0xf)))return -EAFNOSUPPORT;
         if(!(((b&0xf)==SOCK_STREAM && (!c || c==IPPROTO_TCP)) || ((b&0xf)==SOCK_DGRAM && (!c || c==IPPROTO_UDP))))return -EAFNOSUPPORT;
+        if(!network_open_admitted())return -EAGAIN;
         return guest_network_fd(socket(a,b,c),b&0xf);
     case 42: {
         if(c!=sizeof(struct sockaddr_in))return -EINVAL;
