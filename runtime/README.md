@@ -118,7 +118,7 @@ operator must not alias another tenant's files into a sandbox volume.
 
 Directories are separate virtual mounts: cross-mount hard links/renames return
 an error. Nested host mount traversal, devices and FIFO data access are denied.
-The pinned upstream Wasmtime 38 implementation itself rejects hard links with
+The pinned upstream Wasmtime implementation itself rejects hard links with
 `SYMLINK_FOLLOW`; the probe verifies that error instead of changing upstream
 semantics. Optional `pwritev2` currently returns ENOSYS and upstream append falls
 back successfully to supported operations.
@@ -205,29 +205,25 @@ the host**, not confirmed remote delivery or wire bytes: packet headers and
 retransmissions are excluded. Incoming HTTP response sockets, files, stdout and
 management traffic are excluded.
 
-The Rust worker supplies an optional `FENDERS_EGRESS_FD`: a new, zero-filled,
-40-byte regular file owned by the host. The VMM maps it outside guest memory,
-closes the inherited descriptor and never installs it in the guest descriptor
-table. Five lock-free native-endian u64 atomics contain sequence, contract (1),
-bytes, in-flight writes and validity (1). Writers publish an odd/even sequence
-under the descriptor lock; readers reject uninitialized or interrupted records.
-This local ABI requires matching host architecture and is not an archive format.
+The shim supplies `FENDERS_METER_FD`, the write end of a pipe it reads. The
+VMM never installs it in the guest descriptor table. Each line is
+`meter BYTES IN_FLIGHT MEASURED REFUSALS` (and, under an outbound byte limit,
+`WANTED`): cumulative totals, not increments, so a reader that misses lines
+loses only freshness. Lines are written at most every 50 ms while totals
+change; the line written as the VMM exits says `final` instead of `meter`. A
+full pipe drops a line, and the next carries the same totals and more.
 
-Before outbound I/O the VMM publishes an in-flight marker; afterward it publishes
-the accepted count and clears the marker. The Rust worker reads while running
-and after reaping the entire process, flushes the file and persists its final
-observation. Thus a short-lived process needs no successful management poll.
-Only a valid, stable post-exit record with no in-flight writes is complete. A
-kill between the syscall and accounting leaves a lower bound with incomplete
-coverage; interrupted publication is unavailable. Same-boot worker recovery
-can recover a lower bound but cannot infer that process termination completed.
-Absence, old launchers and invalid counters never imply measured zero.
+Before outbound I/O the VMM counts the write as in flight; afterward it adds
+the accepted count and clears it. Only a `final` line with no write in flight
+is a complete total. A VMM that is killed writes no `final` line: its last
+`meter` line is a lower bound, at most one period old, and the shim reports
+the total as incomplete. Absence of a meter never implies a measured zero.
+The meter files of earlier launchers (`FENDERS_EGRESS_FD`,
+`FENDERS_EGRESS_PERIOD_FD`), network leases and the start gate are gone: a
+launcher given any of their variables refuses to start.
 
-The node ships these observations through the authenticated heartbeat to
-generation-fenced control-plane rollups and customer Usage. Monthly outbound charging and fleet accuracy remain outstanding before platform
-egress accounting is complete. This does not change transfer
-admission or claim a monthly billing meter, host-loss durability or measured
-performance overhead.
+The shim reports these totals on its run channel and to its node, which
+ships them through its authenticated heartbeat to the control plane's usage.
 
 Run `bash scripts/verify_network_native.sh` on Linux with an x86-64 native or
 cross compiler. The sanitizer tests use real host sockets and the production
@@ -250,8 +246,9 @@ upstream semantics; they are not automatically converted to success/failure.
 Signal registration/masks/alternate-stack calls are compatibility no-ops because
 this platform does not deliver POSIX signals. Native fatal-signal requests and
 unexpected KVM exits terminate the sandbox. Wasmtime uses explicit traps rather
-than signal-based traps. `brk` cannot grow; libc uses mmap. `mremap`, rseq and
-unimplemented syscalls return ENOSYS. Robust-list registration is a no-op; robust
+than signal-based traps. `brk` cannot grow; libc uses mmap. `mremap` grows in
+place or moves within guest memory; rseq and unimplemented syscalls return
+ENOSYS. Robust-list registration is a no-op; robust
 mutex recovery and reusable long-lived thread IDs are not implemented. These
 limitations matter for workloads beyond the tested upstream path.
 
@@ -268,9 +265,8 @@ resumption settings; see [provenance](vendor/wasmtime-wasi-http/FENDERS-PORT.md)
 
 The launcher advertises `network_egress_budget: socket-payload-ceiling-v2`.
 Explicit `FENDERS_EGRESS_BUDGET=1` starts with no outbound byte authority and
-requires the private management socket. Without this option, existing static
-and leased networking retains its previous behavior. This primitive is not yet
-the tenant transfer-allowance allocator.
+requires the private management socket. Without this option, the static
+network policy alone applies and outbound bytes are counted, not limited.
 
 The host-only command is `egress REVISION BOOTTIME_DEADLINE_NS CUMULATIVE_BYTES`.
 The deadline must be zero (revoke new admissions) or at most 30 seconds ahead.
@@ -280,9 +276,10 @@ byte count. This discards unused authority before a new allowance period without
 resetting the counter. V1 lacked that transition; fleet allocation requires v2.
 Each renewal/revocation requires a
 new revision; an exact live replay is idempotent, and conflicting or older
-revisions fail. Expired grants cannot be renewed by replay. A gated launch waits
-for both network authorization and an initial live byte grant; a zero-byte grant
-can release that gate while permitting no positive outbound payload.
+revisions fail. Expired grants cannot be renewed by replay. A write the ceiling
+does not admit waits up to `FENDERS_EGRESS_WAIT_MS` for a grant that does (the
+meter's `WANTED` says how far the total must reach) and is then refused with
+EDQUOT; without that variable it is refused at once.
 
 Under the descriptor lock, each outbound `write`, `writev`, `send` and `sendto`
 reserves its entire requested payload before entering the host syscall. All
@@ -305,59 +302,26 @@ Management status returns `egress_budget_enabled`, revision, deadline, ceiling,
 reserved bytes, accepted bytes, in-flight count and measurement validity from one locked budget
 snapshot. These live observations do not add crash durability to the retained
 meter ABI. `scripts/verify_network_native.sh` exercises actual host sockets,
-concurrent admission, partial/error refunds, replay/expiry, start gating and
+concurrent admission, partial/error refunds, replay/expiry, waiting for a grant and
 integer boundaries under ASan/UBSan, then compiles the x86-64 launcher. It does
 not establish guest WASI error handling, KVM execution or tenant-wide quotas.
 
-## Retained UTC-month socket accounting
+## What a guest is given of the processor and the host
 
-The optional `FENDERS_EGRESS_PERIOD_FD` supplies a new, private, zero-filled
-432-byte regular file. The VMM maps it outside guest RAM, closes the inherited
-FD and never adds it to the guest descriptor table. It advertises
-`network_egress_periods: socket-payload-utc-month-v1`. The existing 40-byte
-`FENDERS_EGRESS_FD` and `socket-payload-v1` lifetime contract remain unchanged.
-Old runtimes leave the optional new file uninitialized; that is unavailable,
-not measured zero. Approval of a changed runtime digest remains necessary.
+A guest runs in ring 0, so whatever its CPUID names it may use, and each
+feature is host kernel code it can then drive. The launcher passes on the
+processor's instruction sets and removes virtualization (VMX, SVM), KVM's
+paravirtual features, SGX, performance monitoring, processor trace and
+last-branch records (`cpuid.inc`). A guest's reads and writes of
+model-specific registers are all refused by a KVM MSR filter: the launcher
+sets the three that system calls need, and those are not the guest's
+accesses.
 
-Native-endian lock-free atomic u64 words contain sequence, contract (1), total
-bytes, in-flight operations, validity, expired bytes, then 24 (month, bytes)
-pairs. Month is `year * 12 + month_number` (January is 1), stored in slot
-`month % 24`. Odd/changing sequence means an interrupted or concurrent
-publication. Only changed slots are republished; ordinary calls do not rewrite
-the entire ring. All header and slot accesses use atomic operations.
+Where a guest call is passed to a host call, what the guest chooses is
+checked first (`guest_args.inc`): `clock_gettime` takes the fixed clocks and
+no dynamic id; `getsockopt` and `setsockopt` take listed options; `send` and
+`recv` take listed flags; futex keys are always private to the VM.
+`scripts/verify_network_native.sh` runs the tests of both files.
 
-Accepted outbound socket payload is assigned to the host UTC month when its
-successful completion is recorded under the descriptor lock. A syscall spanning
-midnight is attributed wholly to the completion month; this is operation
-accounting, not the timestamp of each byte on the wire or confirmed delivery.
-Partial writes count only the accepted amount. Failed/zero-byte writes, ingress
-responses and file I/O add nothing. TLS records and DNS payload follow the same
-wrappers. The last 24 months ending at the latest recorded write are retained.
-On advancement, older buckets move into `expired_bytes`, preserving the total
-without guessing their month once detailed retention expires. No interpolated
-split of a lifetime counter is used.
-
-Month reversal, clock-read failure, invalid calendar values or wall-clock drift
-exceeding five minutes relative to elapsed CLOCK_BOOTTIME permanently invalidate
-monthly attribution for that runtime. Suspend time participates in that clock.
-Lifetime measurements remain independent. This requires synchronized, trusted
-host clocks; small clock errors around midnight can still change attribution.
-Clock qualification and billing accuracy require live operational checks.
-
-The Rust worker creates the second file with mode 0600, samples it into private
-`status.json` as `egress_periods`, and persists final evidence after reaping the
-VMM. The reader verifies slot placement, the 24-month span, integer arithmetic
-and exact conservation (`expired_bytes + sum(periods) == bytes`). Uninitialized,
-torn, malformed, overflowed or clock-invalid readings are unavailable. A killed
-process with an in-flight write yields partial coverage. Recovery on the same
-host boot cannot claim terminal completeness; another boot cannot refresh the
-reading. The two meter files have independent snapshots and their totals need
-not match within the same worker poll.
-
-The Rust node now transmits optional `egress_periods` through authenticated
-heartbeats. Control-plane migration 28 retains idempotent month rows and exposes
-scoped customer Usage, with missing historical detail kept unassigned. Deploy
-the control plane before the reporter. Outbound reservation/allowance enforcement
-remains required; gateway allowance semantics are unchanged. Local native socket tests
-and Rust/C ABI tests exercise the production wrappers without claiming KVM or
-live guest TLS execution, billing accuracy or measured overhead.
+Monthly attribution of outbound bytes is the control plane's, from the
+totals above; the launcher keeps no per-month record.
