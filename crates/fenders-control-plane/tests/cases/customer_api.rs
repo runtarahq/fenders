@@ -785,3 +785,34 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
     );
     l.finish().await;
 }
+
+/// A workspace's credentials see its plan and state, not the operator's own
+/// notes on it.
+#[tokio::test]
+async fn a_workspaces_credentials_do_not_see_the_operators_notes_on_it() {
+    let l = Lab::new().await;
+    sqlx::query("UPDATE tenants SET lifecycle_reason='chargeback under review' WHERE id=$1")
+        .bind(&l.tenant)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let (viewer, _) = l.credential("viewer", None).await;
+    let seen = l.store.tenants(&viewer).await.unwrap();
+    assert_eq!(seen.as_array().unwrap().len(), 1);
+    let seen = &seen[0];
+    assert_eq!(seen["id"], l.tenant.as_str());
+    assert!(seen["cpu_percent"].is_number() && seen["lifecycle_state"].is_string());
+    for hidden in [
+        "lifecycle_reason",
+        "lifecycle_revision",
+        "allowance_revision",
+    ] {
+        assert!(seen.get(hidden).is_none(), "{hidden}");
+    }
+    assert!(!seen.to_string().contains("chargeback"));
+    // The operator sees all of it.
+    let all = l.store.tenants(&l.operator).await.unwrap();
+    assert_eq!(all[0]["lifecycle_reason"], "chargeback under review");
+    assert!(all[0]["allowance_revision"].is_number());
+    l.finish().await;
+}

@@ -365,7 +365,10 @@ impl Store {
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
         let rows = sqlx::query_scalar::<_, Value>(
-            "SELECT to_jsonb(t) FROM tenants t WHERE $1 OR id=$2 ORDER BY created",
+            // A workspace's own credentials see its plan and its state, not
+            // what the operator wrote of it for itself: the reason it gave
+            // for a suspension, and the revisions of its own edits.
+            "SELECT CASE WHEN $1 THEN to_jsonb(t) ELSE to_jsonb(t)-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE $1 OR id=$2 ORDER BY created",
         )
         .bind(p.role == Role::Operator)
         .bind(&p.tenant_id)
