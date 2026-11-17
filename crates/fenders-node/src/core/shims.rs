@@ -181,10 +181,49 @@ fn is_run_id(name: &str) -> bool {
     name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Asks run `id`'s shim `request` (`status`, `stop` or `collect`). `None`
-/// when no shim holds the run.
-pub(crate) fn ask(id: &str, request: &str) -> Result<Option<Value>> {
-    let address = SocketAddr::from_abstract_name(format!("fenders/run/{id}").as_bytes())?;
+/// The abstract address of run `id`'s link.
+fn link_address(id: &str) -> std::io::Result<SocketAddr> {
+    SocketAddr::from_abstract_name(format!("fenders/run/{id}").as_bytes())
+}
+
+/// Whether the process listening at the other end of `stream` is in run
+/// cgroup `cgroup` (or its `shim` or `vm` leaf): the run's own shim.
+///
+/// An abstract socket name has no owner: any process in the node's network
+/// namespace may bind one. Only the node puts a process in a run's cgroup,
+/// so membership is what makes an answer the run's.
+fn peer_in_cgroup(stream: &UnixStream, cgroup: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut peer = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut peer).cast(),
+            &raw mut size,
+        )
+    };
+    if rc != 0 || peer.pid <= 0 {
+        return false;
+    }
+    let pid = peer.pid.to_string();
+    [cgroup.to_path_buf(), cgroup.join("shim"), cgroup.join("vm")]
+        .iter()
+        .filter_map(|group| fs::read_to_string(group.join("cgroup.procs")).ok())
+        .any(|procs| procs.lines().any(|line| line == pid))
+}
+
+/// Asks run `id`'s shim, a process of run cgroup `cgroup`, `request`
+/// (`status`, `stop` or `collect`). `None` when no shim holds the run: also
+/// when something that is not its shim answers at its name.
+pub(crate) fn ask(cgroup: &Path, id: &str, request: &str) -> Result<Option<Value>> {
+    let address = link_address(id)?;
     let mut stream = match UnixStream::connect_addr(&address) {
         Ok(stream) => stream,
         Err(error)
@@ -197,6 +236,13 @@ pub(crate) fn ask(id: &str, request: &str) -> Result<Option<Value>> {
         }
         Err(error) => return Err(error.into()),
     };
+    if !peer_in_cgroup(&stream, cgroup) {
+        tracing::error!(
+            run = id,
+            "its name is held by a process outside its cgroup: not its shim"
+        );
+        return Ok(None);
+    }
     stream.set_read_timeout(Some(ASK_TIMEOUT))?;
     stream.set_write_timeout(Some(ASK_TIMEOUT))?;
     let mut answer = Vec::new();
@@ -356,7 +402,7 @@ impl Node {
                 continue;
             };
             let name = id;
-            match ask(&name, "status") {
+            match ask(&entry.path(), &name, "status") {
                 Ok(Some(status)) => {
                     let artifact = Path::new(s(&status["component"]))
                         .parent()
@@ -769,6 +815,18 @@ impl Node {
                 Error::from(error)
             }
         };
+        // A run's link is bound here, before its cgroup shows its id to the
+        // host, and handed to the shim: no other process can take the name
+        // first. A warm shim has no run yet; it binds when it is claimed, and
+        // a claimed run's id is on its cgroup only as a `trusted.` attribute.
+        let link = if is_run_id(name) {
+            Some(
+                std::os::unix::net::UnixListener::bind_addr(&link_address(name)?)
+                    .map_err(io("binding its link"))?,
+            )
+        } else {
+            None
+        };
         let started = (|| -> Result<Option<std::process::ChildStdin>> {
             fs::create_dir(&cgroup).map_err(io("creating its cgroup"))?;
             // The run as a whole: the VM's memory and the shim's own.
@@ -795,12 +853,25 @@ impl Node {
                 .stdout(Stdio::piped())
                 // The shim logs to the agent's standard error (its journal).
                 .stderr(Stdio::inherit());
+            let link_fd = link.as_ref().map(|link| {
+                use std::os::fd::AsRawFd;
+                link.as_raw_fd()
+            });
+            if let Some(fd) = link_fd {
+                command.env("FENDERS_SHIM_LINK_FD", fd.to_string());
+            }
             unsafe {
                 use std::os::unix::process::CommandExt;
                 // In the child, before exec: its own session and the run's
                 // cgroup, so it outlives the agent. Only async-signal-safe calls.
                 command.pre_exec(move || {
                     libc::setsid();
+                    // The link keeps its descriptor number across the exec.
+                    if let Some(fd) = link_fd
+                        && libc::fcntl(fd, libc::F_SETFD, 0) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
                     let fd = libc::open(procs.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
                     if fd < 0 || libc::write(fd, b"0".as_ptr().cast(), 1) != 1 {
                         return Err(std::io::Error::last_os_error());
@@ -897,7 +968,7 @@ impl Node {
         };
         let (unanswered_since, cgroup) = unanswered_since;
         let cgroup = self.run_cgroup(cgroup.as_deref().unwrap_or(id));
-        let ended = match ask(id, "status")? {
+        let ended = match ask(&cgroup, id, "status")? {
             Some(shim) => {
                 if let Some(run) = lock(&self.runs)?.get_mut(id) {
                     if unanswered_since.is_some() {
@@ -920,7 +991,7 @@ impl Node {
                     return Ok(status);
                 }
                 // Ended: its end report is the run's; the shim may exit.
-                match ask(id, "collect")? {
+                match ask(&cgroup, id, "collect")? {
                     Some(last) => as_status(id, &last, &cgroup, &boot, None),
                     None => status,
                 }
@@ -1063,7 +1134,9 @@ impl Node {
         }
         let status = self.status(id)?;
         if !terminal(s(&status["state"])) {
-            ask(id, "stop")?;
+            let cgroup = lock(&self.runs)?.get(id).and_then(|run| run.cgroup.clone());
+            let cgroup = self.run_cgroup(cgroup.as_deref().unwrap_or(id));
+            ask(&cgroup, id, "stop")?;
         }
         self.status(id)
     }
@@ -1178,9 +1251,48 @@ mod tests {
     #[test]
     fn asking_a_run_without_a_shim_finds_none() {
         assert!(
-            ask(&run_id("nobody-holds-this"), "status")
-                .unwrap()
-                .is_none()
+            ask(
+                Path::new("/nowhere"),
+                &run_id("nobody-holds-this"),
+                "status"
+            )
+            .unwrap()
+            .is_none()
         );
+    }
+
+    #[test]
+    fn an_answer_at_a_runs_name_from_outside_its_cgroup_is_not_its_shims() {
+        // This test process holds the name, answers as a shim would, and is
+        // in no cgroup of the run's: what a local process squatting the name
+        // looks like to the node.
+        let id = run_id(&format!("squatted-{}", std::process::id()));
+        let listener =
+            std::os::unix::net::UnixListener::bind_addr(&link_address(&id).unwrap()).unwrap();
+        let answering = std::thread::spawn(move || {
+            // Only a caller that trusted the name would read this.
+            for _ in 0..2 {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut asked = [0u8; 16];
+                    let _ = stream.read(&mut asked);
+                    let _ = stream.write_all(b"{\"state\":\"exited\",\"exit_code\":0}\n");
+                }
+            }
+        });
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("cgroup.procs"), "1\n").unwrap();
+        assert!(ask(outside.path(), &id, "status").unwrap().is_none());
+
+        // The same answer from a member of the cgroup is the run's.
+        let inside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(inside.path().join("shim")).unwrap();
+        std::fs::write(
+            inside.path().join("shim/cgroup.procs"),
+            format!("1\n{}\n", std::process::id()),
+        )
+        .unwrap();
+        let status = ask(inside.path(), &id, "status").unwrap().unwrap();
+        assert_eq!(status["state"], "exited");
+        answering.join().unwrap();
     }
 }

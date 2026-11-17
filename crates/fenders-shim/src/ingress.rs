@@ -171,6 +171,7 @@ where
 /// Reads a message's head from the start of `body`: the head, and what was
 /// read past it. `None` when the body does not start with a head this shim
 /// takes.
+#[cfg(test)]
 pub async fn read_head<B>(body: &mut B) -> Option<(Value, Bytes)>
 where
     B: Body<Data = Bytes> + Unpin,

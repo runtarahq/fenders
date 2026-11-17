@@ -531,7 +531,19 @@ fn bind_link(
     let Some(launcher) = &spec.launcher else {
         return Ok(None);
     };
-    match link::bind(&launcher.id) {
+    // A launcher that bound the run's name itself passes the socket on; one
+    // that did not leaves the shim to bind it.
+    let bound = match std::env::var(link::INHERITED) {
+        Ok(fd) => {
+            // Not for the VMM, which inherits this environment.
+            unsafe { std::env::remove_var(link::INHERITED) };
+            fd.parse()
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+                .and_then(|fd| link::inherited(&launcher.id, fd))
+        }
+        Err(_) => link::bind(&launcher.id),
+    };
+    match bound {
         Ok(listener) => Ok(Some((
             listener,
             link::Link::new(
