@@ -324,7 +324,16 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     }
     case 5: {
         struct stat st={0};st.st_mode=S_IFCHR|0600;st.st_blksize=4096;
-        if(a>2 && fstat(host_fd(a),&st)) return -errno;
+        if(a>2) {
+            struct descriptor *desc=lease_descriptor(a);if(!desc)return -EBADF;
+            if(fstat(desc->fd,&st))return -errno;
+            // Outside a mount, what a file is on the host is not the guest's
+            // to learn: its kind, size and blocks, and nothing that names it.
+            if(desc->mount<0) {
+                struct stat plain={.st_mode=st.st_mode,.st_nlink=1,.st_size=st.st_size,.st_blksize=st.st_blksize,.st_blocks=st.st_blocks};
+                st=plain;
+            }
+        }
         memcpy(ptr(b,sizeof(st)),&st,sizeof(st));return 0;
     }
     case 7: {
@@ -369,7 +378,12 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 75: return result(fdatasync(host_fd(a)));
     case 77: {int fd=fs_writable_fd(a);if(fd<0)return fd;return result(ftruncate(fd,b));}
     case 217: {struct descriptor *desc=lease_descriptor(a);if(!desc || desc->mount<0)return -EBADF;return result(syscall(SYS_getdents64,desc->fd,ptr(b,c),c));}
-    case 221: return result(syscall(SYS_fadvise64,host_fd(a),b,c,d));
+    case 221:
+        // Access-pattern hints only. The rest act on the host's page cache,
+        // which a file shared between runs shares: asked for, they are
+        // answered as done and nothing happens.
+        if(d!=POSIX_FADV_NORMAL && d!=POSIX_FADV_RANDOM && d!=POSIX_FADV_SEQUENTIAL)return host_fd(a)<0?-EBADF:0;
+        return result(syscall(SYS_fadvise64,host_fd(a),b,c,d));
     case 258: case 262: case 263: case 264: case 265: case 266: case 267: case 280: case 316: case 332: case 437:
         return fs_syscall(n,a,b,c,d,r->r8,r->r9);
     case 10:
