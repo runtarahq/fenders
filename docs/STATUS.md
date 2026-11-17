@@ -48,7 +48,7 @@ as both control plane and node.
 | A shim asked to stop | Once its run is over, a shim holding the run's end for its launcher ends at once on SIGTERM | `scripts/verify_shim_stop_live.sh` |
 | The shim alone | One component under `fenders-shim` against a stub run channel, with no node or control plane | `scripts/shim_standalone.sh` |
 | The control plane | Tenants, projects, members, invitations, API keys, secrets, uploads and inspection, apps and schedules, usage accounting, backup and restore | `make test` |
-| Confinement | Confined compilation and the artifact cache; the launcher's Landlock and seccomp; the shim's own (read-only filesystem, its run channel's port, a refusal list); per-run cgroups and uids | `make verify-confinement`, `scripts/verify_network_native.sh`, `cargo test -p fenders-node --test shim_confinement`, `scripts/verify_destinations_live.sh` |
+| Confinement | Confined compilation and the artifact cache; the launcher's Landlock and seccomp; the shim's own (read-only filesystem, its run channel's port, a refusal list); per-run cgroups and uids | `make verify-confinement`, `scripts/verify_network_native.sh`, `cargo test -p fenders-node --test shim_confinement`, `scripts/verify_destinations_live.sh`, `scripts/verify_hypercalls_live.sh`, `scripts/verify_msr_filter_live.sh` |
 
 ## Does not work
 

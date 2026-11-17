@@ -315,7 +315,21 @@ paravirtual features, SGX, performance monitoring, processor trace and
 last-branch records (`cpuid.inc`). A guest's reads and writes of
 model-specific registers are all refused by a KVM MSR filter: the launcher
 sets the three that system calls need, and those are not the guest's
-accesses.
+accesses. KVM is told to hold each vCPU to its paravirtual feature leaf
+(`vcpu_features.inc`), which is empty: its hypercalls to kick a vCPU, send
+IPIs and yield are refused as unknown, where a leaf that only omits them
+leaves them served. `scripts/verify_hypercalls_live.sh` asks for each from a
+real guest.
+
+The launcher sets a VM up and then gives up what that took
+(`running_filter.inc`). All eight vCPUs a guest may use are made before it
+runs, and a second seccomp filter, added to every thread before the first
+entry to the guest, refuses the calls that make or shape a VM or vCPU, any
+executable mapping, `execve`, and any further filter. A launcher that had
+been taken over cannot make a second VM without the MSR filter, tell a vCPU
+of nested virtualization, or map code of its own. Its first filter (the
+shim's `vmm` profile) allows socket options, message flags and descriptor
+commands by argument, not by call.
 
 Where a guest call is passed to a host call, what the guest chooses is
 checked first (`guest_args.inc`): `clock_gettime` takes the fixed clocks and

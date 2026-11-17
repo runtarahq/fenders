@@ -16,6 +16,11 @@ timeout 15 "$task_build/network-test" --open-rate
 cc -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
   "$task_root/runtime/native/guest_args_test.c" -o "$task_build/guest-args-test"
 "$task_build/guest-args-test"
+if [[ $(uname -m) == x86_64 ]]; then
+  cc -pthread -O1 -g -Wall -Wextra -Werror \
+    "$task_root/runtime/native/running_filter_test.c" -o "$task_build/running-filter-test"
+  "$task_build/running-filter-test"
+fi
 task_status=0
 timeout 15 "$task_build/network-test" --leases 2>/dev/null || task_status=$?
 if [[ $task_status != 2 ]]; then

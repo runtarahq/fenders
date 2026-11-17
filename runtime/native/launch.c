@@ -1,6 +1,9 @@
 // Kernel-free native ABI platform for upstream Wasmtime/Tokio. Linux host only.
 #define _GNU_SOURCE
 #include <linux/kvm.h>
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <stddef.h>
 #include <sys/prctl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -547,7 +550,9 @@ static long syscall_guest(int cpu,struct kvm_regs *r) {
 }
 #include "cpuid.inc"
 #include "msr_filter.inc"
+#include "vcpu_features.inc"
 #include "threads.inc"
+#include "running_filter.inc"
 int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"--capabilities")) {
         puts("{\"network_clock\":\"boottime\",\"network_egress_accounting\":\"socket-payload-v1\",\"network_meter\":\"pipe-cumulative-v1\",\"network_egress_budget\":\"socket-payload-ceiling-v2\",\"inherited_files\":true}");return 0;
@@ -613,7 +618,10 @@ int main(int argc,char **argv) {
     if(vdso_loaded)calibrate_clock(cpu);
     set_syscall_msrs(cpu);
     virtual_threads[0]=(struct virtual_thread){.cpu=cpu,.run=run,.tid=1};
+    prepare_virtual_threads();
     lifecycle_start();
     if(network_budget_enabled && control_fd<0){fprintf(DIAGNOSTICS,"egress budget requires control socket\n");return 2;}
+    // Set up: from here the launcher only runs its guest.
+    running_filter();
     run_virtual_thread(&virtual_threads[0]);return 0;
 }

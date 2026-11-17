@@ -148,6 +148,7 @@ const VMM_KVM_REQUESTS: &[u64] = &[
     0x41a0_ae8d, // KVM_SET_FPU
     0x4008_ae90, // KVM_SET_CPUID2
     0x0000_aea3, // KVM_GET_TSC_KHZ
+    0x4068_aea3, // KVM_ENABLE_CAP
     0x8188_aea6, // KVM_GET_XCRS
     0x4188_aea7, // KVM_SET_XCRS
     0x4188_aec6, // KVM_X86_SET_MSR_FILTER
@@ -247,7 +248,6 @@ fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
                 {
                     rule(name, &[], allow)?;
                 }
-                for (kind, protocols) in [(1, [0, 6]), (2, [0, 17])] {
                 // And with what arguments. An `int` argument is compared in
                 // its low half: the high half of its register is not the
                 // caller's to have set.
@@ -310,6 +310,7 @@ fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
                     &[eq(0, libc::PR_SET_NO_NEW_PRIVS as u64), eq(1, 1)],
                     allow,
                 )?;
+                for (kind, protocols) in [(1, [0, 6]), (2, [0, 17])] {
                     if kind == 2 && !dns {
                         continue;
                     }
@@ -332,6 +333,11 @@ fn seccomp(library: &Library, profile: &str, dns: bool) -> Result<()> {
                 // KVM_{SET,GET}_DEVICE_ATTR calibrate the guest vDSO's clock
                 // page and keep every vCPU on one TSC offset;
                 // KVM_X86_SET_MSR_FILTER refuses the guest every MSR.
+                // KVM_ENABLE_CAP is here for one capability, set on each
+                // vCPU as it is made (holding the guest to its paravirtual
+                // feature leaf); the launcher's own filter refuses it, with
+                // every other call that makes or shapes a VM, before the
+                // guest first runs.
                 for request in VMM_KVM_REQUESTS {
                     rule("ioctl", &[eq(1, *request)], allow)?;
                 }
