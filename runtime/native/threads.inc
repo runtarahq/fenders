@@ -58,8 +58,13 @@ static long clone_virtual_thread(int parent,struct kvm_regs *regs,uint64_t flags
     if(flags&CLONE_PARENT_SETTID)*(uint32_t *)ptr(ptid,4)=thread->tid;
     if(flags&CLONE_CHILD_SETTID)*(uint32_t *)ptr(ctid,4)=thread->tid;
     ++thread_count;
+    // Counted as running from here, not from when it first runs: a parent
+    // that exits at once must not be taken for the last thread.
+    pthread_mutex_lock(&lifecycle_lock);
     pthread_t worker;int e=pthread_create(&worker,NULL,run_virtual_thread,thread);
     if(e){fprintf(DIAGNOSTICS,"pthread_create: %s\n",strerror(e));exit(1);}pthread_detach(worker);
+    thread->host_thread=worker;thread->active=1;
+    pthread_mutex_unlock(&lifecycle_lock);
     pthread_mutex_unlock(&clone_lock);return thread->tid;
 }
 static void exit_virtual_thread(void) {
