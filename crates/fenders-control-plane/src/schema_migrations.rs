@@ -48,6 +48,7 @@ pub(crate) async fn apply(tx: &mut Tx) -> Result<()> {
     let websocket_connections = [include_str!("../sql/websocket_connections.sql")];
     let session_idle = [crate::customer_identity::SESSION_IDLE_MIGRATION];
     let email_case = [crate::customer_onboarding::EMAIL_CASE_MIGRATION];
+    let secret_binding = [crate::secret_binding::MIGRATION];
     let migrations = [
         (
             digest(format!("{SCHEMA}\0{}", BASELINE.join("\0"))),
@@ -64,6 +65,7 @@ pub(crate) async fn apply(tx: &mut Tx) -> Result<()> {
         ),
         (digest(session_idle[0]), session_idle.as_slice()),
         (digest(email_case[0]), email_case.as_slice()),
+        (digest(secret_binding[0]), secret_binding.as_slice()),
     ];
     let applied: Vec<(i64, String)> = sqlx::query_as(
         "SELECT version,checksum FROM control_schema_migrations ORDER BY version LIMIT 64",

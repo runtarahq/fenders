@@ -266,6 +266,8 @@ impl Store {
             sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
         }
         crate::schema_migrations::apply(&mut tx).await?;
+        // Secrets stored before their ciphertexts named their rows.
+        crate::secret_binding::bind_stored(&mut tx, &self.cipher).await?;
         let unbound: bool = sqlx::query_scalar(
             "SELECT encryption_key_id IS NULL FROM recovery_barrier WHERE singleton",
         )

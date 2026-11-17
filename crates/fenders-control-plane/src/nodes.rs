@@ -447,11 +447,17 @@ impl Store {
             spec["log_redact_env"] = json!(secrets.keys().collect::<Vec<_>>());
         }
         for (variable, secret) in secrets {
-            let row=one(&mut tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3",args![e["tenant_id"],e["project_id"],secret]).await?;
-            let plain = self
-                .cipher
-                .decrypt(s(&row["token"]))
-                .map_err(|_| Error::internal())?;
+            let row=one(&mut tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3 AND bound",args![e["tenant_id"],e["project_id"],secret]).await?;
+            // Opened only as the secret of this execution's own workspace
+            // and project that it names: a ciphertext moved here from
+            // another row does not open.
+            let plain = crate::secret_binding::open(
+                &self.cipher,
+                s(&e["tenant_id"]),
+                s(&e["project_id"]),
+                s(&secret),
+                s(&row["token"]),
+            )?;
             spec["env"][variable] = json!(String::from_utf8(plain).map_err(|_| Error::internal())?);
         }
         for field in [

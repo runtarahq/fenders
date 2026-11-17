@@ -51,7 +51,7 @@ async fn concurrent_startup_records_existing_schema_once_without_replaying_ddl()
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(receipt.as_array().unwrap().len(), 9);
+    assert_eq!(receipt.as_array().unwrap().len(), 10);
     for (index, entry) in receipt.as_array().unwrap().iter().enumerate() {
         assert_eq!(entry["version"], index + 1);
         assert_eq!(s(&entry["checksum"]).len(), 64);
@@ -92,7 +92,7 @@ async fn unknown_or_modified_schema_history_refuses_startup_without_rewrite() {
     let l = Lab::new().await;
     let before = trigger_revision(&l).await;
     sqlx::query(
-        "INSERT INTO control_schema_migrations(version,checksum) VALUES(10,repeat('a',64))",
+        "INSERT INTO control_schema_migrations(version,checksum) VALUES(11,repeat('a',64))",
     )
     .execute(&l.store.pool)
     .await
@@ -103,7 +103,7 @@ async fn unknown_or_modified_schema_history_refuses_startup_without_rewrite() {
         "unsupported control-plane schema migration history"
     );
     assert_eq!(trigger_revision(&l).await, before);
-    sqlx::query("DELETE FROM control_schema_migrations WHERE version=10")
+    sqlx::query("DELETE FROM control_schema_migrations WHERE version=11")
         .execute(&l.store.pool)
         .await
         .unwrap();
@@ -154,14 +154,14 @@ async fn version_one_upgrade_adds_http_runs_without_rewriting_baseline() {
             .fetch_all(&l.store.pool)
             .await
             .unwrap();
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     // Addresses stored with capitals are found by a sign-in that reports
     // them without: rewinding the last migration and starting again makes
     // them lowercase.
     let user = uid();
     sqlx::query("INSERT INTO customer_users(id,issuer,subject,email) VALUES($1,'https://identity.test','mixed','Alice@Example.test')")
         .bind(&user).execute(&l.store.pool).await.unwrap();
-    sqlx::query("DELETE FROM control_schema_migrations WHERE version=9")
+    sqlx::query("DELETE FROM control_schema_migrations WHERE version>=9")
         .execute(&l.store.pool)
         .await
         .unwrap();

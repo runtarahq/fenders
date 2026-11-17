@@ -865,3 +865,108 @@ async fn management_answers_carry_browser_security_headers() {
     }
     l.finish().await;
 }
+
+/// A stored secret is its row's alone: its ciphertext moved to another row
+/// opens for no run, and secrets stored before that was so are bound once.
+#[tokio::test]
+async fn a_secrets_ciphertext_opens_only_for_its_own_row() {
+    let l = Lab::new().await;
+    let node = l.node("worker").await;
+    let secret = |name: &'static str, value: &'static str| {
+        let l = &l;
+        async move {
+            let row = l
+                .store
+                .create_secret(
+                    &l.operator,
+                    &l.tenant,
+                    &l.project,
+                    json!({"name":name,"value":value}),
+                )
+                .await
+                .unwrap();
+            s(&row["id"]).to_owned()
+        }
+    };
+    let launch = |key: &'static str, id: String| {
+        let l = &l;
+        async move {
+            l.store
+                .create_workload(
+                    &l.operator,
+                    &l.tenant,
+                    &l.project,
+                    json!({"spec":{"artifact_id":l.artifact,"secret_env":{"TOKEN":id}}}),
+                    key,
+                    false,
+                )
+                .await
+        }
+    };
+    let (own, other) = (
+        secret("own", "own-value").await,
+        secret("other", "other-value").await,
+    );
+    // One secret's ciphertext written over another's, as someone who could
+    // write the database might: the row it now sits in opens for no run.
+    sqlx::query(
+        "UPDATE secrets SET ciphertext=(SELECT ciphertext FROM secrets WHERE id=$1) WHERE id=$2",
+    )
+    .bind(&other)
+    .bind(&own)
+    .execute(&l.store.pool)
+    .await
+    .unwrap();
+    let refused = launch("moved", own.clone()).await.unwrap_err();
+    assert_eq!(refused.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!refused.message.contains("value"));
+    // The one it was taken from is as it was.
+    let op = launch("untouched", other.clone()).await.unwrap();
+    l.store.schedule().await.unwrap();
+    let e = l.run(&op).await;
+    let spec = l
+        .store
+        .assignment(s(&node["id"]), s(&e["id"]), n(&e["generation"]))
+        .await
+        .unwrap()["spec"]
+        .clone();
+    assert_eq!(spec["env"]["TOKEN"], "other-value");
+
+    // A secret stored before ciphertexts named their rows: the value alone,
+    // encrypted. The next start binds it, once.
+    let cipher = fernet::Fernet::new(
+        std::fs::read_to_string(l.root.path().join("encryption.key"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let stored = |id: &'static str, value: &'static str| {
+        let (l, token) = (&l, cipher.encrypt(value.as_bytes()));
+        async move {
+            sqlx::query("INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext) VALUES($1,$2,$3,$1,convert_to($4,'UTF8'))")
+                .bind(id).bind(&l.tenant).bind(&l.project).bind(token)
+                .execute(&l.store.pool).await.unwrap();
+        }
+    };
+    let before = "0123456789abcdef0123456789abcde1";
+    stored(before, "stored-before").await;
+    sqlx::query("UPDATE secret_binding SET completed=NULL")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    l.store.migrate().await.unwrap();
+    assert!(launch("bound-at-start", before.to_owned()).await.is_ok());
+    // A row that turns up unbound after that was not written by the control
+    // plane: later starts do not bind it, and it opens for no run.
+    let after = "0123456789abcdef0123456789abcde2";
+    stored(after, "stored-after").await;
+    l.store.migrate().await.unwrap();
+    let bound: bool = sqlx::query_scalar("SELECT bound FROM secrets WHERE id=$1")
+        .bind(after)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert!(!bound);
+    assert!(launch("never-bound", after.to_owned()).await.is_err());
+    l.finish().await;
+}

@@ -117,7 +117,7 @@ impl Store {
         }
         Self::metadata_limit(&mut tx, tenant, "secrets", crate::store::MAX_SECRETS).await?;
         let resource = uid();
-        let row=one(&mut tx,"INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext) VALUES($1,$2,$3,$4,convert_to($5,'UTF8')) RETURNING id,name,created",args![resource,tenant,project,value["name"],self.cipher.encrypt(plain.as_bytes())]).await?;
+        let row=one(&mut tx,"INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext,bound) VALUES($1,$2,$3,$4,convert_to($5,'UTF8'),true) RETURNING id,name,created",args![resource,tenant,project,value["name"],crate::secret_binding::seal(&self.cipher,tenant,project,&resource,plain.as_bytes())]).await?;
         Self::audit(&mut tx, p, "secret.create", &resource, tenant, json!({})).await?;
         if let Some(key) = key {
             crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
@@ -142,12 +142,15 @@ impl Store {
         .await?;
         let mut size = serde_json::to_vec(&spec["env"]).unwrap().len();
         for (key, secret) in spec["secret_env"].as_object().unwrap() {
-            let row=one(tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3",args![tenant,project,secret]).await?;
-            size += self
-                .cipher
-                .decrypt(s(&row["token"]))
-                .map_err(|_| Error::internal())?
-                .len()
+            let row=one(tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3 AND bound",args![tenant,project,secret]).await?;
+            size += crate::secret_binding::open(
+                &self.cipher,
+                tenant,
+                project,
+                s(secret),
+                s(&row["token"]),
+            )?
+            .len()
                 + key.len()
                 + 8;
         }

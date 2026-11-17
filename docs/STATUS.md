@@ -177,10 +177,12 @@ as both control plane and node.
   derived from the control plane's encryption key for this purpose alone
   (nothing else the control plane encrypts, a tenant's secret among it, is
   one), so rotating that key ends the credentials of runs in flight.
-- A stored secret's ciphertext is not bound to its row: whoever can write
-  the database can move one. They can also insert a credential or an
-  execution, so the encryption at rest protects against reading the
-  database, not against writing it.
+- A stored secret's ciphertext names its workspace, project and id, and
+  opens only for that row: one copied into another row opens for no run.
+  Secrets stored before this are bound once, at the first start after it.
+  Whoever can write the database can still insert a credential or an
+  execution: the encryption at rest protects against reading the database
+  and against moving a secret, not against every write.
 - The launcher's control socket also accepts pause and resume; a shim sends
   it only grants and status, over a socket pair nothing else holds.
 

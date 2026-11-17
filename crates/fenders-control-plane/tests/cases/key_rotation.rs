@@ -99,17 +99,13 @@ async fn rotation_preserves_plaintext_authority_and_fences_stale_processes() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        new.decrypt(
-            &encrypted(&l.store.pool)
-                .await
-                .into_iter()
-                .find(|(_, token)| new.decrypt(token).unwrap() == b"new value")
-                .unwrap()
-                .1
-        )
-        .unwrap(),
-        b"new value"
+    // A secret made after the rotation is under the new key: its value,
+    // behind the header that names its row.
+    assert!(
+        encrypted(&l.store.pool)
+            .await
+            .into_iter()
+            .any(|(_, token)| new.decrypt(&token).unwrap().ends_with(b"\nnew value"))
     );
     l.finish().await;
 }
