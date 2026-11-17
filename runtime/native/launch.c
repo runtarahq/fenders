@@ -69,7 +69,7 @@ static void *run_virtual_thread(void *);
 // goes on to exit; the rest wait to be ended with it.
 static _Atomic int exiting;
 __attribute__((noreturn)) static void exit_once(int code) {
-    if(atomic_exchange(&exiting,1))for(;;)pause();
+    if(atomic_exchange(&exiting,1))for(;;)poll(NULL,0,-1);
     (exit)(code);
 }
 #define exit(code) exit_once(code)
@@ -193,9 +193,6 @@ static uint64_t allocate_unlocked(size_t size,int prot) {
         return addr;
     }
     return 0;
-}
-static uint64_t allocate(size_t size,int prot) {
-    pthread_mutex_lock(&allocator_lock);uint64_t address=allocate_unlocked(size,prot);pthread_mutex_unlock(&allocator_lock);return address;
 }
 // mremap over the anonymous area: shrink in place, grow in place when the
 // following pages are free, else move (MREMAP_MAYMOVE) by copying. Growing in
@@ -352,17 +349,22 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 9: {
         if((d&MAP_FIXED) || a)return -ENOTSUP;
         if((c&(PROT_WRITE|PROT_EXEC))==(PROT_WRITE|PROT_EXEC))return -EACCES;
-        if(!(d&MAP_ANONYMOUS) && host_fd(r->r8)<0)return -EBADF;
-        uint64_t address=allocate(b,c);if(!address)return -ENOMEM;
-        if(!(d&MAP_ANONYMOUS)) {
-            int fd=host_fd(r->r8);
-            pthread_mutex_lock(&allocator_lock);int mapped=map_component(address,b,fd,r->r9);pthread_mutex_unlock(&allocator_lock);
-            if(!mapped) {
-                ssize_t size=pread(fd,ptr(address,b),b,r->r9);
-                if(size<0)return -errno;
-            }
+        // The descriptor is looked up once, and the allocation and its file
+        // contents are made in one hold of the allocator: no other thread
+        // frees or reuses the range between the two.
+        int fd=(d&MAP_ANONYMOUS)?-1:host_fd(r->r8);
+        if(!(d&MAP_ANONYMOUS) && fd<0)return -EBADF;
+        pthread_mutex_lock(&allocator_lock);
+        uint64_t address=allocate_unlocked(b,c);long failed=address?0:-ENOMEM;
+        if(address && fd>=0 && !map_component(address,b,fd,r->r9) && pread(fd,mem+address,b,r->r9)<0) {
+            // Nothing is left allocated for a mapping that was refused.
+            failed=-errno;uint64_t length=(b+PAGE-1)/PAGE*PAGE;
+            zero_pages(address,length);
+            for(uint64_t p=address/PAGE;p<(address+length)/PAGE;p++){used[p]=0;freed(p);}
+            permissions(address,length,NX);
         }
-        return address;
+        pthread_mutex_unlock(&allocator_lock);
+        return failed?failed:(long)address;
     }
     case 17: return result(pread(host_fd(a),ptr(b,c),c,d));
     case 18: return result(pwrite(host_fd(a),ptr(b,c),c,d));
