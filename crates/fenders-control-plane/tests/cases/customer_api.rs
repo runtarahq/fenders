@@ -284,7 +284,7 @@ async fn customer_api_deploy_requires_explicit_run_and_reuses_original_operation
 }
 
 #[tokio::test]
-async fn customer_api_secret_retries_compare_encrypted_value_and_expired_keys_fail() {
+async fn customer_api_secret_retries_do_not_tell_a_guess_and_expired_keys_fail() {
     let l = Lab::new().await;
     let k = key(&l, Some(&l.project), &["read", "secrets:write"]).await;
     let token = s(&k["token"]);
@@ -296,13 +296,32 @@ async fn customer_api_secret_retries_compare_encrypted_value_and_expired_keys_fa
         call(&l, token, "POST", &route, body, "secret").await.1,
         created
     );
+    // A retry with another value is answered as the first was: whether it
+    // matched the stored value is not something a caller is told. The
+    // secret keeps the value it was created with.
+    let guessed = call(
+        &l,
+        token,
+        "POST",
+        &route,
+        json!({"name":"password","value":"different"}),
+        "secret",
+    )
+    .await;
+    assert_eq!(guessed, (StatusCode::CREATED, created.clone()));
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM secrets WHERE name='password'")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 1);
+    // The key with another name is still a different request.
     assert_eq!(
         call(
             &l,
             token,
             "POST",
             &route,
-            json!({"name":"password","value":"different"}),
+            json!({"name":"other","value":"private-low-entropy-example"}),
             "secret"
         )
         .await

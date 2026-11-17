@@ -89,20 +89,15 @@ impl Store {
         }
         let mut tx = self.transaction(true, false).await?;
         Self::project(&mut tx, p, tenant, project, true).await?;
-        // Receipt fingerprints exclude plaintext; compare the existing encrypted
-        // value after scope authorization rather than retaining a guessable hash.
+        // Receipt fingerprints exclude plaintext, and a replay is answered
+        // with the first request's receipt whatever value it carries. Were
+        // the value compared with the one stored, the answer would say
+        // whether a guess was right: a secret is otherwise never read back,
+        // and a key with `secrets:write` could try values without limit.
         let request = json!({"kind":"secret.create","project_id":project,"name":value["name"]});
         if let Some(key) = key
             && let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await?
         {
-            let existing = one(&mut tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE id=$1 AND tenant_id=$2 AND project_id=$3",args![row["id"],tenant,project]).await?;
-            let saved = self
-                .cipher
-                .decrypt(s(&existing["token"]))
-                .map_err(|_| Error::internal())?;
-            if saved != plain.as_bytes() {
-                return Err(conflict("idempotency key has different arguments"));
-            }
             return Ok(row);
         }
         Self::metadata_limit(&mut tx, tenant, "secrets", crate::store::MAX_SECRETS).await?;
