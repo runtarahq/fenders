@@ -50,6 +50,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let dsn =
                 std::env::var(args.dsn_env).map_err(|_| "database environment variable missing")?;
             // Map driver errors to the platform's redacted error type.
+            fenders_control_plane::db::database_url(&dsn)?;
             let pool = sqlx::PgPool::connect(&dsn)
                 .await
                 .map_err(fenders_control_plane::error::Error::from)?;

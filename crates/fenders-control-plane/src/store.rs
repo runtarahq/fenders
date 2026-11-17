@@ -134,6 +134,7 @@ pub(crate) fn purpose_cipher(key: &str, purpose: &str) -> Result<fernet::Fernet>
 
 impl Store {
     pub async fn connect(dsn: &str, state: &Path) -> Result<Self> {
+        crate::db::database_url(dsn)?;
         let pool = PgPoolOptions::new()
             .max_connections(16)
             .acquire_timeout(Duration::from_secs(5))

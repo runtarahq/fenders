@@ -136,6 +136,13 @@ pub fn decrypt(source: &Path, destination: &Path, key: &[u8; 32], limit: u64) ->
     Ok(())
 }
 
+/// A connection for the backup tools, to a database whose URL says how a
+/// connection to another host is secured ([`crate::db::database_url`]).
+async fn connect(dsn: &str) -> Result<sqlx::PgConnection> {
+    crate::db::database_url(dsn)?;
+    Ok(sqlx::PgConnection::connect(dsn).await?)
+}
+
 fn pg_environment(dsn: &str) -> Result<BTreeMap<String, String>> {
     let url = url::Url::parse(dsn)
         .map_err(|_| Error::invalid("PostgreSQL URL required for backup tools"))?;
@@ -246,7 +253,7 @@ pub async fn create(
     let temporary = staging()?;
     let payload = temporary.path().join("payload");
     fs::create_dir(&payload)?;
-    let mut connection = sqlx::PgConnection::connect(dsn).await?;
+    let mut connection = connect(dsn).await?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(184923781)")
@@ -463,7 +470,7 @@ fn unpack(archive: &Path, dest: &Path, limit: u64) -> Result<Value> {
     Ok(manifest)
 }
 async fn empty_database(dsn: &str) -> Result<()> {
-    let mut db = sqlx::PgConnection::connect(dsn).await?;
+    let mut db = connect(dsn).await?;
     for query in [
         "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema'",
         "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace=n.oid WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema'",
@@ -625,7 +632,7 @@ pub async fn activate(dsn: &str, fenced: bool) -> Result<Value> {
             "activation requires explicit external-resource fencing confirmation",
         ));
     }
-    let mut db = sqlx::PgConnection::connect(dsn).await?;
+    let mut db = connect(dsn).await?;
     let mut tx = db.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(184923781)")
         .execute(&mut *tx)
