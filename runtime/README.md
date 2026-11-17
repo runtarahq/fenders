@@ -1,6 +1,6 @@
 # Kernel-free WASM runtime
 
-The native guest runs upstream Wasmtime 50.0.0, `wasmtime-wasi` and
+The native guest runs upstream Wasmtime 50.0.1, `wasmtime-wasi` and
 `wasmtime-wasi-http`. Application components use the standard `wasi:http`
 outgoing interface, `wasi:sockets`, and `wasi:filesystem`, from WASI 0.2 or 0.3:
 both are linked, with component-model async, and a WASI 0.3 command's async
@@ -53,7 +53,7 @@ bash scripts/build_service_example.sh
 bash scripts/verify_network_native.sh
 ```
 
-The build keeps Rust 1.97.0, Wasmtime 50.0.0, the musl ABI and existing lockfiles.
+The build keeps Rust 1.97.0, Wasmtime 50.0.1, the musl ABI and existing lockfiles.
 It produces the launcher, runtime, compiler, node and fixtures in `build/node`.
 See [node operation](../node/README.md). Native socket checks do not
 establish VM or tenant-isolation acceptance.

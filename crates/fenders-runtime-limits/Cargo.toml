@@ -6,8 +6,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
-wasmtime = { version = "=50.0.0", default-features = false, features = ["anyhow", "std", "runtime"] }
+wasmtime = { version = "=50.0.1", default-features = false, features = ["anyhow", "std", "runtime"] }
 
 [dev-dependencies]
-wasmtime = { version = "=50.0.0", default-features = false, features = ["anyhow", "std", "runtime", "cranelift"] }
+wasmtime = { version = "=50.0.1", default-features = false, features = ["anyhow", "std", "runtime", "cranelift"] }
 wat = "=1.239.0"

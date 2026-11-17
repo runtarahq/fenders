@@ -1,7 +1,9 @@
 # Upstream provenance and guest adaptation
 
-Source: crates.io `wasmtime-wasi-http` 50.0.0, corresponding to the pinned
-Wasmtime v50.0.0 release, re-ported from the 38.0.3 adaptation. Its licence (Apache-2.0 WITH LLVM-exception) is in `LICENSE`. In 50.0.0 `wasi:http` 0.2 and 0.3 share one outgoing path
+Source: crates.io `wasmtime-wasi-http` 50.0.1, corresponding to the pinned
+Wasmtime v50.0.1 release: the 50.0.0 port with upstream's 50.0.1 changes
+applied (the `content-length` check of an outgoing request in
+`p2/http_impl.rs`, and its tests). 50.0.0 was re-ported from the 38.0.3 adaptation. Its licence (Apache-2.0 WITH LLVM-exception) is in `LICENSE`. In 50.0.0 `wasi:http` 0.2 and 0.3 share one outgoing path
 (`default_send_request`, called through `WasiHttpHooks::send_request`), so the
 adaptation below applies to both versions.
 

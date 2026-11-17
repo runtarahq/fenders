@@ -11,9 +11,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 wasmparser = "=0.261.0"
-wasmtime = { version = "=50.0.0", default-features = false, features = ["anyhow", "std", "cranelift", "parallel-compilation", "runtime", "component-model", "component-model-async", "async", "incremental-cache"] }
-wasmtime-wasi = { version = "=50.0.0", default-features = false, features = ["p2", "p3"] }
-wasmtime-wasi-http = { version = "=50.0.0", path = "../../runtime/vendor/wasmtime-wasi-http", features = ["fenders-platform"] }
+wasmtime = { version = "=50.0.1", default-features = false, features = ["anyhow", "std", "cranelift", "parallel-compilation", "runtime", "component-model", "component-model-async", "async", "incremental-cache"] }
+wasmtime-wasi = { version = "=50.0.1", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "=50.0.1", path = "../../runtime/vendor/wasmtime-wasi-http", features = ["fenders-platform"] }
 
 [dev-dependencies]
 fenders-runtime-limits = { path = "../fenders-runtime-limits" }
