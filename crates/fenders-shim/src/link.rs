@@ -159,6 +159,20 @@ impl Link {
     }
 }
 
+/// What an accept gave, after a wait when it failed. Out of descriptors,
+/// most often, and the next would fail the same at once: the shim's one
+/// thread also relays and reports for the run, and must not spin on it.
+async fn accepted<T>(result: std::io::Result<T>) -> Option<T> {
+    match result {
+        Ok(taken) => Some(taken),
+        Err(_) => {
+            tokio::time::sleep(ACCEPT_WAIT).await;
+            None
+        }
+    }
+}
+const ACCEPT_WAIT: Duration = Duration::from_millis(50);
+
 /// Serves the launcher on `listener` for the shim's life.
 pub async fn serve(listener: UnixListener, link: Arc<Link>) {
     if listener.set_nonblocking(true).is_err() {
@@ -168,7 +182,7 @@ pub async fn serve(listener: UnixListener, link: Arc<Link>) {
         return;
     };
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
+        let Some((stream, _)) = accepted(listener.accept().await).await else {
             continue;
         };
         let link = link.clone();
@@ -291,5 +305,15 @@ mod tests {
             )
         };
         assert_eq!((rc, peer.pid), (0, std::process::id() as i32));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_accept_is_waited_out_and_a_good_one_is_not() {
+        let started = tokio::time::Instant::now();
+        assert_eq!(accepted(Ok(7)).await, Some(7));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        let failed: std::io::Result<i32> = Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+        assert_eq!(accepted(failed).await, None);
+        assert_eq!(started.elapsed(), ACCEPT_WAIT);
     }
 }
