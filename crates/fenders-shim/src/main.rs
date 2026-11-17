@@ -956,6 +956,7 @@ fn finish(
         let relay = match upstream::Upstream::new(&spec.channel) {
             Ok(upstream) => Arc::new(relay::Relay {
                 upstream,
+                guest: spec.machine.guest["host_origin"].is_string(),
                 trace_id: spec
                     .run
                     .trace_id
