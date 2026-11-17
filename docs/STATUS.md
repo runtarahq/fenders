@@ -181,6 +181,24 @@ as both control plane and node.
 - The launcher's control socket also accepts pause and resume; a shim sends
   it only grants and status, over a socket pair nothing else holds.
 
+### Nodes
+
+- Run uids start at 600000 and are not configurable. Nothing checks that
+  range against the host's accounts, and two node processes on one host
+  would give the same uids to different runs: one node a host.
+- With `--warm-runs`, up to 32 booted shims wait outside the node's instance
+  and memory accounting, and each holds the environment (secret values
+  included) of the launch it was made like for up to ten minutes. A removed
+  connection stops runs, not waiting shims: those are never claimed by a
+  launch whose configuration differs, and lapse.
+- A node's compiled-artifact budget (512 MiB by default) is shared by every
+  workspace it compiles for, and an entry is kept for an hour once made: a
+  workspace that fills it has the next upload refused for everyone on that
+  node until entries age. Compiles are taken up in turn among workspaces.
+- Any enrolled node may be given any workspace's upload to compile, and its
+  verdict is taken: a node is trusted with components as it is with
+  secrets.
+
 ### Confinement
 
 - A run's shim is confined once it has started its VMM: no new privileges, a

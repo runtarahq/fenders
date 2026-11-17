@@ -69,3 +69,30 @@ fn the_launchers_readme_describes_the_launcher_there_is() {
         assert!(readme.contains(present), "{present}");
     }
 }
+
+#[test]
+fn every_check_the_status_page_names_exists() {
+    let status = include_str!("../../../docs/STATUS.md");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let scripts = named(status, "scripts/", |c| {
+        c.is_ascii_alphanumeric() || "_-./".contains(c)
+    });
+    assert!(!scripts.is_empty());
+    for script in scripts {
+        let script = script.trim_end_matches('.');
+        assert!(root.join(script).is_file(), "{script} does not exist");
+    }
+}
+
+#[test]
+fn the_status_page_says_what_a_node_is_trusted_with() {
+    // Any enrolled node may be given any workspace's upload to compile and
+    // its verdict is taken. That is a decision, written down where an
+    // operator reads the limits, beside what was done about it: uploads
+    // are taken up in turn among workspaces.
+    let status = include_str!("../../../docs/STATUS.md");
+    let flat = status.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("Any enrolled node may be given any workspace's upload to compile"));
+    assert!(flat.contains("a node is trusted with components as it is with secrets"));
+    assert!(flat.contains("Compiles are taken up in turn among workspaces"));
+}
