@@ -334,6 +334,26 @@ fn output_answer(status: Option<u16>) -> output::Sent {
     }
 }
 
+/// Kills the VMM through `vmm`, the descriptor that names that process and
+/// no other. Without one (a kernel that has none), by number, and only
+/// while it has not been reaped: its number may be another process's after.
+/// Says whether a signal was sent.
+fn kill_vmm(vmm: Option<&OwnedFd>, pid: libc::pid_t, reaped: bool) -> bool {
+    match vmm {
+        Some(vmm) => unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                vmm.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            ) == 0
+        },
+        None if !reaped => unsafe { libc::kill(pid, libc::SIGKILL) == 0 },
+        None => false,
+    }
+}
+
 /// The shim's ends of a capturing VM's output pipes ([`output`]), taken by
 /// [`finish`]: set only for a launch that asked for its output.
 static OUTPUT: std::sync::Mutex<Option<output::Pipes>> = std::sync::Mutex::new(None);
@@ -1151,9 +1171,13 @@ async fn supervise(
     let pid = child.id() as libc::pid_t;
     // The VMM's exit, collected on a blocking thread: waitid needs no SIGCHLD
     // handling and the std child is not tokio's.
+    let reaped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reaping = reaped.clone();
     let mut waited = tokio::task::spawn_blocking(move || {
         let mut child = child;
-        child.wait()
+        let status = child.wait();
+        reaping.store(true, Ordering::SeqCst);
+        status
     });
     let lifetime = Duration::from_secs(
         spec.machine.guest["lifetime_seconds"]
@@ -1164,8 +1188,17 @@ async fn supervise(
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
     let mut interrupt =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
-    let kill = || unsafe {
-        libc::kill(pid, libc::SIGKILL);
+    // The VMM is signalled through a descriptor that names this process of
+    // it and no other: its pid may be given to another process once the
+    // waiter above has reaped it, and a signal by number would then go to
+    // that one.
+    let vmm = unsafe {
+        use std::os::fd::FromRawFd;
+        let fd = libc::syscall(libc::SYS_pidfd_open, pid, 0);
+        (fd >= 0).then(|| OwnedFd::from_raw_fd(fd as RawFd))
+    };
+    let kill = || {
+        kill_vmm(vmm.as_ref(), pid, reaped.load(Ordering::SeqCst));
     };
     let mut stopped = None;
     let mut limit = limit;
@@ -1797,5 +1830,30 @@ mod tests {
         for failure in [None, Some(500), Some(503)] {
             assert!(matches!(output_answer(failure), Sent::Retry));
         }
+    }
+
+    #[test]
+    fn the_vmm_is_killed_as_that_process_and_never_by_a_number_gone_stale() {
+        use std::os::fd::FromRawFd;
+        use std::os::unix::process::ExitStatusExt;
+        let spawn = || Command::new("sleep").arg("60").spawn().unwrap();
+        let named = |pid: u32| unsafe {
+            OwnedFd::from_raw_fd(libc::syscall(libc::SYS_pidfd_open, pid, 0) as RawFd)
+        };
+        // Through its descriptor: killed, and once it is reaped nothing is
+        // sent, whoever has its number by then.
+        let mut child = spawn();
+        let pid = child.id() as libc::pid_t;
+        let vmm = named(child.id());
+        assert!(kill_vmm(Some(&vmm), pid, false));
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert!(!kill_vmm(Some(&vmm), pid, true));
+        // By number only while it has not been reaped.
+        let mut other = spawn();
+        let number = other.id() as libc::pid_t;
+        assert!(!kill_vmm(None, number, true));
+        assert!(other.try_wait().unwrap().is_none());
+        assert!(kill_vmm(None, number, false));
+        assert_eq!(other.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 }
