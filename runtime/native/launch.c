@@ -484,8 +484,11 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 72: {
         int fd=a<=2?(int)a:host_fd(a);
         if(b==F_DUPFD || b==F_DUPFD_CLOEXEC)return guest_duplicate(a,b);
-        if(b==F_GETFD || b==F_GETFL)return result(fcntl(fd,b));
-        if(b==F_SETFD && !(c&~FD_CLOEXEC))return result(fcntl(fd,b,c));
+        // Close-on-exec is the launcher's to keep set (descriptors.inc): a
+        // guest that clears it is told so and nothing changes.
+        if(b==F_GETFD)return fd<0?-EBADF:(a<=2?0:FD_CLOEXEC);
+        if(b==F_GETFL)return result(fcntl(fd,b));
+        if(b==F_SETFD && !(c&~FD_CLOEXEC))return fd<0?-EBADF:0;
         // Standard output and error are the launcher's own too: a guest
         // does not change how they block or append.
         if(b==F_SETFL && a<=2)return 0;

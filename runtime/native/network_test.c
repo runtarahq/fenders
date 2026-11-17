@@ -135,6 +135,17 @@ int main(int argc,char **argv) {
     }
     control_framing();
     traffic_accounting();
+    {
+        // Whatever a guest asked for, the host's descriptor closes on exec.
+        int pipes[2];assert(!pipe(pipes));
+        assert(!(fcntl(pipes[0],F_GETFD)&FD_CLOEXEC));
+        int file=guest_fd(pipes[0]),socket_fd=guest_network_fd(socket(AF_INET,SOCK_STREAM,0),SOCK_STREAM);
+        assert(file>=3 && socket_fd>=3);
+        assert(fcntl(host_fd(file),F_GETFD)&FD_CLOEXEC);
+        assert(fcntl(host_fd(socket_fd),F_GETFD)&FD_CLOEXEC);
+        release_calls();close(pipes[1]);
+        puts("PASS a guest's host descriptors are closed on exec");
+    }
     struct sockaddr_in first,second,foreign;
     int a=listener(&first),b=listener(&second),c=listener(&foreign);
     char allow[128];
