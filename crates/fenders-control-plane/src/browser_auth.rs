@@ -54,6 +54,10 @@ pub struct BrowserAuthConfig {
 /// not among them.
 const METADATA_FRESH: std::time::Duration = std::time::Duration::from_secs(300);
 const METADATA_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
+/// Sign-ins held between their start and their callback, and how many of
+/// the oldest give way at once when that many are.
+const MAX_PENDING_LOGINS: i64 = 10_000;
+const PENDING_LOGINS_EVICTED: i64 = 256;
 
 struct Discovered {
     /// When it was fetched, and when it was last fetched for a key not held.
@@ -313,13 +317,16 @@ impl BrowserAuth {
             args![old.as_ref().map(digest)],
         )
         .await?;
+        // Anyone may start a sign-in, and each is held for five minutes. At
+        // the most that are held, the oldest give way to the new: a flood of
+        // started sign-ins then costs the flood its own entries, where
+        // refusing new ones kept everyone out for as long as it went on. A
+        // sign-in is completed in seconds; it is lost only if as many more
+        // are started in that time.
         if n(&one(&mut tx, "SELECT count(*) AS n FROM browser_logins", args![]).await?["n"])
-            >= 10000
+            >= MAX_PENDING_LOGINS
         {
-            return Err(Error::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "login capacity exhausted",
-            ));
+            exec(&mut tx,"DELETE FROM browser_logins WHERE state_hash IN (SELECT state_hash FROM browser_logins ORDER BY expires,state_hash LIMIT $1)",args![PENDING_LOGINS_EVICTED]).await?;
         }
         exec(&mut tx,"INSERT INTO browser_logins(state_hash,browser_hash,context_hash,nonce_encrypted,pkce_encrypted) VALUES($1,$2,$3,$4,$5)",args![digest(state.secret()),digest(&browser),self.context(),store.cipher.encrypt(nonce.secret().as_bytes()),store.cipher.encrypt(verifier.secret().as_bytes())]).await?;
         tx.commit().await?;

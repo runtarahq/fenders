@@ -87,9 +87,9 @@ as both control plane and node.
   provider's metadata and signing keys are held for five minutes, and
   fetched again at most every ten seconds for a token signed with a key not
   among them: a key the provider withdraws is trusted for up to five minutes
-  more. A session lasts eight hours from sign-in, and thirty minutes unused. At most 10,000 sign-ins may be pending at once, for everyone
-  together: a flood of started sign-ins can hold the others out until its
-  five-minute entries lapse.
+  more. A session lasts eight hours from sign-in, and thirty minutes unused. At most 10,000 sign-ins are held between their start and
+  their callback; beyond that the oldest give way, so a sign-in is lost only
+  if that many more are started while it is under way.
 - `--tailscale-identity` is a **development-only** sign-in that trusts a
   header. The control plane refuses it unless it listens on loopback. Never
   use it in a deployment.

@@ -2091,3 +2091,36 @@ pub(super) async fn run_console_browser(script: &'static str, fixture: Value) ->
     .await
     .unwrap()
 }
+
+/// Anyone may start sign-ins. As many as are held at once do not keep the
+/// next person out: the oldest give way.
+#[tokio::test]
+async fn a_flood_of_started_sign_ins_does_not_keep_others_out() {
+    let l = IdentityLab::new().await;
+    // As a flood leaves them: the most that are held, each a little newer.
+    sqlx::query("INSERT INTO browser_logins(state_hash,browser_hash,context_hash,nonce_encrypted,pkce_encrypted,expires) SELECT md5('s'||n),md5('b'||n),'flood','n','p',now()+interval '4 minutes'+n*interval '1 millisecond' FROM generate_series(1,10000) n")
+        .execute(&l.lab.store.pool)
+        .await
+        .unwrap();
+    // The next person signs in all the same.
+    let user = l.login("after-the-flood").await;
+    let (status, _) = l.request(&user, "GET", "/auth/session", None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    // The oldest of the flood's gave way, and no more than a batch of them.
+    let (held, oldest): (i64, bool) = sqlx::query_as(
+        "SELECT count(*),bool_or(state_hash=md5('s1')) FROM browser_logins WHERE context_hash='flood'",
+    )
+    .fetch_one(&l.lab.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(held, 10000 - 256);
+    assert!(!oldest);
+    let newest: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM browser_logins WHERE state_hash=md5('s10000'))",
+    )
+    .fetch_one(&l.lab.store.pool)
+    .await
+    .unwrap();
+    assert!(newest);
+    l.finish().await;
+}
