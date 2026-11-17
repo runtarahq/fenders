@@ -96,7 +96,11 @@ impl Store {
             job(&row)
         } else if worker["draining"] == true {
             Value::Null
-        } else if let Some(row) = optional(&mut tx, "SELECT artifact_id FROM artifact_validations WHERE state='pending' AND runtime=$1 AND available_at<=now() AND EXISTS(SELECT 1 FROM artifacts a WHERE a.id=artifact_validations.artifact_id AND a.retired_at IS NULL) ORDER BY available_at,created,artifact_id LIMIT 1 FOR UPDATE", args![RUNTIME]).await? {
+        // In turn among workspaces: the next component is that of the one
+        // whose last was taken up longest ago, not the oldest of all. Nodes
+        // compile one at a time, and a workspace that uploads a hundred
+        // would otherwise hold every other's behind them.
+        } else if let Some(row) = optional(&mut tx, "SELECT v.artifact_id FROM artifact_validations v WHERE v.state='pending' AND v.runtime=$1 AND v.available_at<=now() AND EXISTS(SELECT 1 FROM artifacts a WHERE a.id=v.artifact_id AND a.retired_at IS NULL) ORDER BY (SELECT max(o.updated) FROM artifact_validations o WHERE o.tenant_id=v.tenant_id AND o.generation>0 AND o.state<>'pending') NULLS FIRST,v.available_at,v.created,v.artifact_id LIMIT 1 FOR UPDATE OF v", args![RUNTIME]).await? {
             let next = one(&mut tx, "UPDATE artifact_validations SET state='validating',generation=generation+1,attempts=attempts+1,node_id=$1,node_boot=$2,lease_until=now()+interval '5 minutes',error=NULL,updated=now() WHERE artifact_id=$3 RETURNING generation", args![node,boot,row["artifact_id"]]).await?;
             let row = assigned(&mut tx, node, boot, s(&row["artifact_id"]), n(&next["generation"])).await?;
             job(&row)

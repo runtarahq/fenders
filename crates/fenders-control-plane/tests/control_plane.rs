@@ -2522,6 +2522,58 @@ async fn component_validation_claims_are_scoped_atomic_and_durable() {
     l.finish().await;
 }
 
+/// Components are compiled in turn among workspaces, not oldest first.
+#[tokio::test]
+async fn components_are_taken_up_in_turn_among_workspaces() {
+    let l = Lab::new().await;
+    let node = l.node("compiler").await;
+    // The first workspace's component is taken up and done.
+    let first = approve_component(&l, &node, false, true).await;
+    assert_eq!(first["artifact_id"], l.artifact.as_str());
+    // It uploads three more; then another workspace uploads one.
+    let mut busy = Vec::new();
+    for n in 0..3u8 {
+        let mut bytes = b"\0asm\x0d\0\x01\0".to_vec();
+        bytes.push(n);
+        let uploaded = l
+            .store
+            .upload(&l.operator, &l.tenant, &l.project, &bytes)
+            .await
+            .unwrap();
+        busy.push(s(&uploaded["id"]).to_owned());
+    }
+    let other = l.store.create_tenant(&l.operator,serde_json::from_value(json!({"name":"other","allowance":{"cpu_percent":100,"memory_mib":512,"instances":1,"storage_bytes":1000000000i64,"transfer_bytes":1000000}})).unwrap()).await.unwrap();
+    let other_project = l
+        .store
+        .create_project(
+            &l.operator,
+            s(&other["id"]),
+            serde_json::from_value(json!({"name":"app"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    let waiting = l
+        .store
+        .upload(
+            &l.operator,
+            s(&other["id"]),
+            s(&other_project["id"]),
+            b"\0asm\x0d\0\x01\0other",
+        )
+        .await
+        .unwrap();
+    // The other workspace's, uploaded last, is next: the first workspace
+    // has had a turn. Then the first workspace's three, oldest first.
+    let mut order = Vec::new();
+    for _ in 0..4 {
+        let job = approve_component(&l, &node, false, true).await;
+        order.push(s(&job["artifact_id"]).to_owned());
+    }
+    assert_eq!(order[0], s(&waiting["id"]));
+    assert_eq!(&order[1..], &busy[..]);
+    l.finish().await;
+}
+
 #[tokio::test]
 async fn component_validation_fences_lost_workers_and_recovery() {
     let l = Lab::new().await;
