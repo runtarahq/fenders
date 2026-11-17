@@ -297,6 +297,24 @@ fn vmm() -> Result<()> {
     .iter()
     .map(|name| env_number::<RawFd>(name).map(|fd| format!("fd:{fd}")))
     .collect::<Result<_>>()?;
+    // The launcher starts with the descriptors it is told of and no other.
+    // Each of the shim's is opened to close on exec, which is what kept the
+    // rest out; this is the same thing, said once more where it matters.
+    let mut kept: Vec<RawFd> = vec![0, 1, 2];
+    for name in [
+        "FENDERS_SHIM_RUNTIME_FD",
+        "FENDERS_SHIM_COMPONENT_FD",
+        "FENDERS_SHIM_ENV_FD",
+        "FENDERS_HOST_ORIGIN_FD",
+        "FENDERS_METER_FD",
+        "FENDERS_DIAGNOSTICS_FD",
+        "FENDERS_CONTROL_FD",
+        "FENDERS_INGRESS_FD",
+        "FENDERS_HOLD_FD",
+    ] {
+        kept.extend(env_number::<RawFd>(name).ok());
+    }
+    close_others(&kept)?;
     fenders_node::confinement::apply("vmm", &launch, &[], &[], &ports, dns, true)
         .map_err(|e| format!("confinement: {}", e.message))?;
     let mut command = Command::new(&launch);
@@ -307,6 +325,23 @@ fn vmm() -> Result<()> {
         }
     }
     Err(format!("exec launch: {}", command.exec()))
+}
+
+/// Sets close-on-exec on every open descriptor not in `kept`: the next
+/// program starts without it. Not closed here, since what the standard
+/// library holds to start that program is among them.
+fn close_others(kept: &[RawFd]) -> Result<()> {
+    let open: Vec<RawFd> = fs::read_dir("/proc/self/fd")
+        .map_err(os("listing descriptors"))?
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .collect();
+    for fd in open {
+        if !kept.contains(&fd) {
+            // One that is gone already (the listing's own) is nothing to keep out.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+    }
+    Ok(())
 }
 
 /// The gid owning /dev/kvm, which the run needs as a supplementary group.
@@ -1848,6 +1883,23 @@ mod tests {
             "the launcher's answer was too long"
         );
         drop(flood);
+    }
+
+    #[test]
+    fn descriptors_the_launcher_is_not_told_of_close_on_exec() {
+        let pipe = |flags| {
+            let mut ends = [0; 2];
+            assert_eq!(unsafe { libc::pipe2(ends.as_mut_ptr(), flags) }, 0);
+            ends
+        };
+        let (kept, other) = (pipe(0), pipe(0));
+        close_others(&[0, 1, 2, kept[0], kept[1]]).unwrap();
+        let cloexec = |fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC != 0;
+        assert!(!cloexec(kept[0]) && !cloexec(kept[1]));
+        assert!(cloexec(other[0]) && cloexec(other[1]));
+        for fd in kept.into_iter().chain(other) {
+            unsafe { libc::close(fd) };
+        }
     }
 
     #[test]
