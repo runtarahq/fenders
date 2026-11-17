@@ -101,3 +101,23 @@ fn ci_names_its_actions_by_commit_and_checks_advisories() {
     assert!(ci.contains("cargo audit --file"));
     assert!(ci.contains("schedule:"));
 }
+
+#[test]
+fn the_launcher_is_built_with_its_hardening_named() {
+    let build = include_str!("../../../scripts/build_node.sh");
+    let line = build
+        .lines()
+        .skip_while(|line| !line.starts_with("cc "))
+        .take(2)
+        .collect::<String>();
+    for flag in [
+        "-fstack-protector-strong",
+        "-D_FORTIFY_SOURCE=2",
+        "-fPIE",
+        "-pie",
+        "-z,relro,-z,now,-z,noexecstack",
+        "-Werror",
+    ] {
+        assert!(line.contains(flag), "{flag}");
+    }
+}
