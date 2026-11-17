@@ -58,6 +58,8 @@ pub struct Store {
     pub sockets: std::sync::Arc<crate::websocket::Sockets>,
     /// How many requests each workspace was admitted lately.
     pub http_rates: std::sync::Arc<crate::ingress::Rates>,
+    /// Whose each gateway host name is, for refusing without a transaction.
+    pub ingress_hosts: std::sync::Arc<crate::ingress::Hosts>,
     /// Refuse what no shim node can serve; see [`crate::unavailable`].
     pub(crate) refuse_unserved: bool,
     /// Files served beside the API; see [`crate::api::Asset`].
@@ -161,6 +163,7 @@ impl Store {
             run_channel: None,
             exchange: Default::default(),
             http_rates: Default::default(),
+            ingress_hosts: Default::default(),
             sockets: Default::default(),
             refuse_unserved: false,
             assets: &[],

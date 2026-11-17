@@ -113,3 +113,92 @@ async fn a_workspaces_request_limits_are_its_plans_and_admission_is_audited_once
     }
     l.finish().await;
 }
+
+/// A request for a host name that is nobody's, or of a workspace that has
+/// had its requests for the minute, is refused without the lock every
+/// mutation takes: a flood of them queues nothing behind it.
+#[tokio::test]
+async fn requests_that_cannot_be_admitted_are_refused_without_the_mutation_lock() {
+    let l = Lab::new().await;
+    let node = l.node("gate-worker").await;
+    let op = l
+        .store
+        .create_workload(
+            &l.operator,
+            &l.tenant,
+            &l.project,
+            json!({"name":"web","spec":{"artifact_id":l.artifact}}),
+            "web",
+            true,
+        )
+        .await
+        .unwrap();
+    let route = l
+        .store
+        .create_route(
+            &l.operator,
+            &l.tenant,
+            &l.project,
+            json!({"name":"web","deployment_id":op["resource_id"]}),
+            "apps.test",
+        )
+        .await
+        .unwrap();
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    let hostname = s(&route["hostname"]).to_owned();
+    sqlx::query("UPDATE tenants SET http_requests_per_minute=2 WHERE id=$1")
+        .bind(&l.tenant)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    // Two are admitted; the workspace has then had its minute's requests.
+    for _ in 0..2 {
+        let (_, lease) = l.store.ingress_start(&hostname, 0).await.unwrap();
+        l.store.ingress_finish(&lease, Some(0)).await.unwrap();
+    }
+
+    // Someone else holds the lock all mutations take, for as long as this
+    // test goes on: an admission that needed it would wait five seconds and
+    // fail with a conflict.
+    let mut holder = l.store.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(184923781)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    for _ in 0..50 {
+        assert_eq!(
+            l.store
+                .ingress_start("nobody.apps.test", 0)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            l.store
+                .ingress_start(&hostname, 0)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "refusals waited for the mutation lock: {:?}",
+        started.elapsed()
+    );
+    sqlx::query("SELECT pg_advisory_unlock(184923781)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    drop(holder);
+    l.finish().await;
+}
