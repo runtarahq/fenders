@@ -105,6 +105,7 @@ impl Store {
             }
             return Ok(row);
         }
+        Self::metadata_limit(&mut tx, tenant, "secrets", crate::store::MAX_SECRETS).await?;
         let resource = uid();
         let row=one(&mut tx,"INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext) VALUES($1,$2,$3,$4,convert_to($5,'UTF8')) RETURNING id,name,created",args![resource,tenant,project,value["name"],self.cipher.encrypt(plain.as_bytes())]).await?;
         Self::audit(&mut tx, p, "secret.create", &resource, tenant, json!({})).await?;

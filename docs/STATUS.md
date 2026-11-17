@@ -58,6 +58,12 @@ as both control plane and node.
 
 ### Embedding and tenancy
 
+- A workspace may have 256 projects, 4096 secrets, 4096 apps and 1024
+  credentials that still open anything, and its credentials may make 600
+  changes a minute between them (counted in memory, as the gateway's rate
+  is). These are constants. Audit records, operations and request receipts
+  are kept for good: their growth is bounded by that rate, not by a
+  retention.
 - The operator credential is one bearer token, written to
   `STATE/operator.token` at first start. It is not scoped; whoever holds it
   can do anything.

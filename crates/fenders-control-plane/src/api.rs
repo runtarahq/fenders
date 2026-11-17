@@ -239,6 +239,18 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         store.authenticate(token).await?
     };
     crate::customer_api::authorize(&p, method, &segments)?;
+    // Every mutation leaves an audit record, and most a receipt, for good. A
+    // workspace's credentials make so many a minute between them; an
+    // operator's are its own to pace.
+    if !matches!(method, "GET" | "HEAD" | "OPTIONS")
+        && let Some(tenant) = &p.tenant_id
+        && !store.api_rates.admit(tenant, MUTATIONS_A_MINUTE)
+    {
+        return Err(Error::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many changes in a minute",
+        ));
+    }
     let key = parts
         .headers
         .get("Idempotency-Key")
@@ -1560,6 +1572,10 @@ async fn gateway_dispatch_tracked(
         }
     }
 }
+
+/// Mutating management requests a workspace's credentials may make in a
+/// minute, counted in memory as the gateway's are.
+const MUTATIONS_A_MINUTE: i64 = 600;
 
 /// How long a management request's body may take to arrive.
 const BODY_WITHIN: std::time::Duration = std::time::Duration::from_secs(120);

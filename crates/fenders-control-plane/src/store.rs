@@ -58,6 +58,8 @@ pub struct Store {
     pub sockets: std::sync::Arc<crate::websocket::Sockets>,
     /// How many requests each workspace was admitted lately.
     pub http_rates: std::sync::Arc<crate::ingress::Rates>,
+    /// Mutating management requests admitted for each workspace.
+    pub api_rates: std::sync::Arc<crate::ingress::Rates>,
     /// Whose each gateway host name is, for refusing without a transaction.
     pub ingress_hosts: std::sync::Arc<crate::ingress::Hosts>,
     /// Refuse what no shim node can serve; see [`crate::unavailable`].
@@ -101,6 +103,13 @@ pub(crate) fn token(prefix: &str) -> Result<String> {
             .collect::<String>()
     ))
 }
+/// The most rows of each kind a workspace may have: projects, secrets, apps,
+/// and credentials (API keys among them) that still open anything.
+pub(crate) const MAX_PROJECTS: i64 = 256;
+pub(crate) const MAX_SECRETS: i64 = 4096;
+pub(crate) const MAX_APPS: i64 = 4096;
+pub(crate) const MAX_CREDENTIALS: i64 = 1024;
+
 /// When a credential issued now expires: after `$7` seconds, and no later
 /// than the tenant credential `$8` that issues it, if it is one (an operator
 /// or a browser session is not).
@@ -164,6 +173,7 @@ impl Store {
             exchange: Default::default(),
             http_rates: Default::default(),
             ingress_hosts: Default::default(),
+            api_rates: Default::default(),
             sockets: Default::default(),
             refuse_unserved: false,
             assets: &[],
@@ -458,6 +468,7 @@ impl Store {
         {
             return Ok(row);
         }
+        Self::metadata_limit(&mut tx, tenant, "projects", MAX_PROJECTS).await?;
         let id = uid();
         let row = sqlx::query_scalar::<_, Value>(
             "INSERT INTO projects AS p (id,tenant_id,name,display_name,slug) VALUES ($1,$2,$3,$4,$3) RETURNING to_jsonb(p)",
@@ -504,6 +515,7 @@ impl Store {
         if let Some(project) = &value.project_id {
             Self::project(&mut tx, p, tenant, project, false).await?;
         }
+        Self::metadata_limit(&mut tx, tenant, "credentials", MAX_CREDENTIALS).await?;
         let id = uid();
         let token = token("fnd_tok_")?;
         // Who issued it is recorded, so that it ends with its issuer; and one
@@ -558,6 +570,32 @@ impl Store {
         // And every credential issued with it, or with one of those.
         Self::revoke_issued_by(tx, Some(tenant), credential).await?;
         Ok(row)
+    }
+    /// Refuses another row of `table` for `tenant` once it has `limit`.
+    ///
+    /// None of these rows is charged to an allowance, and some are never
+    /// deleted: without a bound, one workspace could fill the database that
+    /// every workspace shares.
+    pub(crate) async fn metadata_limit(
+        tx: &mut Tx,
+        tenant: &str,
+        table: &str,
+        limit: i64,
+    ) -> Result<()> {
+        let counted = match table {
+            "secrets" | "projects" | "apps" => format!("SELECT count(*) FROM {table} WHERE tenant_id=$1"),
+            // Those that still open anything.
+            "credentials" => "SELECT count(*) FROM credentials WHERE tenant_id=$1 AND NOT revoked AND expires>now()".to_owned(),
+            _ => return Err(Error::internal()),
+        };
+        let count: i64 = sqlx::query_scalar(&counted)
+            .bind(tenant)
+            .fetch_one(&mut **tx)
+            .await?;
+        if count >= limit {
+            return Err(crate::db::quota("workspace metadata limit exhausted"));
+        }
+        Ok(())
     }
     /// Revokes the credentials `issuer` (a credential, or a customer user)
     /// issued, and those issued with them in turn: in `tenant`, or in every

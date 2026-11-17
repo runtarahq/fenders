@@ -24,10 +24,11 @@ pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
 /// such requests are refused before they can queue anything else behind them.
 #[derive(Default)]
 pub struct Hosts {
-    known: std::sync::Mutex<
-        std::collections::HashMap<String, (std::time::Instant, Option<(String, i64)>)>,
-    >,
+    known: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Whose)>>,
 }
+
+/// Nobody's, or a workspace's with its requests a minute.
+type Whose = Option<(String, i64)>;
 
 impl Hosts {
     /// How long a host name is remembered as nobody's, and as a workspace's.
@@ -39,7 +40,7 @@ impl Hosts {
 
     /// `Some(None)`: nobody's. `Some(Some((workspace, requests a minute)))`.
     /// `None`: not remembered.
-    fn get(&self, hostname: &str) -> Option<Option<(String, i64)>> {
+    fn get(&self, hostname: &str) -> Option<Whose> {
         let known = self.known.lock().unwrap_or_else(|e| e.into_inner());
         let (at, whose) = known.get(hostname)?;
         let kept = if whose.is_some() {
@@ -50,7 +51,7 @@ impl Hosts {
         (at.elapsed() < kept).then(|| whose.clone())
     }
 
-    fn remember(&self, hostname: &str, whose: Option<(String, i64)>) {
+    fn remember(&self, hostname: &str, whose: Whose) {
         let mut known = self.known.lock().unwrap_or_else(|e| e.into_inner());
         if known.len() >= Self::MOST {
             known.retain(|_, (at, _)| at.elapsed() < Self::UNKNOWN);

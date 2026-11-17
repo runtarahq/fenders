@@ -661,3 +661,108 @@ impl<F: FnOnce() + Unpin> http_body::Body for Asked<F> {
         }))
     }
 }
+
+/// What a workspace can make without being charged for it is bounded: rows
+/// of each kind, and changes in a minute.
+#[tokio::test]
+async fn a_workspaces_rows_and_changes_are_bounded() {
+    let l = Lab::new().await;
+    // Up to the limits, as a busy workspace would have got there.
+    sqlx::query("INSERT INTO projects(id,tenant_id,name,display_name,slug) SELECT md5('p'||n),$1,'p'||n,'P'||n,'p'||n FROM generate_series(1,255) n")
+        .bind(&l.tenant).execute(&l.store.pool).await.unwrap();
+    sqlx::query("INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext) SELECT md5('s'||n),$1,$2,'s'||n,'\\x00' FROM generate_series(1,4096) n")
+        .bind(&l.tenant).bind(&l.project).execute(&l.store.pool).await.unwrap();
+    sqlx::query("INSERT INTO credentials(id,token_hash,tenant_id,name,role,expires) SELECT md5('c'||n),md5('h'||n),$1,'c','viewer',now()+interval '1 hour' FROM generate_series(1,1024) n")
+        .bind(&l.tenant).execute(&l.store.pool).await.unwrap();
+    let quota = StatusCode::TOO_MANY_REQUESTS;
+    let project = |name: &'static str| {
+        l.store.create_project(
+            &l.operator,
+            &l.tenant,
+            serde_json::from_value(json!({"name":name})).unwrap(),
+        )
+    };
+    assert_eq!(project("one-more").await.unwrap_err().status, quota);
+    assert_eq!(
+        l.store
+            .create_secret(
+                &l.operator,
+                &l.tenant,
+                &l.project,
+                json!({"name":"more","value":"v"})
+            )
+            .await
+            .unwrap_err()
+            .status,
+        quota
+    );
+    let issue = || {
+        l.store.issue_credential(
+            &l.operator,
+            &l.tenant,
+            serde_json::from_value(json!({"name":"more","role":"viewer","project_id":null}))
+                .unwrap(),
+        )
+    };
+    assert_eq!(issue().await.unwrap_err().status, quota);
+    // Credentials that open nothing any more do not count.
+    sqlx::query("UPDATE credentials SET revoked=true WHERE id=md5('c1')")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE credentials SET expires=now()-interval '1 second' WHERE id=md5('c2')")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let (_, editor) = l.credential("editor", None).await;
+    issue().await.unwrap();
+    assert_eq!(issue().await.unwrap_err().status, quota);
+
+    // Changes in a minute: refused or not, each one counts, and reads do not.
+    let path = format!("/v1/tenants/{}/projects/{}/secrets", l.tenant, l.project);
+    let token = s(&editor["token"]);
+    let mut last = StatusCode::OK;
+    for _ in 0..600 {
+        last = call(
+            &l,
+            token,
+            "POST",
+            &path,
+            json!({"name":"x","value":"v"}),
+            "",
+        )
+        .await
+        .0;
+    }
+    assert_eq!(last, quota, "the row limit, not yet the rate");
+    let (status, body) = call(
+        &l,
+        token,
+        "POST",
+        &path,
+        json!({"name":"x","value":"v"}),
+        "",
+    )
+    .await;
+    assert_eq!(status, quota);
+    assert_eq!(body["error"], "too many changes in a minute", "{body}");
+    assert_eq!(
+        call(&l, token, "GET", &path, json!({}), "").await.0,
+        StatusCode::OK
+    );
+    // The operator's own changes are not counted against the workspace.
+    assert_eq!(
+        call(
+            &l,
+            &l.token,
+            "POST",
+            &path,
+            json!({"name":"x","value":"v"}),
+            ""
+        )
+        .await
+        .1["error"],
+        "workspace metadata limit exhausted"
+    );
+    l.finish().await;
+}

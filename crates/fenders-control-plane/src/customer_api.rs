@@ -191,6 +191,13 @@ impl Store {
         if let Some(row) = receipt(&mut tx, tenant, key, &request).await? {
             return Ok(row);
         }
+        Self::metadata_limit(
+            &mut tx,
+            tenant,
+            "credentials",
+            crate::store::MAX_CREDENTIALS,
+        )
+        .await?;
         let id = uid();
         let secret = crate::store::token("fnd_tok_")?;
         let prefix = &secret[..16];
