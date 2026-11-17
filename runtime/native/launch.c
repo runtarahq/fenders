@@ -243,7 +243,7 @@ static void hold_start(void) {
     if(errno || !*text || *end || fd<3 || fd>INT_MAX || fstat((int)fd,&info) || !S_ISFIFO(info.st_mode)) {
         fprintf(DIAGNOSTICS,"invalid inherited hold pipe\n");exit(2);
     }
-    hold_fd=(int)fd;
+    hold_fd=(int)fd;fcntl(hold_fd,F_SETFD,FD_CLOEXEC);
 }
 // One opener takes the pipe: two guest threads opening it at once would
 // otherwise both read it and both close its descriptor, the second closing

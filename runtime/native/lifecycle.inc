@@ -102,6 +102,8 @@ static int inherited_socket(const char *name,int type) {
     if(!*value || *end || fd<3 || fd>INT_MAX || getsockopt(fd,SOL_SOCKET,SO_TYPE,&actual,&size) || actual!=type) {
         fprintf(DIAGNOSTICS,"invalid inherited socket: %s\n",name);exit(2);
     }
+    // The launcher runs no other program; none inherits these if it ever did.
+    fcntl((int)fd,F_SETFD,FD_CLOEXEC);
     return (int)fd;
 }
 static void lifecycle_start(void) {
