@@ -131,6 +131,18 @@ static long network_connect(uint64_t guest,const struct sockaddr_in *address) {
     pthread_mutex_unlock(&fd_lock);
     return result(connect(desc->fd,(const void *)address,sizeof(*address)));
 }
+// A datagram socket hears only the resolver: bound or about to send, it is
+// connected to it, and the host drops what any other source sends to its
+// port. Without a resolver there is nothing to hear and nothing is done.
+static long network_resolver_only(uint64_t guest) {
+    struct descriptor *desc=lease_descriptor(guest);if(!desc)return -EBADF;
+    pthread_mutex_lock(&fd_lock);
+    struct network_connection *connection=desc->network;
+    int wanted=connection && connection->type==SOCK_DGRAM && !connection->assigned && dns_server.sin_addr.s_addr!=INADDR_ANY;
+    if(wanted){connection->peer=dns_server;connection->assigned=1;}
+    pthread_mutex_unlock(&fd_lock);
+    return wanted?result(connect(desc->fd,(const void *)&dns_server,sizeof(dns_server))):0;
+}
 static long network_sendto(uint64_t guest,void *buffer,size_t size,int flags,const struct sockaddr_in *address) {
     struct descriptor *desc=lease_descriptor(guest);if(!desc)return -EBADF;
     pthread_mutex_lock(&fd_lock);
@@ -139,7 +151,8 @@ static long network_sendto(uint64_t guest,void *buffer,size_t size,int flags,con
     int allowed=connection && !connection->revoked && connection->type==SOCK_DGRAM && destination_allowed_locked(connection->type,address);
     pthread_mutex_unlock(&fd_lock);
     if(!allowed)return -EACCES;
-    long error=network_begin_tx(desc,size);if(error)return error;
+    long error=network_resolver_only(guest);if(error)return error;
+    error=network_begin_tx(desc,size);if(error)return error;
     return network_account_tx(desc,result(sendto(desc->fd,buffer,size,flags|MSG_NOSIGNAL,(const void *)address,sizeof(*address))),size);
 }
 static void network_policy(void) {

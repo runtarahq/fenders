@@ -444,7 +444,8 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
         struct sockaddr_in addr;memcpy(&addr,ptr(b,c),c);int type;socklen_t size=sizeof(type);
         if(getsockopt(host_fd(a),SOL_SOCKET,SO_TYPE,&type,&size))return -errno;
         if(type!=SOCK_DGRAM || addr.sin_family!=AF_INET || addr.sin_addr.s_addr!=INADDR_ANY || addr.sin_port)return -EACCES;
-        return result(bind(host_fd(a),(void *)&addr,sizeof(addr)));
+        if(bind(host_fd(a),(void *)&addr,sizeof(addr)))return -errno;
+        return network_resolver_only(a);
     }
     case 48: return result(shutdown(host_fd(a),b));
     case 288: {

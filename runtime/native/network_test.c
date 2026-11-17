@@ -181,9 +181,42 @@ static void meter_final_closes(void) {
     char lines[4096];ssize_t n=read(pipefd[0],lines,sizeof(lines)-1);assert(n>0);lines[n-1]=0;
     char *last=strrchr(lines,'\n');last=last?last+1:lines;
     unsigned long long bytes,inflight;assert(sscanf(last,"final %llu %llu",&bytes,&inflight)==2 && inflight==1);
-    printf("PASS meter final: admission closed with the totals, %u of 200 lines complete and exact, unlocked line incomplete\n",complete);
+    printf("PASS meter final: admission closed with the totals, every line within what was received, %u of 200 with nothing in flight and exact, unlocked line incomplete\n",complete);
+}
+// A datagram socket hears the resolver and no other source.
+static void resolver_only(void) {
+    int resolver=socket(AF_INET,SOCK_DGRAM,0),other=socket(AF_INET,SOCK_DGRAM,0);assert(resolver>=0 && other>=0);
+    struct sockaddr_in address={.sin_family=AF_INET,.sin_addr={.s_addr=htonl(INADDR_LOOPBACK)}},any={.sin_family=AF_INET};
+    assert(!bind(resolver,(void *)&address,sizeof(address)));socklen_t size=sizeof(address);
+    assert(!getsockname(resolver,(void *)&address,&size));dns_server=address;
+    for(int bound=0;bound<2;bound++) {
+        int guest=guest_network_fd(socket(AF_INET,SOCK_DGRAM,0),SOCK_DGRAM);assert(guest>=3);
+        int host=host_fd((uint64_t)guest);release_calls();
+        if(bound) {
+            // As the launcher does for a guest's bind: bound, then the resolver's.
+            assert(!bind(host,(void *)&any,sizeof(any)));assert(!network_resolver_only((uint64_t)guest));release_calls();
+        } else {
+            assert(network_sendto((uint64_t)guest,"ask",3,0,&address)==3);release_calls();
+        }
+        struct sockaddr_in local;size=sizeof(local);assert(!getsockname(host,(void *)&local,&size));
+        local.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        char got[16];
+        assert(sendto(other,"stray",5,0,(void *)&local,sizeof(local))==5);usleep(20000);
+        assert(recv(host,got,sizeof(got),MSG_DONTWAIT)==-1 && errno==EAGAIN);
+        assert(sendto(resolver,"answer",6,0,(void *)&local,sizeof(local))==6);usleep(20000);
+        assert(recv(host,got,sizeof(got),MSG_DONTWAIT)==6 && !memcmp(got,"answer",6));
+        // And it still sends there, and nowhere else.
+        assert(network_sendto((uint64_t)guest,"ask",3,0,&address)==3);release_calls();
+        struct sockaddr_in elsewhere=local;size=sizeof(elsewhere);assert(!getsockname(other,(void *)&elsewhere,&size));
+        elsewhere.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        assert(network_sendto((uint64_t)guest,"bad",3,0,&elsewhere)==-EACCES);release_calls();
+        guest_close((uint64_t)guest);
+    }
+    close(resolver);close(other);memset(&dns_server,0,sizeof(dns_server));
+    puts("PASS a datagram socket, bound or sending, hears only the resolver");
 }
 int main(int argc,char **argv) {
+    if(argc==2 && !strcmp(argv[1],"--resolver")){resolver_only();return 0;}
     if(argc==2 && !strcmp(argv[1],"--meter-final")){meter_final_closes();return 0;}
     if(argc==2 && !strcmp(argv[1],"--budget")){budget_tests();return 0;}
     if(argc==2 && !strcmp(argv[1],"--budget-wait")){budget_wait_tests();return 0;}

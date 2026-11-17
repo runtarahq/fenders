@@ -11,6 +11,7 @@ timeout 15 "$task_build/network-test" --budget
 timeout 15 "$task_build/network-test" --budget-wait
 timeout 15 "$task_build/network-test" --meter
 timeout 60 "$task_build/network-test" --meter-final
+timeout 15 "$task_build/network-test" --resolver
 cc -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
   "$task_root/runtime/native/guest_args_test.c" -o "$task_build/guest-args-test"
 "$task_build/guest-args-test"
