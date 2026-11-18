@@ -62,7 +62,11 @@ a socket directory) needs no `sslmode`.
 
 The management API is `https://HOST:9090/v1`. Every call takes
 `Authorization: Bearer TOKEN`; every change takes an `Idempotency-Key`
-header, and a retry with the same key returns the original result.
+header of 1 to 128 characters, and a retry with the same key returns the
+original result. The same key with other arguments is `409`. Three kinds of
+change do not require the header: the operator's `PATCH` and `PUT` routes,
+which say what is to be (given a key, they honour it); revoking a key; and
+an upload, which is found again by its content.
 
 ## 3. A node
 
@@ -105,6 +109,8 @@ POST /v1/tenants
 {"name": "acme", "allowance": {"cpu_percent": 200, "memory_mib": 1024,
   "storage_bytes": 1073741824, "instances": 2, "transfer_bytes": 1073741824}}
 # -> {"id": "TENANT", …}; a default project is created with it.
+#    Keep the id: a name is a label, and two tenants may share one. Only
+#    the Idempotency-Key tells a retry from a request for another tenant.
 
 GET  /v1/tenants/TENANT/projects            # -> [{"id": "PROJECT", …}]
 POST /v1/tenants/TENANT/projects            {"name": "staging"}

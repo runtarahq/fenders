@@ -1,6 +1,7 @@
 # Fixing the management API's inconsistencies
 
-A plan, not a record: nothing here is done yet. It answers an audit of the
+A plan, and a record of how far it has got: phase 1 is done, the rest is
+not. It answers an audit of the
 management API (the operator's routes and the workspace API) made on
 2026-11-18 by reading `crates/fenders-control-plane` and probing a running
 control plane with no node attached. The node protocol, the run channel and
@@ -29,8 +30,20 @@ Made on 2026-11-18; the phases below are written to them.
 
 ## Phase 1: behaviour that contradicts the documents
 
-No route changes shape. Each item is a fix and a test in
-`tests/cases/customer_api.rs` unless it says otherwise.
+**Done**, one commit an item (three for 1.1), each with its test in
+`tests/cases/customer_api.rs` (1.2 in `workspace_lifecycle.rs`, 1.5 in
+`accounting_retention.rs`). Where what was built differs from what is
+written below:
+
+- 1.1: a retry of `PUT /v1/public-egress-policy` is answered with the
+  policy as it stands, not with a stored copy of the first answer. Schema
+  migration 9 makes a receipt's tenant optional.
+- 1.3: a key that no request could carry is `404`, as a key nothing was made
+  with is. Saying in the contract that the key is percent-encoded waits for
+  3.1, which adds these routes to it.
+- 1.4: the first answer says `"replayed": false` as well.
+
+No route changes shape.
 
 ### 1.1 The operator's changes ignore `Idempotency-Key`
 
