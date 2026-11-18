@@ -579,6 +579,87 @@ async fn a_tenants_keys_are_the_operators_to_issue() {
     l.finish().await;
 }
 
+/// A key carries a label its issuer chose, and every change the key makes
+/// is recorded with it: a product built on the API reads its own users back
+/// out of the audit trail, of which the API knows nothing.
+#[tokio::test]
+async fn a_keys_label_is_recorded_with_what_it_does() {
+    let l = Lab::new().await;
+    let issue = |label: Value| {
+        let (store, operator, tenant) = (l.store.clone(), l.operator.clone(), l.tenant.clone());
+        async move {
+            store
+                .create_api_key(
+                    &operator,
+                    &tenant,
+                    serde_json::from_value(json!({"name":"console","project_id":null,"permissions":["read","secrets:write"],"ttl_seconds":3600,"label":label})).unwrap(),
+                    &uid(),
+                )
+                .await
+        }
+    };
+    let labelled = issue(json!("user:4f2a alice@example.test")).await.unwrap();
+    let plain = issue(Value::Null).await.unwrap();
+    assert_eq!(labelled["label"], "user:4f2a alice@example.test");
+    assert!(plain["label"].is_null());
+    // It is what the key says of itself, and what a listing says of it.
+    let (status, me) = call(&l, s(&labelled["token"]), "GET", "/v1/me", json!({}), "").await;
+    assert_eq!(
+        (status, &me["label"]),
+        (StatusCode::OK, &json!("user:4f2a alice@example.test"))
+    );
+    let listed = l.store.api_keys(&l.operator, &l.tenant).await.unwrap();
+    assert!(
+        listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["label"] == "user:4f2a alice@example.test")
+    );
+    // A change each key makes, and one the operator makes.
+    let path = format!("/v1/tenants/{}/projects/{}/secrets", l.tenant, l.project);
+    for (token, name) in [
+        (s(&labelled["token"]), "by-labelled"),
+        (s(&plain["token"]), "by-plain"),
+        (l.token.as_str(), "by-operator"),
+    ] {
+        let (status, body) = call(
+            &l,
+            token,
+            "POST",
+            &path,
+            json!({"name":name,"value":"a value"}),
+            &uid(),
+        )
+        .await;
+        assert!(status.is_success(), "{name}: {body}");
+    }
+    let recorded: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT actor,actor_label FROM audit WHERE tenant_id=$1 AND action LIKE 'secret.%' ORDER BY sequence",
+    )
+    .bind(&l.tenant)
+    .fetch_all(&l.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded,
+        [
+            (
+                s(&labelled["id"]).to_owned(),
+                Some("user:4f2a alice@example.test".to_owned())
+            ),
+            (s(&plain["id"]).to_owned(), None),
+            (l.operator.id.clone(), None),
+        ]
+    );
+    // One line of at most 128 bytes.
+    for refused in [json!(""), json!("x".repeat(129)), json!("two\nlines")] {
+        assert!(issue(refused.clone()).await.is_err(), "{refused}");
+    }
+    assert!(issue(json!("x".repeat(128))).await.is_ok());
+    l.finish().await;
+}
+
 /// An upload's body may be 16 MiB and is held whole. None of it is read for
 /// a credential that may not upload there, or when it says it is too large.
 #[tokio::test]

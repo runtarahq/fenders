@@ -160,7 +160,7 @@ impl Store {
         }
         Self::reconcile_app_runs(&mut tx).await?;
         let row=one(&mut tx,"SELECT lifecycle_state AS status,lifecycle_revision AS revision FROM tenants WHERE id=$1",args![input.id]).await?;
-        let audit=one(&mut tx,"INSERT INTO audit(tenant_id,actor,action,resource_id,detail) VALUES($1,$2,$3,$1,$4) RETURNING sequence,created",args![input.id,format!("operator:{actor}"),format!("operator.{}",input.action),json!({"reason":input.reason.trim(),"before":before["lifecycle_state"],"after":row["status"],"revision":row["revision"],"request_key":input.request_key})]).await?;
+        let audit=one(&mut tx,"INSERT INTO audit(tenant_id,actor,action,resource_id,detail,actor_label) VALUES($1,$2,$3,$1,$4,(SELECT label FROM credentials WHERE id=$2)) RETURNING sequence,created",args![input.id,format!("operator:{actor}"),format!("operator.{}",input.action),json!({"reason":input.reason.trim(),"before":before["lifecycle_state"],"after":row["status"],"revision":row["revision"],"request_key":input.request_key})]).await?;
         Self::reconcile_workspace_suspensions(&mut tx).await?;
         let row=one(&mut tx,"SELECT lifecycle_state AS status,lifecycle_revision AS revision FROM tenants WHERE id=$1",args![input.id]).await?;
         let result =

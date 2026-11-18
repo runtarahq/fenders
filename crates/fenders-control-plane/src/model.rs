@@ -31,6 +31,10 @@ pub struct Principal {
     pub project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_permissions: Option<Vec<String>>,
+    /// What the key's issuer had recorded with it; written with every
+    /// change the key makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 impl Principal {
     pub fn operator(&self) -> Result<()> {

@@ -319,7 +319,7 @@ impl Store {
             return Err(Error::unauthorized());
         }
         let mut tx = self.transaction(false, false).await?;
-        let row = sqlx::query_scalar::<_, Value>("SELECT jsonb_build_object('id',id,'role',role,'tenant_id',tenant_id,'project_id',project_id,'api_permissions',api_permissions) FROM credentials WHERE token_hash=$1 AND NOT revoked AND expires>now()")
+        let row = sqlx::query_scalar::<_, Value>("SELECT jsonb_build_object('id',id,'role',role,'tenant_id',tenant_id,'project_id',project_id,'api_permissions',api_permissions,'label',label) FROM credentials WHERE token_hash=$1 AND NOT revoked AND expires>now()")
             .bind(digest(token)).fetch_optional(&mut *tx).await?.ok_or_else(Error::unauthorized)?;
         // Metadata only; never persist or log the bearer value. Throttle writes.
         sqlx::query("UPDATE credentials SET last_used=now() WHERE id=$1 AND api_permissions IS NOT NULL AND (last_used IS NULL OR last_used<now()-interval '1 minute')")
@@ -336,7 +336,8 @@ impl Store {
         detail: Value,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO audit (tenant_id,actor,action,resource_id,detail) VALUES ($1,$2,$3,$4,$5)",
+            // With the label of the key that did it, where a key did.
+            "INSERT INTO audit (tenant_id,actor,action,resource_id,detail,actor_label) VALUES ($1,$2,$3,$4,$5,(SELECT label FROM credentials WHERE id=$2))",
         )
         .bind(tenant)
         .bind(&actor.id)

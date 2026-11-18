@@ -102,10 +102,20 @@ pub struct CreateApiKey {
     pub project_id: Option<String>,
     pub permissions: Vec<String>,
     pub ttl_seconds: u32,
+    /// Whatever its issuer wants recorded with what the key does: the user
+    /// of a console it was issued for, a pipeline, a ticket. Opaque here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+/// A label is one line of at most 128 bytes: text to find later, not data.
+fn label_fits(label: &str) -> bool {
+    (1..=128).contains(&label.len()) && !label.chars().any(char::is_control)
 }
 
 pub(crate) const MIGRATION: &str = "
 ALTER TABLE credentials ADD COLUMN IF NOT EXISTS api_permissions jsonb;
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS label text;
+ALTER TABLE audit ADD COLUMN IF NOT EXISTS actor_label text;
 ALTER TABLE credentials ADD COLUMN IF NOT EXISTS created_by text;
 ALTER TABLE credentials ADD COLUMN IF NOT EXISTS prefix text;
 ALTER TABLE credentials ADD COLUMN IF NOT EXISTS last_used timestamptz;
@@ -158,7 +168,7 @@ impl Store {
         p.scope(tenant, None, false, true)?;
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
-        let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'prefix',prefix,'created_by',created_by,'expires',expires,'revoked',revoked,'created',created,'last_used',last_used) FROM credentials WHERE tenant_id=$1 AND api_permissions IS NOT NULL ORDER BY created DESC,id")
+        let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'label',label,'prefix',prefix,'created_by',created_by,'expires',expires,'revoked',revoked,'created',created,'last_used',last_used) FROM credentials WHERE tenant_id=$1 AND api_permissions IS NOT NULL ORDER BY created DESC,id")
             .bind(tenant).fetch_all(&mut *tx).await?;
         Ok(json!({"items":rows}))
     }
@@ -174,6 +184,10 @@ impl Store {
         value.permissions.sort();
         value.permissions.dedup();
         if !(60..=2592000).contains(&value.ttl_seconds)
+            || value
+                .label
+                .as_deref()
+                .is_some_and(|label| !label_fits(label))
             || value.permissions.is_empty()
             || value
                 .permissions
@@ -183,7 +197,7 @@ impl Store {
                 && value.permissions.iter().any(|v| v == "projects:write"))
         {
             return Err(Error::invalid(
-                "invalid API key permissions, project scope or lifetime (maximum 30 days)",
+                "invalid API key permissions, project scope, label or lifetime (maximum 30 days)",
             ));
         }
         let mut tx = self.transaction(true, false).await?;
@@ -206,8 +220,8 @@ impl Store {
         let secret = crate::store::token("fnd_tok_")?;
         let prefix = &secret[..16];
         let role = crate::model::Role::Key.as_str();
-        let row: Value = sqlx::query_scalar("INSERT INTO credentials(id,token_hash,tenant_id,project_id,name,role,expires,api_permissions,created_by,prefix) VALUES($1,$2,$3,$4,$5,$6,now()+make_interval(secs=>$7::double precision),$8,$9,$10) RETURNING jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'prefix',prefix,'expires',expires,'created',created,'created_by',created_by)")
-            .bind(&id).bind(digest(&secret)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(role).bind(value.ttl_seconds as f64).bind(json!(value.permissions)).bind(&p.id).bind(prefix).fetch_one(&mut *tx).await?;
+        let row: Value = sqlx::query_scalar("INSERT INTO credentials(id,token_hash,tenant_id,project_id,name,role,expires,api_permissions,created_by,prefix,label) VALUES($1,$2,$3,$4,$5,$6,now()+make_interval(secs=>$7::double precision),$8,$9,$10,$11) RETURNING jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'prefix',prefix,'expires',expires,'created',created,'created_by',created_by,'label',label)")
+            .bind(&id).bind(digest(&secret)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(role).bind(value.ttl_seconds as f64).bind(json!(value.permissions)).bind(&p.id).bind(prefix).bind(&value.label).fetch_one(&mut *tx).await?;
         save_receipt(&mut tx, tenant, key, &request, &row).await?;
         Self::audit(
             &mut tx,
@@ -215,7 +229,7 @@ impl Store {
             "api-key.create",
             &id,
             tenant,
-            json!({"permissions":value.permissions,"project_id":value.project_id}),
+            json!({"permissions":value.permissions,"project_id":value.project_id,"label":value.label}),
         )
         .await?;
         tx.commit().await?;

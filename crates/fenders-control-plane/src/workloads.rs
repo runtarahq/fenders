@@ -66,7 +66,7 @@ impl Store {
     ) -> Result<()> {
         exec(
             tx,
-            "INSERT INTO audit(actor,action,resource_id,tenant_id,detail) VALUES($1,$2,$3,$4,$5)",
+            "INSERT INTO audit(actor,action,resource_id,tenant_id,detail,actor_label) VALUES($1,$2,$3,$4,$5,(SELECT label FROM credentials WHERE id=$1))",
             args![actor, action, resource, tenant, detail],
         )
         .await?;
