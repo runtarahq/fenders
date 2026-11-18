@@ -1021,6 +1021,27 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body["code"], "rate_limited");
     assert_eq!(body["error"], "too many changes in a minute", "{body}");
+    // It says when to ask again: within the minute the count is kept for.
+    let refused = api::router(l.store.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Idempotency-Key", uid())
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({"name":"x","value":"value"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    let wait: u64 = refused.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&wait), "{wait}");
     assert_eq!(
         call(&l, token, "GET", &path, json!({}), "").await.0,
         StatusCode::OK

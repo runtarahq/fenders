@@ -115,6 +115,19 @@ impl Rates {
         true
     }
 
+    /// How many seconds until `tenant` may be admitted a request again,
+    /// once [`admit`](Self::admit) has refused one: when the oldest second
+    /// still counted leaves the minute. At least one.
+    pub fn retry_after(&self, tenant: &str) -> u64 {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Self::now(&inner);
+        inner
+            .admitted
+            .get(tenant)
+            .and_then(|seconds| seconds.front())
+            .map_or(1, |(second, _)| (second + 60).saturating_sub(now).max(1))
+    }
+
     /// Whether `limit` requests of `tenant` were admitted in the last minute:
     /// what [`admit`](Self::admit) would answer, without admitting one.
     pub fn exhausted(&self, tenant: &str, limit: i64) -> bool {
@@ -602,5 +615,27 @@ impl Store {
         }
         tx.commit().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::Rates;
+
+    #[test]
+    fn a_refused_rate_says_when_its_minute_turns() {
+        let rates = Rates::default();
+        assert!(rates.admit("w", 2));
+        rates.advance(20);
+        assert!(rates.admit("w", 2));
+        assert!(!rates.admit("w", 2));
+        // The first admitted leaves the minute 40 seconds from now.
+        assert_eq!(rates.retry_after("w"), 40);
+        rates.advance(39);
+        assert_eq!(rates.retry_after("w"), 1);
+        rates.advance(1);
+        assert!(rates.admit("w", 2));
+        // Never none: a caller told to wait no time would not wait.
+        assert_eq!(rates.retry_after("nobody"), 1);
     }
 }

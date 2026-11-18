@@ -110,6 +110,15 @@ async fn dispatch(State(state): State<ApiState>, req: Request) -> Result<Respons
             {
                 response.headers_mut().insert(name, value);
             }
+            // A rate that does not say when it turns is one of things in
+            // progress (uploads, lookups): there is room in a moment.
+            if status == StatusCode::TOO_MANY_REQUESTS
+                && !response.headers().contains_key(header::RETRY_AFTER)
+            {
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+            }
             response
         }
     };
@@ -178,6 +187,10 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         return Err(Error::new(
             StatusCode::TOO_MANY_REQUESTS,
             "too many changes in a minute",
+        )
+        .with_header(
+            header::RETRY_AFTER,
+            store.api_rates.retry_after(tenant).to_string(),
         ));
     }
     let key = parts
