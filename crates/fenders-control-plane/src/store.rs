@@ -98,6 +98,19 @@ pub(crate) fn token(prefix: &str) -> Result<String> {
             .collect::<String>()
     ))
 }
+/// A workspace `t` as the API shows it to the operator: what it is called,
+/// what it may use, how it stands, and the revisions the operator's own
+/// changes expect. Not a column more: a column added to the table is not
+/// thereby added to the API.
+pub(crate) const WORKSPACE: &str = "jsonb_build_object('id',t.id,'name',t.name,'cpu_percent',t.cpu_percent,'memory_mib',t.memory_mib,'storage_bytes',t.storage_bytes,'instances',t.instances,'transfer_bytes',t.transfer_bytes,'default_app_size',t.default_app_size,'http_concurrent_requests',t.http_concurrent_requests,'http_requests_per_minute',t.http_requests_per_minute,'lifecycle_state',t.lifecycle_state,'lifecycle_revision',t.lifecycle_revision,'lifecycle_reason',t.lifecycle_reason,'allowance_revision',t.allowance_revision,'created',t.created)";
+/// A project `p`: its name as it was given, and the slug made of it.
+pub(crate) const PROJECT: &str = "jsonb_build_object('id',p.id,'tenant_id',p.tenant_id,'name',p.display_name,'slug',p.slug,'is_default',p.is_default,'created',p.created)";
+/// An artifact `a`.
+pub(crate) const ARTIFACT: &str = "jsonb_build_object('id',a.id,'tenant_id',a.tenant_id,'project_id',a.project_id,'digest',a.digest,'size',a.size,'created',a.created,'last_uploaded_at',a.last_uploaded_at)";
+
+/// The same of a row called `r`, as the list of a project's things has it.
+const ARTIFACT_OF_R: &str = "jsonb_build_object('id',r.id,'tenant_id',r.tenant_id,'project_id',r.project_id,'digest',r.digest,'size',r.size,'created',r.created,'last_uploaded_at',r.last_uploaded_at)";
+
 /// An operation `o` as the API shows it. Stopping an execution that is a
 /// run's is shown as what was asked for: cancelling that run.
 pub(crate) const OPERATION: &str = "jsonb_build_object('id',o.id,'kind',CASE WHEN cancelled.id IS NULL THEN o.kind ELSE 'cancel-run' END,'resource_id',COALESCE(cancelled.id,o.resource_id),'state',o.state,'error',o.error,'created',o.created,'updated',o.updated)";
@@ -377,7 +390,7 @@ impl Store {
             // A workspace's own credentials see its plan and its state, not
             // what the operator wrote of it for itself: the reason it gave
             // for a suspension, and the revisions of its own edits.
-            "SELECT CASE WHEN $1 THEN to_jsonb(t) ELSE to_jsonb(t)-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE $1 OR id=$2 ORDER BY created",
+            &format!("SELECT CASE WHEN $1 THEN {WORKSPACE} ELSE {WORKSPACE}-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE $1 OR id=$2 ORDER BY created"),
         )
         .bind(p.role == Role::Operator)
         .bind(&p.tenant_id)
@@ -444,7 +457,7 @@ impl Store {
         a: &Allowance,
     ) -> Result<(Value, String)> {
         let id = uid();
-        let row = sqlx::query_scalar::<_, Value>("INSERT INTO tenants AS t (id,name,display_name,cpu_percent,memory_mib,storage_bytes,instances,transfer_bytes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_jsonb(t)")
+        let row = sqlx::query_scalar::<_, Value>(&format!("INSERT INTO tenants AS t (id,name,display_name,cpu_percent,memory_mib,storage_bytes,instances,transfer_bytes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING {WORKSPACE}"))
             .bind(&id).bind(name).bind(display_name).bind(a.cpu_percent).bind(a.memory_mib).bind(a.storage_bytes).bind(a.instances).bind(a.transfer_bytes).fetch_one(&mut **tx).await?;
         let project_id = uid();
         sqlx::query("INSERT INTO projects(id,tenant_id,name,display_name,slug,is_default) VALUES ($1,$2,'production','Production','production',true)")
@@ -525,10 +538,12 @@ impl Store {
                 row
             }
             None => {
-                sqlx::query_scalar::<_, Value>("SELECT to_jsonb(t) FROM tenants t WHERE id=$1")
-                    .bind(tenant)
-                    .fetch_one(&mut *tx)
-                    .await?
+                sqlx::query_scalar::<_, Value>(&format!(
+                    "SELECT {WORKSPACE} FROM tenants t WHERE id=$1"
+                ))
+                .bind(tenant)
+                .fetch_one(&mut *tx)
+                .await?
             }
         };
         if let Some(key) = key {
@@ -556,7 +571,7 @@ impl Store {
                 "allowance is below current usage or reservations",
             ));
         }
-        let row = sqlx::query_scalar::<_, Value>("UPDATE tenants AS t SET cpu_percent=$2,memory_mib=$3,storage_bytes=$4,instances=$5,transfer_bytes=$6 WHERE id=$1 RETURNING to_jsonb(t)")
+        let row = sqlx::query_scalar::<_, Value>(&format!("UPDATE tenants AS t SET cpu_percent=$2,memory_mib=$3,storage_bytes=$4,instances=$5,transfer_bytes=$6 WHERE id=$1 RETURNING {WORKSPACE}"))
             .bind(tenant).bind(a.cpu_percent).bind(a.memory_mib).bind(a.storage_bytes).bind(a.instances).bind(a.transfer_bytes).fetch_optional(&mut **tx).await?.ok_or_else(Error::missing)?;
         Ok(row)
     }
@@ -564,7 +579,7 @@ impl Store {
         p.scope(tenant, p.project_id.as_deref(), false, false)?;
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
-        Ok(Value::Array(sqlx::query_scalar::<_, Value>("SELECT to_jsonb(p) FROM projects p WHERE tenant_id=$1 AND ($2::text IS NULL OR id=$2) ORDER BY created")
+        Ok(Value::Array(sqlx::query_scalar::<_, Value>(&format!("SELECT {PROJECT} FROM projects p WHERE tenant_id=$1 AND ($2::text IS NULL OR id=$2) ORDER BY created"))
             .bind(tenant).bind(&p.project_id).fetch_all(&mut *tx).await?))
     }
     pub async fn create_project(&self, p: &Principal, tenant: &str, value: Named) -> Result<Value> {
@@ -590,7 +605,7 @@ impl Store {
         Self::metadata_limit(&mut tx, tenant, "projects", MAX_PROJECTS).await?;
         let id = uid();
         let row = sqlx::query_scalar::<_, Value>(
-            "INSERT INTO projects AS p (id,tenant_id,name,display_name,slug) VALUES ($1,$2,$3,$4,$3) RETURNING to_jsonb(p)",
+            &format!("INSERT INTO projects AS p (id,tenant_id,name,display_name,slug) VALUES ($1,$2,$3,$4,$3) RETURNING {PROJECT}"),
         )
         .bind(&id)
         .bind(tenant)
@@ -684,9 +699,9 @@ impl Store {
         if let Some(row) = &existing
             && row["retired_at"].is_null()
         {
-            let row = sqlx::query_scalar::<_, Value>(
-                "UPDATE artifacts a SET last_uploaded_at=now() WHERE id=$1 RETURNING to_jsonb(a)",
-            )
+            let row = sqlx::query_scalar::<_, Value>(&format!(
+                "UPDATE artifacts a SET last_uploaded_at=now() WHERE id=$1 RETURNING {ARTIFACT}"
+            ))
             .bind(s(&row["id"]))
             .fetch_one(&mut *tx)
             .await?;
@@ -729,7 +744,7 @@ impl Store {
             .map(|v| s(&v["id"]).to_owned())
             .unwrap_or_else(uid);
         let digest = crate::model::digest(data);
-        let row = sqlx::query_scalar::<_, Value>("INSERT INTO artifacts AS a (id,tenant_id,project_id,digest,size) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET retired_at=NULL,last_uploaded_at=now() RETURNING to_jsonb(a)")
+        let row = sqlx::query_scalar::<_, Value>(&format!("INSERT INTO artifacts AS a (id,tenant_id,project_id,digest,size) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET retired_at=NULL,last_uploaded_at=now() RETURNING {ARTIFACT}"))
             .bind(&id).bind(tenant).bind(project).bind(&digest).bind(data.len() as i64).fetch_one(&mut *tx).await?;
         sqlx::query("INSERT INTO artifact_validations(artifact_id,tenant_id,project_id,runtime) VALUES($1,$2,$3,$4) ON CONFLICT(artifact_id) DO UPDATE SET state='pending',inspection=NULL,error=NULL,node_id=NULL,node_boot=NULL,lease_until=NULL,generation=artifact_validations.generation+1,available_at=now(),updated=now()")
             .bind(&id).bind(tenant).bind(project).bind(crate::artifacts::RUNTIME).execute(&mut *tx).await?;
@@ -790,7 +805,7 @@ impl Store {
             return self.operations(p, tenant, project, id).await;
         }
         let (table, projection) = match kind {
-            "artifacts" => ("artifacts", "to_jsonb(r)"),
+            "artifacts" => ("artifacts", ARTIFACT_OF_R),
             "deployments" => ("deployments", "to_jsonb(r)"),
             "executions" => ("executions", "to_jsonb(r)"),
             "operations" => ("operations", "to_jsonb(r)"),

@@ -626,7 +626,7 @@ async fn customer_projects_settings_and_authorization() {
         .filter(|p| p["is_default"] == true)
         .collect();
     assert_eq!(defaults.len(), 1);
-    assert_eq!(defaults[0]["display_name"], "Production");
+    assert_eq!(defaults[0]["name"], "Production");
     assert_eq!(defaults[0]["slug"], "production");
     let input = || serde_json::from_value(json!({"name":"  Staging EU  "})).unwrap();
     let (a, b) = tokio::join!(
@@ -635,7 +635,8 @@ async fn customer_projects_settings_and_authorization() {
     );
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     let created = a.or(b).unwrap();
-    assert_eq!(created["display_name"], "Staging EU");
+    // The name is the one given, trimmed; the slug is made of it.
+    assert_eq!(created["name"], "Staging EU");
     assert_eq!(created["slug"], "staging-eu");
     for duplicate in ["staging eu", "Staging-EU", "PRODUCTION"] {
         assert_eq!(

@@ -378,6 +378,13 @@ pub(crate) fn conforms(method: &str, path: &str, status: StatusCode, body: &Valu
         "request_hash",
         "request_key",
         "target_revision",
+        "singleton",
+        "settings_revision",
+        "display_name",
+        "retired_at",
+        "network_id",
+        "ca_certificate",
+        "network_leases",
         "token_hash",
         "ciphertext",
     ] {

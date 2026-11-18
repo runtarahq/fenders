@@ -72,7 +72,7 @@ WITH scope AS MATERIALIZED (
         sum(octet_length(payload)) FILTER(WHERE received<now()-interval '7 days') expired
     FROM execution_log_records l JOIN scope p ON p.id=l.project_id WHERE l.tenant_id=$1 GROUP BY l.project_id
 )
-SELECT p.id,p.display_name,
+SELECT p.id,p.display_name AS name,
     CASE WHEN u.executions IS NULL THEN 0 ELSE mo.egress_month_bytes END egress_month_bytes,
     COALESCE(mo.egress_month_measured,0) egress_month_measured,COALESCE(mo.egress_month_complete,0) egress_month_complete,
     COALESCE(mo.egress_period_sources,0) egress_period_sources,COALESCE(mo.egress_period_discontinuities,0) egress_period_discontinuities,

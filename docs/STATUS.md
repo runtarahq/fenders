@@ -85,6 +85,15 @@ place. Each breaks a client written against what was there before.
   `cancel-run` whose `resource_id` is the run, not `stop` of an execution.
 - **`workspace_id`, not `tenant_id`,** in every answer that has one,
   `GET /v1/me` among them.
+- **Answers are chosen, not rows.** A workspace, a project, an artifact, a
+  connection, a node and the egress policy are answered with the fields
+  the contract names and no others. Gone with that: `display_name`,
+  `settings_revision`, an artifact's `retired_at`, the policy's
+  `singleton`, and a TCP connection's `network_id`, `database`, secret ids
+  and `ca_certificate`.
+- **A project's `name` is the name it was given.** It was the slug, with the
+  given name in `display_name`. The slug is `slug`. The same in a usage
+  answer's `projects`.
 
 ## Limits
 

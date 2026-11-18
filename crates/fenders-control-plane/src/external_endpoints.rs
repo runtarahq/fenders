@@ -197,9 +197,9 @@ impl Store {
         let mut tx = self.transaction(false, false).await?;
         Self::project(&mut tx, p, tenant, project, false).await?;
         let mut items = sqlx::query_scalar::<_,Value>("SELECT value FROM (
-            SELECT to_jsonb(e)||jsonb_build_object('type','tcp') value,created,id FROM external_endpoints e WHERE tenant_id=$1 AND project_id=$2
+            SELECT jsonb_build_object('id',e.id,'tenant_id',e.tenant_id,'project_id',e.project_id,'type','tcp','name',e.name,'host',e.host,'address',host(e.address),'port',e.port,'deleted',e.deleted,'created',e.created) value,created,id FROM external_endpoints e WHERE tenant_id=$1 AND project_id=$2
             UNION ALL
-            SELECT to_jsonb(e)||jsonb_build_object('type','https') value,created,id FROM external_https_endpoints e WHERE tenant_id=$1 AND project_id=$2
+            SELECT jsonb_build_object('id',e.id,'tenant_id',e.tenant_id,'project_id',e.project_id,'type','https','name',e.name,'origin',e.origin,'deleted',e.deleted,'created',e.created) value,created,id FROM external_https_endpoints e WHERE tenant_id=$1 AND project_id=$2
             ) catalog WHERE ($3::text IS NULL OR id=$3) ORDER BY created DESC LIMIT 1000")
             .bind(tenant).bind(project).bind(id).fetch_all(&mut *tx).await?;
         if id.is_some() {

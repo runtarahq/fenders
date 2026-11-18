@@ -8,6 +8,11 @@ use crate::{
 };
 use axum::http::StatusCode;
 use serde_json::{Value, json};
+/// A node as the API shows it: what it was registered with, what the
+/// operator set, and what it was last seen to be. Columns the control
+/// plane keeps for itself, or once did, are not among them.
+pub(crate) const NODE: &str = "id,name,cert_sha256,endpoint,backend,architecture,runtime,cpu_percent,memory_mib,instances,draining,disabled,egress_budget_launcher,egress_budget_required,retained_egress_launchers,boot_id,last_seen,observed_confinement,observed_egress_budget,observed_launcher_digest,observed_runtime_digest,created";
+
 impl Store {
     pub async fn register_node(&self, p: &Principal, value: Value) -> Result<Value> {
         self.register_node_keyed(p, value, None).await
@@ -95,7 +100,7 @@ impl Store {
         {
             return Ok(row);
         }
-        let row=one(&mut tx,"INSERT INTO nodes(id,name,cert_sha256,endpoint,backend,architecture,runtime,cpu_percent,memory_mib,instances,egress_budget_launcher,egress_budget_required) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",args![uid(),value["name"],pin,endpoint.as_str().trim_end_matches('/'),value["backend"],value["architecture"],value["runtime"],value["cpu_percent"],value["memory_mib"],value["instances"],value["egress_budget_launcher"],budget]).await?;
+        let row=one(&mut tx,&format!("INSERT INTO nodes(id,name,cert_sha256,endpoint,backend,architecture,runtime,cpu_percent,memory_mib,instances,egress_budget_launcher,egress_budget_required) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING {NODE}"),args![uid(),value["name"],pin,endpoint.as_str().trim_end_matches('/'),value["backend"],value["architecture"],value["runtime"],value["cpu_percent"],value["memory_mib"],value["instances"],value["egress_budget_launcher"],budget]).await?;
         Self::audit_system(
             &mut tx,
             &p.id,
@@ -116,7 +121,12 @@ impl Store {
         p.operator()?;
         let mut tx = self.transaction(false, false).await?;
         Ok(json!(
-            rows(&mut tx, "SELECT * FROM nodes ORDER BY created", args![]).await?
+            rows(
+                &mut tx,
+                &format!("SELECT {NODE} FROM nodes ORDER BY created"),
+                args![]
+            )
+            .await?
         ))
     }
     pub async fn node_mode(&self, p: &Principal, node: &str, value: Value) -> Result<Value> {

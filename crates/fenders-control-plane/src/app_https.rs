@@ -48,7 +48,7 @@ impl Store {
     pub async fn public_egress_policy(&self, p: &Principal) -> Result<Value> {
         p.operator()?;
         let mut tx = self.transaction(false, false).await?;
-        let mut row = one(&mut tx,"SELECT p.*,(SELECT count(DISTINCT e.id) FROM executions e JOIN app_execution_https x ON x.execution_id=e.id WHERE e.reserved AND e.desired='stopped') pending_executions FROM public_egress_policy p WHERE singleton",args![]).await?;
+        let mut row = one(&mut tx,"SELECT p.enabled,p.digest,p.revision,p.updated,(SELECT count(DISTINCT e.id) FROM executions e JOIN app_execution_https x ON x.execution_id=e.id WHERE e.reserved AND e.desired='stopped') pending_executions FROM public_egress_policy p WHERE singleton",args![]).await?;
         row["configured_digest"] = self
             .public_egress
             .as_ref()
