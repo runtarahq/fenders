@@ -180,7 +180,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Project"
+                "$ref": "#/components/schemas/ProjectCreate"
               }
             }
           }
@@ -506,7 +506,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/HttpsValidation"
+                "$ref": "#/components/schemas/HttpsValidate"
               }
             }
           }
@@ -560,7 +560,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SchedulePreview"
+                "$ref": "#/components/schemas/SchedulePreviewRequest"
               }
             }
           }
@@ -708,7 +708,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Draft"
+                "$ref": "#/components/schemas/AppCreate"
               }
             }
           }
@@ -780,7 +780,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Deploy"
+                "$ref": "#/components/schemas/AppDeploy"
               }
             }
           }
@@ -897,7 +897,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Lifecycle"
+                "$ref": "#/components/schemas/AppLifecycle"
               }
             }
           }
@@ -1095,7 +1095,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Version"
+                "$ref": "#/components/schemas/VersionCreate"
               }
             }
           }
@@ -1275,7 +1275,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Release"
+                "$ref": "#/components/schemas/ReleaseCreate"
               }
             }
           }
@@ -1468,7 +1468,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Run"
+                "$ref": "#/components/schemas/RunCreate"
               }
             }
           }
@@ -1817,7 +1817,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AppConnections"
+                "$ref": "#/components/schemas/AppConnectionsUpdate"
               }
             }
           }
@@ -2363,7 +2363,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Connection"
+                "$ref": "#/components/schemas/ConnectionCreate"
               }
             }
           }
@@ -2569,7 +2569,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Secret"
+                "$ref": "#/components/schemas/SecretCreate"
               }
             }
           }
@@ -3169,7 +3169,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LifecycleResult"
+                  "$ref": "#/components/schemas/WorkspaceLifecycleResult"
                 }
               }
             }
@@ -3189,7 +3189,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/LifecycleAction"
+                "$ref": "#/components/schemas/WorkspaceLifecycle"
               }
             }
           }
@@ -4081,7 +4081,7 @@
           "next"
         ]
       },
-      "Project": {
+      "ProjectCreate": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4157,7 +4157,7 @@
         },
         "required": []
       },
-      "Schedule": {
+      "ScheduleSelection": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4175,7 +4175,7 @@
           "enabled"
         ]
       },
-      "Triggers": {
+      "TriggerSelection": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4186,7 +4186,7 @@
             "type": "boolean"
           },
           "schedule": {
-            "$ref": "#/components/schemas/Schedule"
+            "$ref": "#/components/schemas/ScheduleSelection"
           }
         },
         "required": [
@@ -4211,7 +4211,7 @@
           "connection_id"
         ]
       },
-      "Draft": {
+      "AppCreate": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4231,7 +4231,7 @@
           "artifact_id"
         ]
       },
-      "Deploy": {
+      "AppDeploy": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4246,7 +4246,7 @@
             "$ref": "#/components/schemas/Configuration"
           },
           "triggers": {
-            "$ref": "#/components/schemas/Triggers"
+            "$ref": "#/components/schemas/TriggerSelection"
           },
           "connections": {
             "type": "array",
@@ -4261,7 +4261,7 @@
           "triggers"
         ]
       },
-      "Lifecycle": {
+      "AppLifecycle": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4282,7 +4282,7 @@
           "expected_revision"
         ]
       },
-      "Version": {
+      "VersionCreate": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4300,7 +4300,7 @@
           "expected_revision"
         ]
       },
-      "Release": {
+      "ReleaseCreate": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4332,7 +4332,7 @@
             "type": "boolean"
           },
           "schedule": {
-            "$ref": "#/components/schemas/Schedule"
+            "$ref": "#/components/schemas/ScheduleSelection"
           },
           "expected_revision": {
             "type": "integer",
@@ -4343,7 +4343,7 @@
           "expected_revision"
         ]
       },
-      "AppConnections": {
+      "AppConnectionsUpdate": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4363,7 +4363,7 @@
           "expected_revision"
         ]
       },
-      "Connection": {
+      "ConnectionCreate": {
         "oneOf": [
           {
             "type": "object",
@@ -4416,7 +4416,7 @@
           }
         ]
       },
-      "Secret": {
+      "SecretCreate": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4434,7 +4434,7 @@
           "value"
         ]
       },
-      "Run": {
+      "RunCreate": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4454,7 +4454,7 @@
         },
         "required": []
       },
-      "HttpsValidation": {
+      "HttpsValidate": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4469,7 +4469,7 @@
           "origins"
         ]
       },
-      "SchedulePreview": {
+      "SchedulePreviewRequest": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4784,7 +4784,7 @@
           "requests_per_minute"
         ]
       },
-      "LifecycleAction": {
+      "WorkspaceLifecycle": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -4819,7 +4819,7 @@
           "expected_revision"
         ]
       },
-      "LifecycleResult": {
+      "WorkspaceLifecycleResult": {
         "type": "object",
         "properties": {
           "id": {
