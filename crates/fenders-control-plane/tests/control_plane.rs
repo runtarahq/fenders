@@ -1,6 +1,8 @@
 //! Real PostgreSQL tests. Node rows below are protocol fixtures, not VMs.
 #[path = "cases/component_diagnostics.rs"]
 mod component_diagnostics;
+#[path = "cases/contract.rs"]
+mod contract;
 #[path = "cases/customer_api.rs"]
 mod customer_api;
 use axum::{
