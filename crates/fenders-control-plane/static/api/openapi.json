@@ -2940,6 +2940,42 @@
       }
     },
     "/workspaces/{workspace}": {
+      "get": {
+        "operationId": "get__workspaces_workspace",
+        "summary": "Read a workspace",
+        "description": "Any workspace to the operator; to a key, its own. Required permission: read.",
+        "tags": [
+          "workspace"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Workspace"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The workspace.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        }
+      },
       "patch": {
         "operationId": "patch__workspaces_workspace",
         "summary": "Change what a workspace is allowed",

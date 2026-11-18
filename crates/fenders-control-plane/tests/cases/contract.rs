@@ -626,6 +626,8 @@ async fn every_operation_answers_as_the_contract_says() {
     t.ok(&operator, "GET", "/v1/me", None).await;
     t.ok(&key, "GET", "/v1/workspaces", None).await;
     t.ok(&operator, "GET", "/v1/workspaces", None).await;
+    t.ok(&key, "GET", &w, None).await;
+    t.ok(&operator, "GET", &w, None).await;
     t.ok(&key, "GET", &format!("{w}/projects"), None).await;
     t.ok(
         &key,

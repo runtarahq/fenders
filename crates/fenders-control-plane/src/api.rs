@@ -422,6 +422,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         ("GET", ["v1", "me"]) => serde_json::to_value(&p).map_err(|_| Error::internal())?,
         ("GET", ["v1", "control-plane", "status"]) => store.background_status(&p)?,
         ("GET", ["v1", "workspaces"]) => store.workspaces(&p, list_page(&parts.uri)?).await?,
+        ("GET", ["v1", "workspaces", tenant]) => store.workspace(&p, tenant).await?,
         ("GET", ["v1", "nodes"]) => store.node_page(&p, list_page(&parts.uri)?).await?,
         ("GET", ["v1", "public-egress-policy"]) => store.public_egress_policy(&p).await?,
         ("PUT", ["v1", "public-egress-policy"]) => {

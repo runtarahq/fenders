@@ -2694,3 +2694,72 @@ async fn whether_it_is_up_and_can_serve_is_asked_without_a_credential() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn a_workspace_is_read_by_itself() {
+    let l = Lab::new().await;
+    let route = format!("/v1/workspaces/{}", l.tenant);
+    let (status, mine) = call(&l, &l.token, "GET", &route, json!({}), "").await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["id"], l.tenant);
+    assert_eq!(mine["name"], "alpha");
+    assert_eq!(mine["lifecycle_revision"], 1);
+    // It is the workspace the list has.
+    let (_, listed) = call(&l, &l.token, "GET", "/v1/workspaces", json!({}), "").await;
+    assert_eq!(listed["items"][0], mine);
+    // A key reads its own, without what is the operator's; one of a
+    // project reads the workspace its project is of.
+    for scope in [None, Some(l.project.as_str())] {
+        let k = key(&l, scope, &["read"]).await;
+        let (status, read) = call(&l, s(&k["token"]), "GET", &route, json!({}), "").await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["id"], l.tenant);
+        assert_eq!(read["instances"], mine["instances"]);
+        for operators in [
+            "lifecycle_revision",
+            "lifecycle_reason",
+            "allowance_revision",
+        ] {
+            assert!(read.get(operators).is_none(), "{operators}");
+        }
+    }
+    // Another's, and one that is none, do not exist to it or to anyone.
+    let other = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/workspaces",
+        json!({"name":"other","allowance":{"cpu_percent":100,"memory_mib":512,"storage_bytes":1048576,"instances":1,"transfer_bytes":1048576}}),
+        "other",
+    )
+    .await;
+    let k = key(&l, None, &["read"]).await;
+    for (token, id, expected) in [
+        (
+            s(&k["token"]),
+            s(&other.1["id"]).to_owned(),
+            StatusCode::NOT_FOUND,
+        ),
+        (s(&k["token"]), uid(), StatusCode::NOT_FOUND),
+        (l.token.as_str(), uid(), StatusCode::NOT_FOUND),
+        (l.token.as_str(), "abc".to_owned(), StatusCode::NOT_FOUND),
+        (
+            l.token.as_str(),
+            s(&other.1["id"]).to_owned(),
+            StatusCode::OK,
+        ),
+    ] {
+        let status = call(
+            &l,
+            token,
+            "GET",
+            &format!("/v1/workspaces/{id}"),
+            json!({}),
+            "",
+        )
+        .await
+        .0;
+        assert_eq!(status, expected, "{id}");
+    }
+    l.finish().await;
+}

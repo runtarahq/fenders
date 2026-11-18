@@ -458,6 +458,18 @@ impl Store {
     pub async fn tenants(&self, p: &Principal) -> Result<Value> {
         Ok(self.workspaces(p, ListPage::whole()).await?["items"].take())
     }
+    /// One workspace: any to the operator, and a key its own.
+    pub async fn workspace(&self, p: &Principal, tenant: &str) -> Result<Value> {
+        p.scope(tenant, p.project_id.as_deref(), false, false)?;
+        let mut tx = self.transaction(false, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        sqlx::query_scalar::<_, Value>(&format!("SELECT CASE WHEN $1 THEN {WORKSPACE} ELSE {WORKSPACE}-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE t.id=$2"))
+            .bind(p.role == Role::Operator)
+            .bind(tenant)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(Error::missing)
+    }
     /// A page of the workspaces a credential may see: all of them to the
     /// operator, and a key its own.
     pub async fn workspaces(&self, p: &Principal, page: ListPage) -> Result<Value> {
