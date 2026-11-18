@@ -3,8 +3,8 @@
 use super::*;
 use http_body_util::{BodyExt, Full};
 use wasmtime_wasi::{WasiCtxBuilder, p2::pipe::MemoryOutputPipe};
-const COMMAND: &[u8] = include_bytes!("../../fenders-control-plane/demos/hello-command-v1.wasm");
-const HTTP: &[u8] = include_bytes!("../../fenders-control-plane/demos/hello-http-v1.wasm");
+const COMMAND: &[u8] = include_bytes!("../fixtures/hello-command-v1.wasm");
+const HTTP: &[u8] = include_bytes!("../fixtures/hello-http-v1.wasm");
 fn store(engine: &Engine) -> (wasmtime::Store<Host>, MemoryOutputPipe) {
     let stdout = MemoryOutputPipe::new(4096);
     let host = Host {
