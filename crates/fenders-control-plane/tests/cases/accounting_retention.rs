@@ -172,7 +172,10 @@ async fn monthly_history_is_scoped_paginated_and_keeps_observations_separate_fro
         .unwrap();
     assert_eq!(first["items"][0]["accounted_bytes"], 600);
     assert_eq!(first["items"][0]["observed_outbound_bytes"], 100);
-    assert!(first["next_before"].is_string());
+    // The cursor is `next`, as in every page the contract describes; it is
+    // still given as `next_before` too, as it was.
+    assert!(first["next"].is_string());
+    assert_eq!(first["next"], first["next_before"]);
     assert!(
         l.store
             .usage_history(&viewer, &l.tenant, None, Default::default())
@@ -219,13 +222,14 @@ async fn monthly_history_is_scoped_paginated_and_keeps_observations_separate_fro
             &l.tenant,
             Some(&l.project),
             HistoryPage {
-                before: first["next_before"].as_str().map(str::to_owned),
+                before: first["next"].as_str().map(str::to_owned),
                 limit: Some(60),
             },
         )
         .await
         .unwrap();
     assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert!(page["next"].is_null());
     assert!(page["next_before"].is_null());
     let workspace = history(&l, None).await;
     let project = history(&l, Some(&l.project)).await;
