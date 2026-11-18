@@ -3651,7 +3651,8 @@
               "already_exists",
               "not_validated",
               "workspace_suspended",
-              "permission_denied"
+              "permission_denied",
+              "quota_exhausted"
             ]
           },
           "request_id": {

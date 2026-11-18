@@ -143,7 +143,13 @@ impl ExternalNetworkPolicy {
         static LOOKUPS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
         let lookup = LOOKUPS
             .try_acquire()
-            .map_err(|_| quota("too many endpoint lookups in progress"))?;
+            // A rate, not an allowance: there is room again in a moment.
+            .map_err(|_| {
+                Error::new(
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "too many endpoint lookups in progress",
+                )
+            })?;
         // The lookup keeps its place until it has an answer, though the
         // caller stops waiting after five seconds.
         let name = format!("{host}.");

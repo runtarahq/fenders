@@ -690,10 +690,7 @@ impl Store {
         let fits: bool = sqlx::query_scalar("SELECT storage_bytes >= $2+(SELECT COALESCE(sum(bytes),0) FROM storage_reservations WHERE tenant_id=$1) FROM tenants WHERE id=$1")
             .bind(tenant).bind(data.len() as i64).fetch_one(&mut *tx).await?;
         if !fits {
-            return Err(Error::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "tenant storage allowance exhausted",
-            ));
+            return Err(crate::db::quota("tenant storage allowance exhausted"));
         }
         // Durable bytes precede the metadata commit. Failed transactions can leave an
         // unreferenced blob, but never a database record pointing to incomplete bytes.

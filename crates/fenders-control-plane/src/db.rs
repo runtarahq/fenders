@@ -78,9 +78,17 @@ pub async fn exec(tx: &mut Tx, sql: &str, args: &[Value]) -> Result<u64> {
 pub fn conflict(message: &'static str) -> Error {
     Error::new(axum::http::StatusCode::CONFLICT, message)
 }
+/// A refusal for want of allowance, or at a limit on what a workspace may
+/// have: not a rate, so waiting does not cure it.
+///
+/// Within the control plane it keeps the status it has always had, which
+/// the scheduler, the gateway and the run channel tell it by, and which the
+/// gateway and the run channel answer with. The management API answers it
+/// `409` ([`QUOTA`] is how it knows one).
 pub fn quota(message: &'static str) -> Error {
-    Error::new(axum::http::StatusCode::TOO_MANY_REQUESTS, message)
+    Error::new(axum::http::StatusCode::TOO_MANY_REQUESTS, message).coded(QUOTA)
 }
+pub const QUOTA: &str = "quota_exhausted";
 #[macro_export]
 macro_rules! args { ($($value:expr),* $(,)?) => { &[$(serde_json::json!($value)),*] }; }
 

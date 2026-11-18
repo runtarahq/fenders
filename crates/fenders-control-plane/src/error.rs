@@ -28,6 +28,7 @@ pub const REASONS: &[&str] = &[
     "not_validated",
     "workspace_suspended",
     "permission_denied",
+    "quota_exhausted",
 ];
 
 impl Error {

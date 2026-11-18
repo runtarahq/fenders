@@ -93,8 +93,15 @@ async fn dispatch(State(state): State<ApiState>, req: Request) -> Result<Respons
     let mut response = match dispatch_inner(State(state), req).await {
         Ok(response) => response,
         Err(error) => {
+            // Out of allowance is not too many requests: nothing is cured
+            // by asking again later, so it is not answered as a rate is.
+            let status = if error.code() == crate::db::QUOTA {
+                StatusCode::CONFLICT
+            } else {
+                error.status
+            };
             let mut response = (
-                error.status,
+                status,
                 Json(json!({"error":error.message,"code":error.code(),"request_id":request_id})),
             )
                 .into_response();

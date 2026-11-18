@@ -991,7 +991,7 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
     // Changes in a minute: refused or not, each one counts, and reads do not.
     let path = format!("/v1/tenants/{}/projects/{}/secrets", l.tenant, l.project);
     let token = s(&editor["token"]);
-    let mut last = StatusCode::OK;
+    let mut last = (StatusCode::OK, json!({}));
     for _ in 0..600 {
         last = call(
             &l,
@@ -1002,10 +1002,13 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
             // A key names each change it asks for.
             &uid(),
         )
-        .await
-        .0;
+        .await;
     }
-    assert_eq!(last, quota, "the row limit, not yet the rate");
+    // The row limit, not yet the rate: over the API a limit reached is a
+    // conflict with what the workspace has, which waiting does not cure.
+    assert_eq!(last.0, StatusCode::CONFLICT, "{}", last.1);
+    assert_eq!(last.1["code"], "quota_exhausted");
+    assert_eq!(last.1["error"], "workspace metadata limit exhausted");
     let (status, body) = call(
         &l,
         token,
@@ -1015,7 +1018,8 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
         &uid(),
     )
     .await;
-    assert_eq!(status, quota);
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["code"], "rate_limited");
     assert_eq!(body["error"], "too many changes in a minute", "{body}");
     assert_eq!(
         call(&l, token, "GET", &path, json!({}), "").await.0,
@@ -1607,5 +1611,50 @@ async fn a_refusals_code_says_why_where_the_status_does_not() {
         .await,
         (StatusCode::NOT_FOUND, "not_found".into())
     );
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn an_exhausted_allowance_is_a_conflict_and_not_a_rate() {
+    let l = Lab::new().await;
+    let k = key(&l, Some(&l.project), &["read", "apps:write"]).await;
+    // Room for what the lab uploaded and nothing more.
+    sqlx::query("UPDATE tenants SET storage_bytes=1024 WHERE id=$1")
+        .bind(&l.tenant)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let mut component = b"\0asm\x0d\0\x01\0".to_vec();
+    component.resize(2048, 0);
+    let response = api::router(l.store.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/workspaces/{}/projects/{}/artifacts",
+                    l.tenant, l.project
+                ))
+                .header("Authorization", format!("Bearer {}", s(&k["token"])))
+                .header("Content-Type", "application/wasm")
+                .body(Body::from(component.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(response.headers().get("retry-after").is_none());
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+    assert_eq!(body["code"], "quota_exhausted", "{body}");
+    assert_eq!(body["error"], "tenant storage allowance exhausted");
+    // Inside the control plane it is still told by the status it had,
+    // which the scheduler and the gateway go by.
+    let refused = l
+        .store
+        .upload(&l.operator, &l.tenant, &l.project, &component)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(refused.code(), "quota_exhausted");
     l.finish().await;
 }
