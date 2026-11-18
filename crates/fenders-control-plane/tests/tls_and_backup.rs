@@ -1675,12 +1675,7 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
         2
     );
     let viewer = store
-        .issue_credential(
-            &operator,
-            tenant,
-            serde_json::from_value(json!({"name":"viewer","role":"viewer","project_id":project}))
-                .unwrap(),
-        )
+        .create_api_key(&operator, tenant, serde_json::from_value(json!({"name":"viewer","project_id":project,"permissions":["read"],"ttl_seconds":86400})).unwrap(), &uid())
         .await
         .unwrap();
     let management = api::management(api::ApiState {

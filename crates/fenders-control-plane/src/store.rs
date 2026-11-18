@@ -107,11 +107,6 @@ pub(crate) const MAX_SECRETS: i64 = 4096;
 pub(crate) const MAX_APPS: i64 = 4096;
 pub(crate) const MAX_CREDENTIALS: i64 = 1024;
 
-/// When a credential issued now expires: after `$7` seconds, and no later
-/// than the tenant credential `$8` that issues it, if it is one (an operator
-/// or a browser session is not).
-pub(crate) const ISSUED_EXPIRY: &str = "LEAST(now()+make_interval(secs=>$7::double precision),COALESCE((SELECT expires FROM credentials WHERE id=$8 AND tenant_id IS NOT NULL),'infinity'::timestamptz))";
-
 /// A cipher for one `purpose`, under a key derived from the encryption key
 /// `key`: what it encrypts is nothing to the encryption key's own cipher or
 /// to another purpose's, and the reverse.
@@ -513,56 +508,6 @@ impl Store {
         tx.commit().await?;
         Ok(row)
     }
-    pub async fn credentials(&self, p: &Principal, tenant: &str) -> Result<Value> {
-        p.scope(tenant, None, false, true)?;
-        let mut tx = self.transaction(false, false).await?;
-        Self::live_principal(&mut tx, p).await?;
-        Ok(Value::Array(sqlx::query_scalar::<_, Value>("SELECT jsonb_build_object('id',id,'name',name,'role',role,'project_id',project_id,'expires',expires,'revoked',revoked,'created',created) FROM credentials WHERE tenant_id=$1 ORDER BY created DESC")
-            .bind(tenant).fetch_all(&mut *tx).await?))
-    }
-    pub async fn issue_credential(
-        &self,
-        p: &Principal,
-        tenant: &str,
-        value: IssueCredential,
-    ) -> Result<Value> {
-        p.scope(tenant, None, false, true)?;
-        name(&value.name)?;
-        if value.role == Role::Operator
-            || value.role == Role::Owner && value.project_id.is_some()
-            || !(60..=2592000).contains(&value.ttl_seconds)
-        {
-            return Err(Error::invalid(
-                "invalid tenant role, project scope or credential lifetime",
-            ));
-        }
-        let mut tx = self.transaction(true, false).await?;
-        Self::live_principal(&mut tx, p).await?;
-        if let Some(project) = &value.project_id {
-            Self::project(&mut tx, p, tenant, project, false).await?;
-        }
-        Self::metadata_limit(&mut tx, tenant, "credentials", MAX_CREDENTIALS).await?;
-        let id = uid();
-        let token = token("fnd_tok_")?;
-        // Who issued it is recorded, so that it ends with its issuer; and one
-        // issued with a tenant credential lives no longer than that does, so a
-        // credential cannot renew itself past the lifetime it was given.
-        let row = sqlx::query_scalar::<_, Value>(&format!("INSERT INTO credentials (id,token_hash,tenant_id,project_id,name,role,expires,created_by) VALUES ($1,$2,$3,$4,$5,$6,{ISSUED_EXPIRY},$8) RETURNING jsonb_build_object('id',id,'role',role,'expires',expires)"))
-            .bind(&id).bind(digest(&token)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(value.role.as_str()).bind(value.ttl_seconds as f64).bind(&p.id).fetch_one(&mut *tx).await?;
-        Self::audit(
-            &mut tx,
-            p,
-            "credential.issue",
-            &id,
-            tenant,
-            json!({"role": value.role, "project_id": value.project_id}),
-        )
-        .await?;
-        tx.commit().await?;
-        let mut row = row;
-        row["token"] = json!(token);
-        Ok(row)
-    }
     pub async fn revoke_credential(
         &self,
         p: &Principal,
@@ -593,13 +538,8 @@ impl Store {
     ) -> Result<Value> {
         let row = sqlx::query_scalar::<_, Value>("UPDATE credentials SET revoked=true WHERE tenant_id=$1 AND id=$2 RETURNING jsonb_build_object('id',id)")
             .bind(tenant).bind(credential).fetch_optional(&mut **tx).await?.ok_or_else(Error::missing)?;
-        // And every credential issued with it, or with one of those.
-        Self::revoke_issued_by(tx, Some(tenant), credential).await?;
         Ok(row)
     }
-    /// Forgets the identity provider's metadata and keys, so that the next
-    /// sign-in fetches them. Public for tests, which change what their
-    /// provider serves between requests.
     #[doc(hidden)]
     /// Refuses another row of `table` for `tenant` once it has `limit`.
     ///
@@ -626,17 +566,6 @@ impl Store {
             return Err(crate::db::quota("workspace metadata limit exhausted"));
         }
         Ok(())
-    }
-    /// Revokes the credentials `issuer` (a credential, or a customer user)
-    /// issued, and those issued with them in turn: in `tenant`, or in every
-    /// tenant. How many it revoked.
-    pub(crate) async fn revoke_issued_by(
-        tx: &mut Tx,
-        tenant: Option<&str>,
-        issuer: &str,
-    ) -> Result<u64> {
-        Ok(sqlx::query("WITH RECURSIVE issued AS (SELECT id FROM credentials WHERE created_by=$1 AND tenant_id IS NOT NULL AND ($2::text IS NULL OR tenant_id=$2) UNION SELECT c.id FROM credentials c JOIN issued i ON c.created_by=i.id WHERE c.tenant_id IS NOT NULL) UPDATE credentials SET revoked=true WHERE NOT revoked AND id IN (SELECT id FROM issued)")
-            .bind(issuer).bind(tenant).execute(&mut **tx).await?.rows_affected())
     }
     pub async fn upload(
         &self,

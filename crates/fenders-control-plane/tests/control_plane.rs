@@ -145,14 +145,29 @@ impl Lab {
             .unwrap();
         self.admin.close().await;
     }
+    /// A key for the lab's tenant, named as tests have always asked for
+    /// one: a "viewer" reads, anything else also changes what its scope
+    /// lets it. There are no roles; these are permissions.
     async fn credential(&self, role: &str, project: Option<&str>) -> (Principal, Value) {
+        let mut permissions = vec!["read"];
+        if role != "viewer" {
+            permissions.extend([
+                "apps:write",
+                "runs:write",
+                "connections:write",
+                "secrets:write",
+            ]);
+            if project.is_none() {
+                permissions.push("projects:write");
+            }
+        }
         let v = self
             .store
-            .issue_credential(
+            .create_api_key(
                 &self.operator,
                 &self.tenant,
-                serde_json::from_value(json!({"name":"test","role":role,"project_id":project}))
-                    .unwrap(),
+                serde_json::from_value(json!({"name":"test","project_id":project,"permissions":permissions,"ttl_seconds":86400})).unwrap(),
+                &uid(),
             )
             .await
             .unwrap();
@@ -227,7 +242,7 @@ async fn tenant_credentials_roles_and_http_boundaries() {
         l.store.projects(&viewer, &uid()).await.unwrap_err().status,
         StatusCode::NOT_FOUND
     );
-    assert!(l.store.credentials(&viewer, &l.tenant).await.is_err());
+    assert!(l.store.api_keys(&viewer, &l.tenant).await.is_err());
     let app = api::router(l.store.clone());
     let response = app
         .clone()
@@ -707,7 +722,8 @@ async fn ingress_budget_and_recovery_barrier() {
 #[tokio::test]
 async fn customer_projects_settings_and_authorization() {
     let l = Lab::new().await;
-    let (owner, owner_token) = l.credential("owner", None).await;
+    // Every permission a key can hold, over the whole workspace.
+    let (owner, _) = l.credential("owner", None).await;
     let (editor, _) = l.credential("editor", None).await;
     let (viewer, _) = l.credential("viewer", None).await;
     let (scoped, _) = l.credential("editor", Some(&l.project)).await;
@@ -802,12 +818,12 @@ async fn customer_projects_settings_and_authorization() {
         StatusCode::NOT_FOUND
     );
     let response=api::router(l.store.clone()).oneshot(Request::builder().method("PATCH").uri(format!("/v1/tenants/{}/settings",l.tenant))
-        .header("Authorization",format!("Bearer {}",s(&owner_token["token"]))).header("content-type","application/json")
+        .header("Authorization",format!("Bearer {}",l.token)).header("content-type","application/json")
         .body(Body::from(json!({"display_name":" Acme Studio ","default_app_size":"medium","expected_revision":1}).to_string())).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         l.store
-            .update_workspace_settings(&owner, &l.tenant, settings())
+            .update_workspace_settings(&l.operator, &l.tenant, settings())
             .await
             .unwrap_err()
             .status,
@@ -857,7 +873,7 @@ async fn customer_projects_settings_and_authorization() {
     );
     assert_eq!(
         l.store
-            .update_workspace_settings(&owner, &l.tenant, settings())
+            .update_workspace_settings(&l.operator, &l.tenant, settings())
             .await
             .unwrap_err()
             .status,

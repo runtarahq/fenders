@@ -62,9 +62,13 @@ pub fn permission(method: &str, path: &[&str]) -> Option<&'static str> {
                 | ["apps", "deploy"]
                 | ["apps", _, "versions" | "releases"],
             )
-            | ("PATCH", ["apps", _])
+            | ("PATCH" | "DELETE", ["apps", _])
             | ("PUT", ["apps", _, "triggers" | "connections"]) => Some("apps:write"),
-            ("POST", ["apps", _, "runs"]) => Some("runs:write"),
+            // A sample request is one made of the app, as a run is.
+            ("POST", ["apps", _, "runs" | "http-sample"]) => Some("runs:write"),
+            // What became of a request a key made: its own to read.
+            ("GET", ["app-submissions" | "endpoint-submissions", _])
+            | ("GET", ["apps", _, "submissions", _]) => Some("read"),
             ("POST", ["schedules", "preview"] | ["https-access", "validate"]) => Some("read"),
             ("POST", ["external-endpoints"]) | ("DELETE", ["external-endpoints", _]) => {
                 Some("connections:write")
@@ -201,12 +205,8 @@ impl Store {
         let id = uid();
         let secret = crate::store::token("fnd_tok_")?;
         let prefix = &secret[..16];
-        let role = if value.permissions.iter().any(|v| v.ends_with(":write")) {
-            "editor"
-        } else {
-            "viewer"
-        };
-        let row: Value = sqlx::query_scalar("INSERT INTO credentials(id,token_hash,tenant_id,project_id,name,role,expires,api_permissions,created_by,prefix) VALUES($1,$2,$3,$4,$5,$6,LEAST(now()+make_interval(secs=>$7::double precision),COALESCE((SELECT expires FROM credentials WHERE id=$9 AND tenant_id IS NOT NULL),'infinity'::timestamptz)),$8,$9,$10) RETURNING jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'prefix',prefix,'expires',expires,'created',created,'created_by',created_by)")
+        let role = crate::model::Role::Key.as_str();
+        let row: Value = sqlx::query_scalar("INSERT INTO credentials(id,token_hash,tenant_id,project_id,name,role,expires,api_permissions,created_by,prefix) VALUES($1,$2,$3,$4,$5,$6,now()+make_interval(secs=>$7::double precision),$8,$9,$10) RETURNING jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'prefix',prefix,'expires',expires,'created',created,'created_by',created_by)")
             .bind(&id).bind(digest(&secret)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(role).bind(value.ttl_seconds as f64).bind(json!(value.permissions)).bind(&p.id).bind(prefix).fetch_one(&mut *tx).await?;
         save_receipt(&mut tx, tenant, key, &request, &row).await?;
         Self::audit(
@@ -239,9 +239,6 @@ mod tests {
             }
             if segments.get(5) == Some(&"connections") {
                 segments[5] = "external-endpoints";
-            }
-            if segments.get(3) == Some(&"api-keys") {
-                continue;
             }
             for method in methods.as_object().unwrap().keys() {
                 assert!(

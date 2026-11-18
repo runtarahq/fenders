@@ -120,14 +120,7 @@ impl Suspension {
         let project = s(&project["id"]).to_owned();
         let credential = l
             .store
-            .issue_credential(
-                &l.operator,
-                &tenant,
-                serde_json::from_value(
-                    json!({"name":"suspension-customer","role":"editor","project_id":project}),
-                )
-                .unwrap(),
-            )
+            .create_api_key(&l.operator, &tenant, serde_json::from_value(json!({"name":"suspension-customer","project_id":project,"permissions":["read","apps:write","runs:write","connections:write","secrets:write"],"ttl_seconds":86400})).unwrap(), &uid())
             .await
             .unwrap();
         let principal = l.store.authenticate(s(&credential["token"])).await.unwrap();

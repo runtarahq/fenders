@@ -106,13 +106,7 @@ impl Limits {
         let beta_size = assert_named_spec(&beta_config["spec"], http_size);
         let key = l
             .store
-            .issue_credential(
-                &l.operator,
-                s(&scope["tenant"]),
-                serde_json::from_value(json!({
-            "name":"upgrade-quota-check","role":"editor","project_id":scope["project"]}))
-                .unwrap(),
-            )
+            .create_api_key(&l.operator, s(&scope["tenant"]), serde_json::from_value(json!({"name":"upgrade-quota-check","project_id":scope["project"],"permissions":["read","apps:write","runs:write","connections:write","secrets:write"],"ttl_seconds":86400})).unwrap(), &uid())
             .await
             .unwrap();
         let beta = l.store.authenticate(s(&key["token"])).await.unwrap();

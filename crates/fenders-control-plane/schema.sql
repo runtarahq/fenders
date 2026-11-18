@@ -1041,7 +1041,7 @@ CREATE TABLE credentials (
     revoked boolean DEFAULT false NOT NULL,
     created timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT credentials_check CHECK (((role = 'operator'::text) = (tenant_id IS NULL))),
-    CONSTRAINT credentials_role_check CHECK ((role = ANY (ARRAY['operator'::text, 'owner'::text, 'editor'::text, 'viewer'::text])))
+    CONSTRAINT credentials_role_check CHECK ((role = ANY (ARRAY['operator'::text, 'key'::text])))
 );
 
 CREATE TABLE deployments (

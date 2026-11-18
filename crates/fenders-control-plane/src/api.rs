@@ -119,11 +119,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         if segments.get(3) == Some(&"projects") && segments.get(5) == Some(&"connections") {
             segments[5] = "external-endpoints";
         }
-        let key_management = matches!(
-            segments.as_slice(),
-            ["v1", "tenants", _, "api-keys"] | ["v1", "tenants", _, "api-keys", _]
-        );
-        if !key_management && crate::customer_api::permission(method, &segments).is_none() {
+        if crate::customer_api::permission(method, &segments).is_none() {
             return Err(Error::missing());
         }
     }
@@ -301,14 +297,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .await?
         }
         ("DELETE", ["v1", "tenants", tenant, "api-keys", id]) => {
-            store.revoke_credential(&p, tenant, id).await?
-        }
-        ("GET", ["v1", "tenants", tenant, "credentials"]) => store.credentials(&p, tenant).await?,
-        ("POST", ["v1", "tenants", tenant, "credentials"]) => {
-            status = StatusCode::CREATED;
-            store.issue_credential(&p, tenant, parse(&bytes)?).await?
-        }
-        ("DELETE", ["v1", "tenants", tenant, "credentials", id]) => {
             store.revoke_credential(&p, tenant, id).await?
         }
         ("GET", ["v1", "tenants", tenant, "usage", "history"]) => {

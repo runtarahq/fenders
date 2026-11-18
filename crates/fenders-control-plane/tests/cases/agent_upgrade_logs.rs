@@ -232,13 +232,7 @@ impl View {
     async fn new(l: &Lab, tenant: &str, project: &str, source: &'static str) -> Self {
         let key = l
             .store
-            .issue_credential(
-                &l.operator,
-                tenant,
-                serde_json::from_value(json!({
-            "name":"upgrade-log-reader","role":"viewer","project_id":project}))
-                .unwrap(),
-            )
+            .create_api_key(&l.operator, tenant, serde_json::from_value(json!({"name":"upgrade-log-reader","project_id":project,"permissions":["read"],"ttl_seconds":86400})).unwrap(), &uid())
             .await
             .unwrap();
         Self {

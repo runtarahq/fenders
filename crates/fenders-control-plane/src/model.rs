@@ -4,21 +4,22 @@ use serde::{Deserialize, Serialize};
 // Node-shared identities, digests and limits live in the protocol crate.
 pub use fenders_node_protocol::model::*;
 
+/// Whose a credential is. The operator's creates tenants and their keys; a
+/// tenant's key does what its permissions say, within its tenant and, when
+/// it names one, its project. There are no other kinds: who a person is and
+/// what role they hold is the business of whatever is built on this API,
+/// which issues keys with the permissions it has decided on.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Operator,
-    Owner,
-    Editor,
-    Viewer,
+    Key,
 }
 impl Role {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Operator => "operator",
-            Self::Owner => "owner",
-            Self::Editor => "editor",
-            Self::Viewer => "viewer",
+            Self::Key => "key",
         }
     }
 }
@@ -43,7 +44,7 @@ impl Principal {
         tenant: &str,
         project: Option<&str>,
         write: bool,
-        owner: bool,
+        operator: bool,
     ) -> Result<()> {
         identity(tenant)?;
         if let Some(project) = project {
@@ -57,10 +58,18 @@ impl Principal {
         {
             return Err(Error::missing());
         }
-        if owner && (self.role != Role::Owner || self.project_id.is_some()) {
-            return Err(Error::new(StatusCode::FORBIDDEN, "tenant owner required"));
+        // What is the operator's alone: a tenant's keys and its settings.
+        if operator {
+            return Err(Error::new(StatusCode::FORBIDDEN, "operator required"));
         }
-        if write && self.role == Role::Viewer {
+        // Beside the table of what each route takes (customer_api): a key
+        // that may change nothing changes nothing, however it is asked.
+        if write
+            && !self
+                .api_permissions
+                .as_ref()
+                .is_some_and(|held| held.iter().any(|v| v.ends_with(":write")))
+        {
             return Err(Error::new(StatusCode::FORBIDDEN, "read-only credential"));
         }
         Ok(())
@@ -104,16 +113,4 @@ pub struct UpdateAllowance {
 #[serde(deny_unknown_fields)]
 pub struct Named {
     pub name: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IssueCredential {
-    pub name: String,
-    pub role: Role,
-    pub project_id: Option<String>,
-    #[serde(default = "default_ttl")]
-    pub ttl_seconds: i64,
-}
-fn default_ttl() -> i64 {
-    86400
 }
