@@ -3,7 +3,7 @@
   "info": {
     "title": "Fenders workspace API",
     "version": "1.0.0",
-    "description": "The workspace API. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. Keys are created by a workspace owner or by the operator (POST /v1/tenants/{workspace}/api-keys)."
+    "description": "The workspace API. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/v1/tenants/{workspace}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records."
   },
   "servers": [
     {

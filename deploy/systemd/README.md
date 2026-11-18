@@ -73,14 +73,13 @@ one. Denials override allows; IPv6 is not supported here.
 This policy controls new registrations, not retroactive revocation of existing
 pinned endpoints. Revoke existing app connections explicitly when removing access.
 
-For a customer deployment, extend `ExecStart` with `--browser-auth` and the existing
-OIDC configuration; add `--public-egress` when permitting HTTPS destinations.
+For a deployment that permits HTTPS destinations, extend `ExecStart` with
+`--public-egress`.
 Use `systemctl edit --full fenders-control-plane.service` to preserve the complete
 command and append those explicit flags. Keep configuration read-only to the
 service and readable by its group, and review local changes when updating the
-shipped unit. The base unit does not enable customer sign-in or outbound access
-implicitly. See [browser identity](../../crates/fenders-control-plane/static/customer/README.md#configure-sign-in) for the configuration
-contract. No shell wrapper or arbitrary command fragment is executed.
+shipped unit. The base unit does not enable outbound access implicitly. No
+shell wrapper or arbitrary command fragment is executed.
 
 ```sh
 sudo systemd-analyze verify /etc/systemd/system/fenders-control-plane.service
@@ -173,7 +172,7 @@ release overlap, not permission to mix arbitrary binaries or database revisions.
 2. Give each replica a separate service and three backend listener ports. Copy
    the maintained unit for B, preserving its account, credentials, state directory,
    confinement and 100-second stop deadline. Change its binary path and ports in
-   the complete `ExecStart`; retain all configured browser/onboarding/email/egress
+   the complete `ExecStart`; retain all configured egress
    flags. For example, A can retain 9090/9091/9092 and B use
    19090/19091/19092. Verify both units before starting B. Starting B runs pending
    migrations inside the existing database mutation lock. B records the frozen

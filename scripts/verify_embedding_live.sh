@@ -156,6 +156,10 @@ cross_run=$(as "${key[alpha]}" POST "$other/apps/$app_beta/runs" '{}' | status)
 cross_list=$(as "${key[alpha]}" GET /workspaces | ok | jq -c '[.[].id]')
 operator_tenants=$(as "${key[alpha]}" POST /tenants "$(jq -n --argjson a "$allowance" '{name:"gamma",allowance:$a}')" | status)
 operator_nodes=$(as "${key[alpha]}" GET /nodes | status)
+# A key issues no keys, on the operator's route or under its own workspace.
+key_issue=$(as "${key[alpha]}" POST "/tenants/${tenant[alpha]}/api-keys" '{"name":"more","permissions":["read"],"ttl_seconds":60}' | status)
+key_issue_ws=$(as "${key[alpha]}" POST "/workspaces/${tenant[alpha]}/api-keys" '{"name":"more","permissions":["read"],"ttl_seconds":60}' | status)
+page=$(curl -sS --cacert "$out/pki/ca.pem" -o /dev/null -w '%{http_code}' "$manage/api")
 no_credential=$(curl -sS --cacert "$out/pki/ca.pem" -o /dev/null -w '%{http_code}' "$manage/v1/workspaces")
 console=$(curl -sS --cacert "$out/pki/ca.pem" -o /dev/null -w '%{http_code}' "$manage/console/")
 root=$(curl -sS --cacert "$out/pki/ca.pem" -o /dev/null -w '%{http_code}' "$manage/")
@@ -172,16 +176,19 @@ jq -n --arg alpha "${run_state[alpha]}" --arg alpha_exit "${exit_code[alpha]}" \
   --arg operator_tenants "$operator_tenants" --arg operator_nodes "$operator_nodes" \
   --arg no_credential "$no_credential" --arg revoked "$revoked" \
   --arg console "$console" --arg root "$root" --arg contract "$contract" \
+  --arg key_issue "$key_issue" --arg key_issue_ws "$key_issue_ws" --arg page "$page" \
   --arg started "$(grep -c 'agent: run started' "$out/node.log" || true)" \
   '{passed: ($alpha == "succeeded" and $alpha_exit == "0" and $beta == "succeeded" and $beta_exit == "0"
       and $cross_list == [$own] and $cross_read == "404" and $cross_app == "404" and $cross_run == "404"
       and $operator_tenants == "403" and $operator_nodes == "403" and $no_credential == "401"
-      and $revoked == "401" and $console != "200" and $root != "200" and $contract == "200"),
+      and $revoked == "401" and $console != "200" and $root != "200" and $contract == "200"
+      and $key_issue == "403" and ($key_issue_ws == "403" or $key_issue_ws == "404") and $page != "200"),
     runs: {alpha: {state: $alpha, exit_code: $alpha_exit}, beta: {state: $beta, exit_code: $beta_exit}},
     tenant_key: {workspaces_listed: $cross_list, own_workspace: $own,
       other_tenant_apps: $cross_read, other_tenant_app: $cross_app, other_tenant_run: $cross_run,
-      create_tenant: $operator_tenants, list_nodes: $operator_nodes},
+      create_tenant: $operator_tenants, list_nodes: $operator_nodes,
+      issue_key: $key_issue, issue_key_workspace: $key_issue_ws},
     no_credential: $no_credential, revoked_key: $revoked,
-    served: {console: $console, root: $root, api_contract: $contract},
+    served: {console: $console, root: $root, api_page: $page, api_contract: $contract},
     node: {runs_started: ($started|tonumber)}}' | tee "$out/result.json"
 [[ $(jq -r .passed "$out/result.json") == true ]]
