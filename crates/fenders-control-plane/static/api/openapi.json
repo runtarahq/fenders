@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Fenders management API",
-    "version": "1.0.0",
+    "version": "0.1.0",
     "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/tenants/{tenant}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records."
   },
   "servers": [

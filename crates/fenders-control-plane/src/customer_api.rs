@@ -498,6 +498,15 @@ mod tests {
     }
 
     #[test]
+    fn the_contract_is_this_versions() {
+        // It is served by the binary it describes, and says which that is:
+        // not 1.0.0 of an API that has made no such promise.
+        let spec: Value = serde_json::from_str(include_str!("../static/api/openapi.json")).unwrap();
+        assert_eq!(spec["info"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(spec["openapi"], "3.1.0");
+    }
+
+    #[test]
     fn a_route_is_one_thing() {
         // No two rows for one request, and none that is both a key's and
         // the operator's by the same method.
