@@ -9,27 +9,32 @@ use serde_json::json;
 pub struct Error {
     pub status: StatusCode,
     pub message: &'static str,
+    /// The reason, where it is one a caller can act on apart from others of
+    /// its status. Without one, [`Error::code`] is the status's own.
+    pub reason: Option<&'static str>,
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub fn new(status: StatusCode, message: &'static str) -> Self {
-        Self { status, message }
-    }
-    pub fn code(&self) -> &'static str {
-        match self.status {
-            StatusCode::BAD_REQUEST => "invalid_request",
-            StatusCode::UNAUTHORIZED => "unauthorized",
-            StatusCode::FORBIDDEN => "forbidden",
-            StatusCode::NOT_FOUND => "not_found",
-            StatusCode::GONE => "gone",
-            StatusCode::CONFLICT => "conflict",
-            StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
-            StatusCode::TOO_MANY_REQUESTS => "rate_limited",
-            StatusCode::SERVICE_UNAVAILABLE => "unavailable",
-            _ => "internal_error",
+        Self {
+            status,
+            message,
+            reason: None,
         }
     }
+    /// The same error with the reason `code`.
+    pub fn coded(mut self, code: &'static str) -> Self {
+        self.reason = Some(code);
+        self
+    }
+    pub fn code(&self) -> &'static str {
+        if let Some(reason) = self.reason {
+            return reason;
+        }
+        status_code(self.status)
+    }
+
     pub fn invalid(message: &'static str) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
@@ -41,6 +46,27 @@ impl Error {
     }
     pub fn internal() -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+    }
+}
+/// The code of an error that gives no reason of its own: its status, named.
+pub fn status_code(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "invalid_request",
+        StatusCode::UNAUTHORIZED => "unauthorized",
+        StatusCode::FORBIDDEN => "forbidden",
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::GONE => "gone",
+        StatusCode::CONFLICT => "conflict",
+        StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+        StatusCode::SERVICE_UNAVAILABLE => "unavailable",
+        StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
+        StatusCode::REQUEST_TIMEOUT => "request_timeout",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported_media_type",
+        StatusCode::NOT_IMPLEMENTED => "not_available",
+        StatusCode::BAD_GATEWAY => "bad_gateway",
+        StatusCode::GATEWAY_TIMEOUT => "gateway_timeout",
+        _ => "internal_error",
     }
 }
 impl std::fmt::Display for Error {

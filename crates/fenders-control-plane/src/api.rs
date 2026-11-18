@@ -92,11 +92,19 @@ async fn dispatch(State(state): State<ApiState>, req: Request) -> Result<Respons
     let request_id = crate::model::uid();
     let mut response = match dispatch_inner(State(state), req).await {
         Ok(response) => response,
-        Err(error) => (
-            error.status,
-            Json(json!({"error":error.message,"code":error.code(),"request_id":request_id})),
-        )
-            .into_response(),
+        Err(error) => {
+            let mut response = (
+                error.status,
+                Json(json!({"error":error.message,"code":error.code(),"request_id":request_id})),
+            )
+                .into_response();
+            if let Some((name, value)) = error.header
+                && let Ok(value) = header::HeaderValue::from_str(&value)
+            {
+                response.headers_mut().insert(name, value);
+            }
+            response
+        }
     };
     let headers = response.headers_mut();
     headers.insert(

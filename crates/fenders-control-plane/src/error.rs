@@ -9,27 +9,39 @@ use serde_json::json;
 pub struct Error {
     pub status: StatusCode,
     pub message: &'static str,
+    /// The reason, where it is one a caller can act on apart from others of
+    /// its status. Without one, [`Error::code`] is the status's own.
+    pub reason: Option<&'static str>,
+    /// A header the answer carries with it: when to try again, or which
+    /// methods a path takes.
+    pub header: Option<(axum::http::HeaderName, String)>,
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub fn new(status: StatusCode, message: &'static str) -> Self {
-        Self { status, message }
-    }
-    pub fn code(&self) -> &'static str {
-        match self.status {
-            StatusCode::BAD_REQUEST => "invalid_request",
-            StatusCode::UNAUTHORIZED => "unauthorized",
-            StatusCode::FORBIDDEN => "forbidden",
-            StatusCode::NOT_FOUND => "not_found",
-            StatusCode::GONE => "gone",
-            StatusCode::CONFLICT => "conflict",
-            StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
-            StatusCode::TOO_MANY_REQUESTS => "rate_limited",
-            StatusCode::SERVICE_UNAVAILABLE => "unavailable",
-            StatusCode::NOT_IMPLEMENTED => "not_available",
-            _ => "internal_error",
+        Self {
+            status,
+            message,
+            reason: None,
+            header: None,
         }
+    }
+    /// The same error with the reason `code`.
+    pub fn coded(mut self, code: &'static str) -> Self {
+        self.reason = Some(code);
+        self
+    }
+    /// The same error, answered with `header`.
+    pub fn with_header(mut self, name: axum::http::HeaderName, value: impl Into<String>) -> Self {
+        self.header = Some((name, value.into()));
+        self
+    }
+    /// What a caller branches on: the reason where there is one, and the
+    /// status's own name where there is not.
+    pub fn code(&self) -> &'static str {
+        self.reason
+            .unwrap_or_else(|| fenders_node_protocol::error::status_code(self.status))
     }
     pub fn invalid(message: &'static str) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
@@ -79,6 +91,40 @@ impl IntoResponse for Error {
 }
 impl From<fenders_node_protocol::error::Error> for Error {
     fn from(error: fenders_node_protocol::error::Error) -> Self {
-        Self::new(error.status, error.message)
+        Self {
+            reason: error.reason,
+            ..Self::new(error.status, error.message)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_code_is_the_reason_given_or_else_the_status_named() {
+        for (status, code) in [
+            (StatusCode::BAD_REQUEST, "invalid_request"),
+            (StatusCode::NOT_FOUND, "not_found"),
+            (StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"),
+            (StatusCode::REQUEST_TIMEOUT, "request_timeout"),
+            (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type"),
+            (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            (StatusCode::BAD_GATEWAY, "bad_gateway"),
+            (StatusCode::GATEWAY_TIMEOUT, "gateway_timeout"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+        ] {
+            assert_eq!(Error::new(status, "refused").code(), code);
+        }
+        let conflict = Error::new(StatusCode::CONFLICT, "refused");
+        assert_eq!(conflict.code(), "conflict");
+        assert_eq!(
+            conflict.coded("revision_conflict").code(),
+            "revision_conflict"
+        );
+        // A node's error keeps its reason on the way through.
+        let node = fenders_node_protocol::error::Error::invalid("refused").coded("specific");
+        assert_eq!(Error::from(node).code(), "specific");
     }
 }
