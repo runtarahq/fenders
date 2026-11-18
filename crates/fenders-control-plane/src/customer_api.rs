@@ -18,86 +18,162 @@ pub const PERMISSIONS: &[&str] = &[
     "secrets:write",
 ];
 
-/// Paths are normalized to the existing control-plane names before authorization.
-pub fn permission(method: &str, path: &[&str]) -> Option<&'static str> {
-    match (method, path) {
-        ("GET", ["v1", "me"] | ["v1", "tenants"]) => Some("read"),
-        ("GET", ["v1", "tenants", _, "projects"]) => Some("read"),
-        ("POST", ["v1", "tenants", _, "projects"]) => Some("projects:write"),
-        ("GET", ["v1", "tenants", _, "usage"])
-        | ("GET", ["v1", "tenants", _, "usage", "history"]) => Some("read"),
-        (_, ["v1", "tenants", _, "projects", _, tail @ ..]) => match (method, tail) {
-            (
-                "GET",
-                ["apps"]
-                | ["apps", _]
-                | ["app-sizes"]
-                | ["https-access"]
-                | ["usage"]
-                | ["usage", "history"],
-            ) => Some("read"),
-            (
-                "GET",
-                [
-                    "apps",
-                    _,
-                    "versions" | "releases" | "runs" | "triggers" | "connections" | "http"
-                    | "websocket" | "logs" | "events",
-                ],
-            ) => Some("read"),
-            ("GET", ["apps", _, "versions" | "releases" | "runs", _]) => Some("read"),
-            ("GET", ["artifacts" | "external-endpoints" | "secrets" | "operations"])
-            | (
-                "GET",
-                [
-                    "artifacts" | "external-endpoints" | "secrets" | "operations",
-                    _,
-                ],
-            )
-            | ("GET", ["artifacts", _, "inspection"]) => Some("read"),
-            (
-                "POST",
-                ["artifacts"]
-                | ["apps"]
-                | ["apps", "deploy"]
-                | ["apps", _, "versions" | "releases"],
-            )
-            | ("PATCH" | "DELETE", ["apps", _])
-            | ("PUT", ["apps", _, "triggers" | "connections"]) => Some("apps:write"),
-            // A sample request is one made of the app, as a run is.
-            ("POST", ["apps", _, "runs" | "http-sample"])
-            | ("POST", ["apps", _, "runs", _, "cancel"]) => Some("runs:write"),
-            // What became of a request a key made: its own to read.
-            ("GET", ["app-submissions" | "endpoint-submissions", _])
-            | ("GET", ["apps", _, "submissions", _]) => Some("read"),
-            ("POST", ["schedules", "preview"] | ["https-access", "validate"]) => Some("read"),
-            ("POST", ["external-endpoints"]) | ("DELETE", ["external-endpoints", _]) => {
-                Some("connections:write")
-            }
-            ("POST", ["secrets"]) => Some("secrets:write"),
-            _ => None,
-        },
-        _ => None,
-    }
-}
+/// Every route a tenant's key may be given, with the permission it takes.
+/// `*` stands for one segment. Paths are in the control plane's own names:
+/// the public `/v1/workspaces` and `…/connections` are rewritten to them
+/// before a route is looked for.
+///
+/// This table is the routes: the contract is held to it by a test, both
+/// ways, and a path that is not in it or in [`OPERATOR_ROUTES`] is answered
+/// `404` to everyone.
+pub const KEY_ROUTES: &[(&str, &str, &str)] = &[
+    ("GET", "/v1/me", "read"),
+    ("GET", "/v1/tenants", "read"),
+    ("GET", "/v1/tenants/*/projects", "read"),
+    ("POST", "/v1/tenants/*/projects", "projects:write"),
+    ("GET", "/v1/tenants/*/usage", "read"),
+    ("GET", "/v1/tenants/*/usage/history", "read"),
+    ("GET", "/v1/tenants/*/projects/*/usage", "read"),
+    ("GET", "/v1/tenants/*/projects/*/usage/history", "read"),
+    ("GET", "/v1/tenants/*/projects/*/app-sizes", "read"),
+    ("GET", "/v1/tenants/*/projects/*/https-access", "read"),
+    (
+        "POST",
+        "/v1/tenants/*/projects/*/https-access/validate",
+        "read",
+    ),
+    ("POST", "/v1/tenants/*/projects/*/schedules/preview", "read"),
+    ("GET", "/v1/tenants/*/projects/*/apps", "read"),
+    ("POST", "/v1/tenants/*/projects/*/apps", "apps:write"),
+    ("POST", "/v1/tenants/*/projects/*/apps/deploy", "apps:write"),
+    ("GET", "/v1/tenants/*/projects/*/app-submissions/*", "read"),
+    ("GET", "/v1/tenants/*/projects/*/apps/*", "read"),
+    ("PATCH", "/v1/tenants/*/projects/*/apps/*", "apps:write"),
+    ("DELETE", "/v1/tenants/*/projects/*/apps/*", "apps:write"),
+    (
+        "GET",
+        "/v1/tenants/*/projects/*/apps/*/submissions/*",
+        "read",
+    ),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/versions", "read"),
+    (
+        "POST",
+        "/v1/tenants/*/projects/*/apps/*/versions",
+        "apps:write",
+    ),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/versions/*", "read"),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/releases", "read"),
+    (
+        "POST",
+        "/v1/tenants/*/projects/*/apps/*/releases",
+        "apps:write",
+    ),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/releases/*", "read"),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/runs", "read"),
+    ("POST", "/v1/tenants/*/projects/*/apps/*/runs", "runs:write"),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/runs/*", "read"),
+    (
+        "POST",
+        "/v1/tenants/*/projects/*/apps/*/runs/*/cancel",
+        "runs:write",
+    ),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/triggers", "read"),
+    (
+        "PUT",
+        "/v1/tenants/*/projects/*/apps/*/triggers",
+        "apps:write",
+    ),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/connections", "read"),
+    (
+        "PUT",
+        "/v1/tenants/*/projects/*/apps/*/connections",
+        "apps:write",
+    ),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/http", "read"),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/websocket", "read"),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/logs", "read"),
+    ("GET", "/v1/tenants/*/projects/*/apps/*/events", "read"),
+    (
+        "POST",
+        "/v1/tenants/*/projects/*/apps/*/http-sample",
+        "runs:write",
+    ),
+    ("GET", "/v1/tenants/*/projects/*/artifacts", "read"),
+    ("POST", "/v1/tenants/*/projects/*/artifacts", "apps:write"),
+    ("GET", "/v1/tenants/*/projects/*/artifacts/*", "read"),
+    (
+        "GET",
+        "/v1/tenants/*/projects/*/artifacts/*/inspection",
+        "read",
+    ),
+    ("GET", "/v1/tenants/*/projects/*/external-endpoints", "read"),
+    (
+        "POST",
+        "/v1/tenants/*/projects/*/external-endpoints",
+        "connections:write",
+    ),
+    (
+        "GET",
+        "/v1/tenants/*/projects/*/external-endpoints/*",
+        "read",
+    ),
+    (
+        "DELETE",
+        "/v1/tenants/*/projects/*/external-endpoints/*",
+        "connections:write",
+    ),
+    (
+        "GET",
+        "/v1/tenants/*/projects/*/endpoint-submissions/*",
+        "read",
+    ),
+    ("GET", "/v1/tenants/*/projects/*/secrets", "read"),
+    ("POST", "/v1/tenants/*/projects/*/secrets", "secrets:write"),
+    ("GET", "/v1/tenants/*/projects/*/secrets/*", "read"),
+    ("GET", "/v1/tenants/*/projects/*/operations", "read"),
+    ("GET", "/v1/tenants/*/projects/*/operations/*", "read"),
+];
 
 /// The operator's own routes: what no tenant's key is ever given. Tenants
 /// and their keys, what a tenant is allowed, suspending one, the nodes, the
 /// public egress policy, and how this control plane's own loops are doing.
+pub const OPERATOR_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/v1/tenants"),
+    ("PATCH", "/v1/tenants/*"),
+    ("PATCH", "/v1/tenants/*/http-limits"),
+    ("POST", "/v1/tenants/*/lifecycle"),
+    ("GET", "/v1/tenants/*/api-keys"),
+    ("POST", "/v1/tenants/*/api-keys"),
+    ("DELETE", "/v1/tenants/*/api-keys/*"),
+    ("GET", "/v1/nodes"),
+    ("POST", "/v1/nodes"),
+    ("PATCH", "/v1/nodes/*"),
+    ("GET", "/v1/public-egress-policy"),
+    ("PUT", "/v1/public-egress-policy"),
+    ("GET", "/v1/control-plane/status"),
+];
+
+/// Whether `path` is the route `pattern` describes.
+fn is_route(pattern: &str, path: &[&str]) -> bool {
+    let mut pattern = pattern.trim_start_matches('/').split('/');
+    path.iter()
+        .all(|segment| pattern.next().is_some_and(|p| p == "*" || p == *segment))
+        && pattern.next().is_none()
+}
+
+/// The permission a key needs for a request, if it is one a key may make.
+pub fn permission(method: &str, path: &[&str]) -> Option<&'static str> {
+    KEY_ROUTES
+        .iter()
+        .find(|(m, pattern, _)| *m == method && is_route(pattern, path))
+        .map(|(_, _, permission)| *permission)
+}
+
+/// Whether a request is one of the operator's own.
 pub fn operators(method: &str, path: &[&str]) -> bool {
-    matches!(
-        (method, path),
-        ("POST", ["v1", "tenants"])
-            | ("PATCH", ["v1", "tenants", _])
-            | ("PATCH", ["v1", "tenants", _, "http-limits"])
-            | ("POST", ["v1", "tenants", _, "lifecycle"])
-            | ("GET" | "POST", ["v1", "tenants", _, "api-keys"])
-            | ("DELETE", ["v1", "tenants", _, "api-keys", _])
-            | ("GET" | "POST", ["v1", "nodes"])
-            | ("PATCH", ["v1", "nodes", _])
-            | ("GET" | "PUT", ["v1", "public-egress-policy"])
-            | ("GET", ["v1", "control-plane", "status"])
-    )
+    OPERATOR_ROUTES
+        .iter()
+        .any(|(m, pattern)| *m == method && is_route(pattern, path))
 }
 pub fn authorize(p: &Principal, method: &str, path: &[&str]) -> Result<()> {
     if let Some(permissions) = &p.api_permissions {
@@ -326,24 +402,82 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn documented_routes_are_reachable_through_the_customer_boundary() {
+    use std::collections::BTreeSet;
+
+    /// A route as the contract writes it: a method, and a path under `/v1`
+    /// in the public names, with `*` for each parameter.
+    fn public(method: &str, pattern: &str) -> (String, String) {
+        let mut segments: Vec<&str> = pattern.trim_start_matches("/v1/").split('/').collect();
+        if segments[0] == "tenants" {
+            segments[0] = "workspaces";
+        }
+        if segments.get(4) == Some(&"external-endpoints") {
+            segments[4] = "connections";
+        }
+        (method.to_owned(), format!("/{}", segments.join("/")))
+    }
+    fn documented() -> BTreeSet<(String, String)> {
         let spec: Value = serde_json::from_str(include_str!("../static/api/openapi.json")).unwrap();
+        let mut routes = BTreeSet::new();
         for (path, methods) in spec["paths"].as_object().unwrap() {
-            let full = format!("/v1{path}");
-            let mut segments: Vec<_> = full.trim_matches('/').split('/').collect();
-            if segments.get(1) == Some(&"workspaces") {
-                segments[1] = "tenants";
-            }
-            if segments.get(5) == Some(&"connections") {
-                segments[5] = "external-endpoints";
-            }
+            let pattern: Vec<&str> = path
+                .split('/')
+                .map(|segment| {
+                    if segment.starts_with('{') {
+                        "*"
+                    } else {
+                        segment
+                    }
+                })
+                .collect();
             for method in methods.as_object().unwrap().keys() {
-                assert!(
-                    permission(&method.to_uppercase(), &segments).is_some(),
-                    "undocumented authorization boundary: {method} {path}"
-                );
+                routes.insert((method.to_uppercase(), pattern.join("/")));
             }
         }
+        routes
+    }
+
+    #[test]
+    fn the_contract_and_the_router_describe_the_same_routes() {
+        let routed: BTreeSet<_> = KEY_ROUTES
+            .iter()
+            .map(|(method, pattern, _)| public(method, pattern))
+            .collect();
+        let documented = documented();
+        let undocumented: Vec<_> = routed.difference(&documented).collect();
+        assert!(
+            undocumented.is_empty(),
+            "routed and not in the contract: {undocumented:?}"
+        );
+        let unrouted: Vec<_> = documented.difference(&routed).collect();
+        assert!(
+            unrouted.is_empty(),
+            "in the contract and not routed: {unrouted:?}"
+        );
+    }
+
+    #[test]
+    fn a_route_is_one_thing() {
+        // No two rows for one request, and none that is both a key's and
+        // the operator's by the same method.
+        let mut seen = BTreeSet::new();
+        for (method, pattern, permission) in KEY_ROUTES {
+            assert!(seen.insert((method, pattern)), "twice: {method} {pattern}");
+            assert!(PERMISSIONS.contains(permission), "{permission}");
+        }
+        for (method, pattern) in OPERATOR_ROUTES {
+            assert!(seen.insert((method, pattern)), "twice: {method} {pattern}");
+        }
+        // A pattern is its own path, and no longer or shorter one.
+        let path = ["v1", "tenants", "t", "projects", "p", "apps", "a"];
+        assert_eq!(permission("GET", &path), Some("read"));
+        assert_eq!(permission("PATCH", &path), Some("apps:write"));
+        assert_eq!(permission("PUT", &path), None);
+        assert_eq!(permission("GET", &path[..6]), Some("read"));
+        assert_eq!(permission("GET", &path[..5]), None);
+        assert_eq!(permission("GET", &[&path[..], &["nothing"]].concat()), None);
+        assert!(operators("POST", &["v1", "tenants"]));
+        assert!(!operators("POST", &["v1", "tenants", "t"]));
+        assert!(!operators("GET", &["v1", "tenants"]));
     }
 }
