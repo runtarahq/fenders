@@ -50,9 +50,10 @@ pub struct AppSubmission<'a> {
 }
 
 impl Store {
-    /// Recover an acknowledged or lost-response deployment without retaining its
-    /// configuration in browser storage. Absence is not proof that an in-flight
-    /// request failed; callers must not automatically submit a new intent.
+    /// What became of a deployment, by the key it was made with: for a caller
+    /// whose answer was lost, without it having kept what it sent. Absence
+    /// is not proof that a request in flight failed; a caller must not
+    /// submit a new intent because of it.
     pub async fn app_submission(
         &self,
         p: &Principal,
@@ -243,8 +244,9 @@ impl Store {
         Ok((app, version))
     }
 
-    /// The wizard submits one intent. All customer records and any initial HTTP
-    /// reservation commit together; a command still requires a separate event.
+    /// One intent: an app, its code, its release and its triggers. All of its
+    /// records and any initial HTTP reservation commit together; a command
+    /// still requires a separate event.
     pub async fn deploy_app(
         &self,
         p: &Principal,

@@ -102,6 +102,11 @@ place. Each breaks a client written against what was there before.
   first. The app list no longer has `offset`, and usage history no longer
   `next_before`. A version list's `next` is a string. A query parameter a
   list does not take is `400`.
+- **A diagnostic says what happened, not where to click.** It is `code`,
+  `summary` and `detail` (and `observed_at` of a placement). `actions`,
+  with its labels and targets for a screen, is gone, as are the sentences
+  that sent a reader to Fenders support: the product built on this says
+  what its own users should do.
 
 ## Limits
 

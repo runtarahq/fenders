@@ -50,8 +50,9 @@ pub fn management(state: ApiState) -> Router {
 }
 
 /// Headers of every answer from the management listener, an error's among
-/// them: the API and a console's pages are served over TLS only, are never
-/// framed by another site, and their content type is not guessed at.
+/// them: the API is served over TLS only, is never framed by a site, and
+/// its content type is not guessed at. A wrapping binary that serves pages
+/// of its own beside the API has the same of them.
 async fn management_headers(mut response: Response) -> Response {
     let headers = response.headers_mut();
     for (name, value) in [
@@ -1189,8 +1190,9 @@ async fn internal_dispatch(State(store): State<Store>, req: Request) -> Result<R
     }
     Err(Error::missing())
 }
-/// One console test request. An empty object sends `GET /`; the gateway still
-/// applies its method, size, admission and header rules.
+/// One request to make of an HTTP app, as a client of its URL would. An
+/// empty object sends `GET /`; the gateway still applies its method, size,
+/// admission and header rules.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HttpSample {

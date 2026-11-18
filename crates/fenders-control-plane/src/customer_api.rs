@@ -1,5 +1,6 @@
-//! Customer automation uses the same handlers and transactions as the console.
-//! This allowlist also applies on legacy paths: aliases must not widen access.
+//! What a credential may ask for: the routes a workspace's key may be
+//! given, the operator's own, and the keys themselves. There is one API,
+//! and these tables are its routes: nothing is reached that is not in one.
 use crate::{
     error::{Error, Result},
     model::*,

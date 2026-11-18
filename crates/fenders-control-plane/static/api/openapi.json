@@ -6695,15 +6695,7 @@
               "diagnostic": {
                 "anyOf": [
                   {
-                    "type": "object",
-                    "properties": {
-                      "detail": {
-                        "type": "string"
-                      },
-                      "summary": {
-                        "type": "string"
-                      }
-                    }
+                    "$ref": "#/components/schemas/Diagnostic"
                   },
                   {
                     "type": "null"
@@ -7981,15 +7973,7 @@
           "diagnostic": {
             "anyOf": [
               {
-                "type": "object",
-                "properties": {
-                  "detail": {
-                    "type": "string"
-                  },
-                  "summary": {
-                    "type": "string"
-                  }
-                }
+                "$ref": "#/components/schemas/Diagnostic"
               },
               {
                 "type": "null"
@@ -9054,6 +9038,33 @@
           "items",
           "next"
         ]
+      },
+      "Diagnostic": {
+        "type": "object",
+        "description": "What an outcome means: code to branch on, and a summary and a detail in words, whose wording may change. Present where there is something to say. It does not say where to look or whom to ask: that is for the product built on this API.",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The reason, or unrecognized. Codes may be added."
+          },
+          "summary": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When a placement was last tried, where the outcome is of one."
+          }
+        },
+        "required": [
+          "code",
+          "summary",
+          "detail"
+        ],
+        "additionalProperties": false
       }
     }
   }
