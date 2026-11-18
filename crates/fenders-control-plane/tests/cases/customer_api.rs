@@ -560,63 +560,6 @@ async fn credentials_end_with_whoever_issued_them() {
     }
     assert!(l.store.authenticate(s(&long["token"])).await.is_ok());
 
-    // A member who issued credentials while an owner: removed, or disabled.
-    let member_with_key = |name: &'static str| {
-        let l = &l;
-        let issue = &issue;
-        async move {
-            let (user, membership) = (uid(), uid());
-            sqlx::query("INSERT INTO customer_users(id,issuer,subject) VALUES($1,'https://identity.test',$2)")
-                .bind(&user).bind(name).execute(&l.store.pool).await.unwrap();
-            sqlx::query("INSERT INTO workspace_memberships(id,tenant_id,user_id,role) VALUES($1,$2,$3,'owner')")
-                .bind(&membership).bind(&l.tenant).bind(&user).execute(&l.store.pool).await.unwrap();
-            // As `create_api_key` and `issue_credential` record it for a
-            // browser session of theirs.
-            let (issued, row) = issue(l.operator.clone(), 3600).await;
-            sqlx::query("UPDATE credentials SET created_by=$1 WHERE id=$2")
-                .bind(&user)
-                .bind(s(&row["id"]))
-                .execute(&l.store.pool)
-                .await
-                .unwrap();
-            // And one issued with that in turn.
-            let (_, second) = issue(issued, 3600).await;
-            (user, membership, row, second)
-        }
-    };
-    // Another owner stays, so the last-owner rule allows the changes.
-    let _staying = member_with_key("staying").await;
-    let (_, membership, first, second) = member_with_key("removed").await;
-    l.store
-        .update_member(
-            &l.operator,
-            &l.tenant,
-            &membership,
-            json!({"revoked":true,"expected_revision":1}),
-        )
-        .await
-        .unwrap();
-    let (user, _, third, fourth) = member_with_key("disabled").await;
-    l.store
-        .update_customer_user(
-            &l.operator,
-            &user,
-            json!({"disabled":true,"expected_revision":1}),
-        )
-        .await
-        .unwrap();
-    for token in [&first, &second, &third, &fourth] {
-        assert_eq!(
-            l.store
-                .authenticate(s(&token["token"]))
-                .await
-                .unwrap_err()
-                .status,
-            StatusCode::UNAUTHORIZED
-        );
-    }
-    // The owner who stayed keeps theirs.
-    assert!(l.store.authenticate(s(&_staying.2["token"])).await.is_ok());
     assert!(l.store.authenticate(s(&long["token"])).await.is_ok());
     l.finish().await;
 }

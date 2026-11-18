@@ -17,15 +17,6 @@ use serde_json::Value;
 use serde_json::json;
 use std::path::PathBuf;
 
-/// A file the management listener serves beside the API, at exactly `path`:
-/// a console that a product builds around the control plane. The control
-/// plane ships none and serves only its API reference under `/api`; a
-/// binary that wraps this crate adds its own with [`Store::with_assets`].
-pub struct Asset {
-    pub path: &'static str,
-    pub content_type: &'static str,
-    pub body: &'static [u8],
-}
 #[derive(Clone)]
 pub struct ApiState {
     pub store: Store,
@@ -86,82 +77,40 @@ fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|_| Error::invalid("invalid or missing fields"))
 }
 async fn dispatch(State(state): State<ApiState>, req: Request) -> Result<Response> {
-    // A browser navigating back from its identity provider needs a recoverable
-    // customer screen. API clients retain the original status and JSON error.
-    let browser_sign_in = req.method() == "GET"
-        && matches!(req.uri().path(), "/auth/login" | "/auth/callback")
-        && req
-            .headers()
-            .get(header::ACCEPT)
-            .is_some_and(|v| v.to_str().is_ok_and(|v| v.contains("text/html")));
     let request_id = crate::model::uid();
     let mut response = match dispatch_inner(State(state), req).await {
         Ok(response) => response,
-        Err(_) if browser_sign_in => {
-            axum::response::Redirect::to("/console/?signin=failed").into_response()
-        }
         Err(error) => (
             error.status,
             Json(json!({"error":error.message,"code":error.code(),"request_id":request_id})),
         )
             .into_response(),
     };
-    response.headers_mut().insert(
+    let headers = response.headers_mut();
+    headers.insert(
         "X-Request-Id",
         request_id.parse().map_err(|_| Error::internal())?,
     );
-    Ok(crate::browser_auth::private_response(response))
+    // What the API answers is its caller's alone: no cache keeps it.
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
 }
 async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<Response> {
     let store = &state.store;
     let (parts, body) = req.into_parts();
     let method = parts.method.as_str();
     let path = parts.uri.path();
-    if path.starts_with("/auth/") {
-        let auth = store.browser_auth.as_ref().ok_or_else(|| {
-            Error::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "customer sign-in is not configured",
-            )
-        })?;
-        if method == "POST" && path == "/auth/backchannel-logout" {
-            let bytes =
-                tokio::time::timeout(std::time::Duration::from_secs(5), to_bytes(body, 16_384))
-                    .await
-                    .map_err(|_| Error::invalid("logout request timed out"))?
-                    .map_err(|_| Error::invalid("logout request too large"))?;
-            return auth.backchannel_logout(store, &parts.headers, &bytes).await;
-        }
-        return auth
-            .handle(
-                store,
-                method,
-                path,
-                parts.uri.query().unwrap_or(""),
-                &parts.headers,
-            )
-            .await;
-    }
-    if method == "GET" {
-        let file: Option<(&str, &[u8])> = match path {
-            "/api" | "/api/" => Some((
-                "text/html; charset=utf-8",
-                include_bytes!("../static/api/index.html"),
-            )),
-            "/api/style.css" => Some(("text/css", include_bytes!("../static/api/style.css"))),
-            "/api/openapi.json" => Some((
-                "application/json",
-                include_bytes!("../static/api/openapi.json"),
-            )),
-            _ => store
-                .assets
-                .iter()
-                .find(|asset| asset.path == path)
-                .map(|asset| (asset.content_type, asset.body)),
-        };
-        if let Some((mime, data)) = file {
-            return Ok(([(header::CONTENT_TYPE, mime), (header::CONTENT_SECURITY_POLICY, "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")], data).into_response());
-        }
+    // The contract, and nothing else that is not the API: the control plane
+    // hosts no pages.
+    if method == "GET" && path == "/api/openapi.json" {
+        return Ok((
+            [(header::CONTENT_TYPE, "application/json")],
+            include_bytes!("../static/api/openapi.json").as_slice(),
+        )
+            .into_response());
     }
     let mut segments: Vec<_> = path.trim_matches('/').split('/').collect();
     let public_api = segments.get(1) == Some(&"workspaces");
@@ -178,87 +127,16 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             return Err(Error::missing());
         }
     }
-    let browser_token = if let Some(auth) = &store.browser_auth {
-        crate::browser_auth::cookie_value(&parts.headers, auth.session_cookie())?
-    } else {
-        None
-    };
-    let p = if let Some(secret) = browser_token {
-        if parts.headers.contains_key(header::AUTHORIZATION) {
-            return Err(Error::invalid("choose one authentication method"));
-        }
-        let csrf = if !matches!(method, "GET" | "HEAD" | "OPTIONS") {
-            store
-                .browser_auth
-                .as_ref()
-                .unwrap()
-                .same_origin(&parts.headers)?;
-            Some(
-                parts
-                    .headers
-                    .get("X-CSRF-Token")
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| Error::new(StatusCode::FORBIDDEN, "CSRF token required"))?,
-            )
-        } else {
-            None
-        };
-        let session = store.browser_session(&secret, csrf).await?;
-        match (method, segments.as_slice()) {
-            ("GET", ["v1", "invitations"]) => {
-                return Ok(Json(store.received_invitations(&session, None).await?).into_response());
-            }
-            ("GET", ["v1", "invitations", id]) => {
-                return Ok(
-                    Json(store.received_invitations(&session, Some(id)).await?).into_response()
-                );
-            }
-            ("POST", ["v1", "invitations", id]) => {
-                let bytes = to_bytes(body, 4096)
-                    .await
-                    .map_err(|_| Error::invalid("request too large"))?;
-                return Ok(Json(
-                    store
-                        .decide_invitation(&session, id, parse(&bytes)?)
-                        .await?,
-                )
-                .into_response());
-            }
-            ("GET", ["v1", "me"]) => {
-                return Ok(Json(store.session_info(&session).await?).into_response());
-            }
-            ("GET", ["v1", "tenants"]) => {
-                return Ok(
-                    Json(store.session_info(&session).await?["workspaces"].clone()).into_response(),
-                );
-            }
-            ("GET", ["v1", "tenants", tenant, "projects"]) => {
-                return Ok(Json(store.session_projects(&session, tenant).await?).into_response());
-            }
-            (_, ["v1", "tenants", tenant, ..]) => {
-                let project = if segments.get(3) == Some(&"projects") {
-                    segments.get(4).copied()
-                } else {
-                    None
-                };
-                store.session_principal(&session, tenant, project).await?
-            }
-            _ => {
-                return Err(Error::new(
-                    StatusCode::FORBIDDEN,
-                    "customer sessions cannot use operator endpoints",
-                ));
-            }
-        }
-    } else {
-        let token = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or_else(Error::unauthorized)?;
-        store.authenticate(token).await?
-    };
+    // One way in: a bearer credential. Who a person is, and what they may
+    // do, is the business of whatever is built on this API; it calls with a
+    // key that carries the answer.
+    let token = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(Error::unauthorized)?;
+    let p = store.authenticate(token).await?;
     crate::customer_api::authorize(&p, method, &segments)?;
     // Every mutation leaves an audit record, and most a receipt, for good. A
     // workspace's credentials make so many a minute between them; an
@@ -367,15 +245,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         }
         ("GET", ["v1", "me"]) => serde_json::to_value(&p).map_err(|_| Error::internal())?,
         ("GET", ["v1", "control-plane", "status"]) => store.background_status(&p)?,
-        ("GET", ["v1", "customer-users", user]) => store.customer_user(&p, user).await?,
-        ("PATCH", ["v1", "customer-users", user, "identity"]) => {
-            store
-                .migrate_customer_identity(&p, user, parse(&bytes)?)
-                .await?
-        }
-        ("PATCH", ["v1", "customer-users", user]) => {
-            store.update_customer_user(&p, user, parse(&bytes)?).await?
-        }
         ("GET", ["v1", "tenants"]) => store.tenants(&p).await?,
         ("GET", ["v1", "nodes"]) => store.nodes(&p).await?,
         ("GET", ["v1", "public-egress-policy"]) => store.public_egress_policy(&p).await?,
@@ -393,6 +262,13 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         }
         ("PATCH", ["v1", "tenants", tenant]) => {
             store.update_allowance(&p, tenant, parse(&bytes)?).await?
+        }
+        // Suspend a workspace, or resume it: the operator's, with a reason.
+        ("POST", ["v1", "tenants", tenant, "lifecycle"]) => {
+            p.operator()?;
+            let mut action: crate::workspace_lifecycle::WorkspaceAction = parse(&bytes)?;
+            action.id = (*tenant).to_owned();
+            store.operator_workspace_action(&p.id, action).await?
         }
         ("PATCH", ["v1", "tenants", tenant, "http-limits"]) => {
             store.update_http_limits(&p, tenant, parse(&bytes)?).await?
@@ -428,25 +304,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             store.revoke_credential(&p, tenant, id).await?
         }
         ("GET", ["v1", "tenants", tenant, "credentials"]) => store.credentials(&p, tenant).await?,
-        ("GET", ["v1", "tenants", tenant, "members"]) => store.members(&p, tenant).await?,
-        ("GET", ["v1", "tenants", tenant, "invitations"]) => store.invitations(&p, tenant).await?,
-        ("POST", ["v1", "tenants", tenant, "invitations"]) => {
-            store.invite(&p, tenant, parse(&bytes)?).await?
-        }
-        ("POST", ["v1", "tenants", tenant, "invitations", id]) => {
-            store
-                .update_invitation(&p, tenant, id, parse(&bytes)?)
-                .await?
-        }
-        ("POST", ["v1", "tenants", tenant, "members"]) => {
-            status = StatusCode::CREATED;
-            store.add_member(&p, tenant, parse(&bytes)?).await?
-        }
-        ("PATCH", ["v1", "tenants", tenant, "members", member]) => {
-            store
-                .update_member(&p, tenant, member, parse(&bytes)?)
-                .await?
-        }
         ("POST", ["v1", "tenants", tenant, "credentials"]) => {
             status = StatusCode::CREATED;
             store.issue_credential(&p, tenant, parse(&bytes)?).await?

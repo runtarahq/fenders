@@ -42,9 +42,6 @@ pub struct Store {
     /// encrypted with `cipher`, a tenant's secret among it, is one.
     pub(crate) channel_cipher: fernet::Fernet,
     pub(crate) encryption_key_id: String,
-    pub(crate) browser_auth: Option<std::sync::Arc<crate::browser_auth::BrowserAuth>>,
-    pub(crate) invitation_mailer: Option<std::sync::Arc<crate::invitation_email::InvitationMailer>>,
-    pub(crate) onboarding: Option<std::sync::Arc<crate::customer_onboarding::OnboardingConfig>>,
     pub(crate) external_network:
         Option<std::sync::Arc<crate::external_endpoints::ExternalNetworkPolicy>>,
     pub(crate) public_egress: Option<std::sync::Arc<crate::public_egress::PublicEgress>>,
@@ -66,8 +63,6 @@ pub struct Store {
     pub ingress_hosts: std::sync::Arc<crate::ingress::Hosts>,
     /// Refuse what no shim node can serve; see [`crate::unavailable`].
     pub(crate) refuse_unserved: bool,
-    /// Files served beside the API; see [`crate::api::Asset`].
-    pub(crate) assets: &'static [crate::api::Asset],
 }
 
 fn private_directory(path: &Path) -> Result<()> {
@@ -164,9 +159,6 @@ impl Store {
             cipher,
             channel_cipher: purpose_cipher(&key, crate::run_channel::PURPOSE)?,
             encryption_key_id: digest(&key),
-            browser_auth: None,
-            onboarding: None,
-            invitation_mailer: None,
             public_egress: None,
             external_network: None,
             orphan_upload_scan: Default::default(),
@@ -180,7 +172,6 @@ impl Store {
             node_turns: Default::default(),
             sockets: Default::default(),
             refuse_unserved: false,
-            assets: &[],
         })
     }
     /// The shipped configuration: features no shim node serves answer 501.
@@ -188,11 +179,7 @@ impl Store {
         self.refuse_unserved = true;
         self
     }
-    /// Serve these files from the management listener, each at its path.
-    pub fn with_assets(mut self, assets: &'static [crate::api::Asset]) -> Self {
-        self.assets = assets;
-        self
-    }
+
     pub async fn transaction(&self, mutate: bool, recovery: bool) -> Result<Tx> {
         self.begin_transaction(mutate, recovery, false).await
     }
@@ -309,6 +296,28 @@ impl Store {
             .bind(digest(credential)).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(path)
+    }
+    /// Whether the credential `p` was made from still stands, as it stood:
+    /// not revoked or expired, with the scope and permissions it had. Asked
+    /// in the transaction that acts for it, and before a change, whether its
+    /// workspace may still be changed.
+    pub(crate) async fn live_principal(tx: &mut Tx, p: &Principal) -> Result<()> {
+        if let Some(tenant) = &p.tenant_id {
+            let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM credentials WHERE id=$1 AND NOT revoked AND expires>now() AND role=$2 AND tenant_id=$3 AND project_id IS NOT DISTINCT FROM $4 AND api_permissions IS NOT DISTINCT FROM $5)")
+                .bind(&p.id).bind(p.role.as_str()).bind(tenant).bind(&p.project_id).bind(p.api_permissions.as_ref().map(|permissions| serde_json::json!(permissions))).fetch_one(&mut **tx).await?;
+            if !valid {
+                return Err(Error::unauthorized());
+            }
+            let writing: bool = sqlx::query_scalar(
+                "SELECT COALESCE(current_setting('fenders.mutation',true),'')='true'",
+            )
+            .fetch_one(&mut **tx)
+            .await?;
+            if writing {
+                Self::require_workspace_active(tx, tenant).await?;
+            }
+        }
+        Ok(())
     }
     pub async fn authenticate(&self, token: &str) -> Result<Principal> {
         if token.is_empty() || token.len() > 256 {
@@ -592,11 +601,6 @@ impl Store {
     /// sign-in fetches them. Public for tests, which change what their
     /// provider serves between requests.
     #[doc(hidden)]
-    pub async fn forget_provider_metadata(&self) {
-        if let Some(auth) = &self.browser_auth {
-            auth.forget_provider_metadata().await;
-        }
-    }
     /// Refuses another row of `table` for `tenant` once it has `limit`.
     ///
     /// None of these rows is charged to an allowance, and some are never

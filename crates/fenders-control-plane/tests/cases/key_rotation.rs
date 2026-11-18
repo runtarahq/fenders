@@ -6,7 +6,10 @@ fn cipher(path: &Path) -> fernet::Fernet {
     fernet::Fernet::new(std::fs::read_to_string(path).unwrap().trim()).unwrap()
 }
 async fn encrypted(pool: &sqlx::PgPool) -> Vec<(String, String)> {
-    sqlx::query_as("SELECT 'secret/'||id,convert_from(ciphertext,'UTF8') FROM secrets UNION ALL SELECT 'session/'||id,csrf_encrypted FROM browser_sessions UNION ALL SELECT 'nonce/'||state_hash,nonce_encrypted FROM browser_logins UNION ALL SELECT 'pkce/'||state_hash,pkce_encrypted FROM browser_logins ORDER BY 1").fetch_all(pool).await.unwrap()
+    sqlx::query_as("SELECT 'secret/'||id,convert_from(ciphertext,'UTF8') FROM secrets ORDER BY 1")
+        .fetch_all(pool)
+        .await
+        .unwrap()
 }
 async fn identity(pool: &sqlx::PgPool) -> String {
     sqlx::query_scalar("SELECT encryption_key_id FROM recovery_barrier WHERE singleton")
@@ -14,18 +17,24 @@ async fn identity(pool: &sqlx::PgPool) -> String {
         .await
         .unwrap()
 }
-async fn seed_browser(l: &Lab) {
+/// Three values under the current key, beside whatever a test stores.
+async fn seed_values(l: &Lab) {
     let cipher = cipher(&l.root.path().join("encryption.key"));
-    let user = uid();
-    sqlx::query("INSERT INTO customer_users(id,issuer,subject) VALUES($1,'https://identity.test','rotation')").bind(&user).execute(&l.store.pool).await.unwrap();
-    sqlx::query("INSERT INTO browser_sessions(id,user_id,token_hash,csrf_hash,csrf_encrypted,expires,client_id,provider_iat) VALUES($1,$2,'session','csrf',$3,now()+interval '1 hour','rotation',0)").bind(uid()).bind(user).bind(cipher.encrypt(b"csrf-value")).execute(&l.store.pool).await.unwrap();
-    sqlx::query("INSERT INTO browser_logins(state_hash,browser_hash,context_hash,nonce_encrypted,pkce_encrypted) VALUES('state','browser','context',$1,$2)").bind(cipher.encrypt(b"nonce-value")).bind(cipher.encrypt(b"pkce-value")).execute(&l.store.pool).await.unwrap();
+    for (name, value) in [
+        ("rotation-1", "first-value"),
+        ("rotation-2", "second-value"),
+        ("rotation-3", "third-value"),
+    ] {
+        sqlx::query("INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext) VALUES($1,$2,$3,$4,convert_to($5,'UTF8'))")
+            .bind(uid()).bind(&l.tenant).bind(&l.project).bind(name).bind(cipher.encrypt(value.as_bytes()))
+            .execute(&l.store.pool).await.unwrap();
+    }
 }
 
 #[tokio::test]
 async fn rotation_preserves_plaintext_authority_and_fences_stale_processes() {
     let l = Lab::new().await;
-    seed_browser(&l).await;
+    seed_values(&l).await;
     let old_path = l.root.path().join("encryption.key");
     let old = cipher(&old_path);
     sqlx::query("INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext) SELECT md5(n::text),$1,$2,'secret-'||n,convert_to($3,'UTF8') FROM generate_series(1,130) n")
@@ -122,19 +131,23 @@ async fn rotation_rolls_back_all_columns_on_corruption_or_late_database_failure(
         )
         .await
         .unwrap();
-    seed_browser(&l).await;
+    seed_values(&l).await;
     let key = std::fs::read(l.root.path().join("encryption.key")).unwrap();
     let key_id = identity(&l.store.pool).await;
     let target = l.root.path().join("new.key");
     generate(&target).unwrap();
-    let original: String = sqlx::query_scalar("SELECT pkce_encrypted FROM browser_logins")
-        .fetch_one(&l.store.pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE browser_logins SET pkce_encrypted='invalid'")
-        .execute(&l.store.pool)
-        .await
-        .unwrap();
+    let original: String = sqlx::query_scalar(
+        "SELECT convert_from(ciphertext,'UTF8') FROM secrets WHERE name='rotation-3'",
+    )
+    .fetch_one(&l.store.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE secrets SET ciphertext=convert_to('invalid','UTF8') WHERE name='rotation-3'",
+    )
+    .execute(&l.store.pool)
+    .await
+    .unwrap();
     let before = encrypted(&l.store.pool).await;
     assert!(
         rotate(&l.store.pool, l.root.path(), &target, true)
@@ -147,7 +160,7 @@ async fn rotation_rolls_back_all_columns_on_corruption_or_late_database_failure(
         std::fs::read(l.root.path().join("encryption.key")).unwrap(),
         key
     );
-    sqlx::query("UPDATE browser_logins SET pkce_encrypted=$1")
+    sqlx::query("UPDATE secrets SET ciphertext=convert_to($1,'UTF8') WHERE name='rotation-3'")
         .bind(original)
         .execute(&l.store.pool)
         .await
@@ -189,7 +202,7 @@ async fn rotation_rolls_back_all_columns_on_corruption_or_late_database_failure(
 #[tokio::test]
 async fn committed_rotation_recovers_publication_once_and_preserves_recovery_barrier() {
     let l = Lab::new().await;
-    seed_browser(&l).await;
+    seed_values(&l).await;
     let path = l.root.path().join("encryption.key");
     let old = std::fs::read(&path).unwrap();
     let target = l.root.path().join("new.key");
@@ -283,7 +296,7 @@ async fn key_files_refuse_overwrite_symlinks_and_broad_permissions() {
 #[tokio::test]
 async fn initial_key_binding_validates_existing_values_before_trusting_state() {
     let l = Lab::new().await;
-    seed_browser(&l).await;
+    seed_values(&l).await;
     let path = l.root.path().join("encryption.key");
     let previous = std::fs::read(&path).unwrap();
     let contents = encrypted(&l.store.pool).await;

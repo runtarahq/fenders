@@ -662,51 +662,12 @@ async fn real_database_backup_and_fenced_restore() {
             .await
             .unwrap();
     let key = root.path().join("key");
-    let customer = uid();
-    let membership = uid();
-    sqlx::query("INSERT INTO customer_users(id,issuer,subject) VALUES($1,'https://identity.test','restored-customer')").bind(&customer).execute(&source.pool).await.unwrap();
-    let disabled_customer = uid();
-    sqlx::query("INSERT INTO customer_users(id,issuer,subject) VALUES($1,'https://identity.test','suspended-customer')").bind(&disabled_customer).execute(&source.pool).await.unwrap();
-    let disabled_account = source
-        .update_customer_user(
-            &operator,
-            &disabled_customer,
-            json!({"disabled":true,"expected_revision":1}),
-        )
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO workspace_memberships(id,tenant_id,user_id,role) VALUES($1,$2,$3,'owner')",
-    )
-    .bind(&membership)
-    .bind(t)
-    .bind(&customer)
-    .execute(&source.pool)
-    .await
-    .unwrap();
     let source_cipher = fernet::Fernet::new(
         std::fs::read_to_string(root.path().join("source/encryption.key"))
             .unwrap()
             .trim(),
     )
     .unwrap();
-    sqlx::query("INSERT INTO browser_sessions(id,user_id,token_hash,csrf_hash,csrf_encrypted,expires,client_id,provider_iat) VALUES($1,$2,'fixture-session','fixture-csrf',$3,now()+interval '1 hour','backup',0)").bind(uid()).bind(&customer).bind(source_cipher.encrypt(b"fixture-csrf")).execute(&source.pool).await.unwrap();
-    // Invitations as the snapshot finds them: one open with its mail queued,
-    // one already accepted.
-    for (id, status, delivery) in [
-        ("i-open", "pending", "queued"),
-        ("i-done", "accepted", "sent"),
-    ] {
-        sqlx::query("INSERT INTO workspace_invitations(id,tenant_id,email,role,inviter_id,request_key,status) VALUES($1,$2,'invited@example.test','viewer',$3,$1,$4)")
-            .bind(id).bind(t).bind(&customer).bind(status).execute(&source.pool).await.unwrap();
-        sqlx::query("INSERT INTO invitation_outbox(invitation_id,state) VALUES($1,$2)")
-            .bind(id)
-            .bind(delivery)
-            .execute(&source.pool)
-            .await
-            .unwrap();
-    }
-    sqlx::query("INSERT INTO browser_logins(state_hash,browser_hash,context_hash,nonce_encrypted,pkce_encrypted) VALUES('fixture-state','fixture-browser','fixture-context',$1,$2)").bind(source_cipher.encrypt(b"fixture-nonce")).bind(source_cipher.encrypt(b"fixture-pkce")).execute(&source.pool).await.unwrap();
     sqlx::query("INSERT INTO usage_samples(execution_id,generation,sequence,tenant_id,cpu_usec,memory_bytes,cpu_measured,memory_measured,observed) SELECT $1,1,n,$2,CASE WHEN n=200 THEN 9999 ELSE n END,n,n<600,n<600,now()-interval '1 day'+n*interval '1 second' FROM generate_series(1,600) n").bind(&log_execution).bind(t).execute(&source.pool).await.unwrap();
     sqlx::query("INSERT INTO usage_compaction_queue(execution_id) VALUES($1)")
         .bind(&log_execution)
@@ -1060,46 +1021,6 @@ async fn real_database_backup_and_fenced_restore() {
         source_cipher.decrypt(&endpoint_ciphertext).unwrap()
     );
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT user_id FROM workspace_memberships WHERE id=$1")
-            .bind(&membership)
-            .fetch_one(&target.pool)
-            .await
-            .unwrap(),
-        customer
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT (SELECT count(*) FROM browser_sessions)+(SELECT count(*) FROM browser_logins)"
-        )
-        .fetch_one(&target.pool)
-        .await
-        .unwrap(),
-        0
-    );
-    // An invitation open at the snapshot is withdrawn and its mail is not
-    // sent; one already decided is as it was.
-    let invitations: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT i.id,i.status,o.state FROM workspace_invitations i JOIN invitation_outbox o ON o.invitation_id=i.id ORDER BY i.id",
-    )
-    .fetch_all(&target.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        invitations,
-        [
-            (
-                "i-done".to_owned(),
-                "accepted".to_owned(),
-                "sent".to_owned()
-            ),
-            (
-                "i-open".to_owned(),
-                "revoked".to_owned(),
-                "cancelled".to_owned()
-            ),
-        ]
-    );
-    assert_eq!(
         target
             .usage_history(&operator, t, Some(p), Default::default())
             .await
@@ -1109,25 +1030,6 @@ async fn real_database_backup_and_fenced_restore() {
             .last()
             .unwrap(),
         &old_accounting
-    );
-    assert_eq!(
-        target
-            .customer_user(&operator, &disabled_customer)
-            .await
-            .unwrap(),
-        disabled_account
-    );
-    assert_eq!(
-        target
-            .update_customer_user(
-                &operator,
-                &disabled_customer,
-                json!({"disabled":false,"expected_revision":2})
-            )
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::SERVICE_UNAVAILABLE
     );
     let saved_egress = target.usage(&operator, t, Some(p)).await.unwrap();
     assert_eq!(saved_egress["totals"]["egress_bytes"], 12345);

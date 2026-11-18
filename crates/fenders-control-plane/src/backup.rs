@@ -561,16 +561,28 @@ DO $http_runs$ BEGIN
  END IF;
 END $http_runs$;
 DELETE FROM ingress_reservations WHERE app_id IS NOT NULL AND execution_id IS NULL;
-DELETE FROM browser_sessions;
-DELETE FROM browser_logins;
--- An invitation open at the snapshot may have been withdrawn since, and its
--- mail may be queued again: none is honoured or sent after a restore.
-DO $invitations$ BEGIN
- IF to_regclass('workspace_invitations') IS NOT NULL THEN
-  UPDATE workspace_invitations SET status='revoked',revision=revision+1,decided_at=now() WHERE status='pending';
-  UPDATE invitation_outbox SET state='cancelled',lease=NULL WHERE state IN ('queued','sending','failed');
+UPDATE recovery_barrier SET active=true WHERE singleton;
+UPDATE credentials SET revoked=true;
+UPDATE nodes SET disabled=true,draining=true,observed_runtime_digest=NULL;
+UPDATE deployments SET desired='stopped';
+UPDATE executions SET desired='stopped',generation=generation+1,state='unreachable' WHERE reserved;
+UPDATE executions SET log_ingestion_fenced=true;
+UPDATE operations SET state='failed',error='restored-control-plane-requires-reconciliation' WHERE state='pending';
+UPDATE public_egress_policy SET enabled=false,revision=revision+1,updated=now();
+UPDATE execution_https_bindings SET fenced=true,updated=now();
+UPDATE artifact_validations SET state='pending',generation=generation+1,node_id=NULL,node_boot=NULL,lease_until=NULL,available_at=now(),error='compiler-unavailable',updated=now() WHERE state='validating';
+UPDATE apps SET desired='stopped',revision=revision+1,updated=now();
+UPDATE app_http SET state='disabled',reason='restored-control-plane',blocked=false,execution_id=NULL,generation=LEAST(generation::bigint+1,2147483647)::integer,drain_until=NULL,ready_until=NULL,restart_after=NULL,idle_draining=false,last_activity=now(),updated=now();
+UPDATE app_releases SET state='failed',reason='restored-control-plane',updated=now() WHERE state='preparing';
+UPDATE app_schedules SET next_at=NULL,updated=now();
+UPDATE app_runs SET admission='cancelled',admission_reason='restored-control-plane',admission_updated=now() WHERE admission='pending';
+UPDATE app_run_dispatch SET state='cancelled',last_error='restored-control-plane',updated=now() WHERE state='pending';
+DO $http_runs$ BEGIN
+ IF to_regclass('app_http_runs') IS NOT NULL THEN
+  UPDATE app_http_runs SET state=CASE WHEN started_at IS NULL THEN 'failed' ELSE 'unknown' END,finished_at=clock_timestamp() WHERE finished_at IS NULL;
  END IF;
-END $invitations$;
+END $http_runs$;
+DELETE FROM ingress_reservations WHERE app_id IS NOT NULL AND execution_id IS NULL;
 UPDATE recovery_barrier SET active=true,backup_id='{id}',restored=now(),activated=NULL WHERE singleton;
 INSERT INTO audit(actor,action,detail) VALUES('restore','control.restore','{{"backup_id":"{id}"}}');
 "#).as_bytes())?;

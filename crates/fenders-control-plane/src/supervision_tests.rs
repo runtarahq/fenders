@@ -100,11 +100,7 @@ async fn registration_is_bounded_and_process_restart_cannot_reuse_old_health() {
         background.failure().await,
         "no background tasks are registered"
     );
-    for component in [
-        Component::Scheduler,
-        Component::PickupListener,
-        Component::InvitationEmail,
-    ] {
+    for component in [Component::Scheduler, Component::PickupListener] {
         background.spawn(component, std::future::pending()).unwrap();
         assert!(background.spawn(component, std::future::pending()).is_err());
     }
@@ -113,7 +109,7 @@ async fn registration_is_bounded_and_process_restart_cannot_reuse_old_health() {
             .as_array()
             .unwrap()
             .len(),
-        3
+        2
     );
     let fresh = Monitor::default().snapshot().unwrap();
     assert_ne!(

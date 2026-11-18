@@ -382,7 +382,7 @@ async fn real_daemon_reports_recovery_failures_resumes_and_resets_observations_o
     let (mut child, origin, client) = start(&l, true, false).await;
     let initial = observe(&client, &origin, &l.token, |v| {
         // The pickup listener runs continuously; every other loop has iterated.
-        v["components"].as_array().unwrap().len() == 3
+        v["components"].as_array().unwrap().len() == 2
             && v["components"].as_array().unwrap().iter().all(|c| {
                 if c["component"] == "pickup_listener" {
                     c["state"] == "running"
@@ -394,7 +394,7 @@ async fn real_daemon_reports_recovery_failures_resumes_and_resets_observations_o
     .await;
     assert_eq!(
         component_names(&initial),
-        vec!["invitation_email", "pickup_listener", "scheduler"]
+        vec!["pickup_listener", "scheduler"]
     );
     assert_eq!(
         client
@@ -463,13 +463,13 @@ async fn real_daemon_reports_recovery_failures_resumes_and_resets_observations_o
     assert_ne!(restarted["process_id"], initial["process_id"]);
     assert_eq!(
         restarted["components"].as_array().unwrap().len(),
-        3,
-        "only the WASM scheduler, its pickup listener and invitation delivery run"
+        2,
+        "only the WASM scheduler and its pickup listener run"
     );
     assert_eq!(scheduler(&restarted)["failures"], 0);
     assert_eq!(
         component_names(&restarted),
-        vec!["invitation_email", "pickup_listener", "scheduler"]
+        vec!["pickup_listener", "scheduler"]
     );
     drop(client);
     terminate(&mut child).await;

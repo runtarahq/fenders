@@ -41,8 +41,6 @@ mod app_logs;
 mod app_on_demand;
 #[path = "cases/app_schedules.rs"]
 mod app_schedules;
-#[path = "cases/browser_identity.rs"]
-mod browser_identity;
 #[path = "cases/control_plane_rollout.rs"]
 mod control_plane_rollout;
 #[path = "common/dns.rs"]

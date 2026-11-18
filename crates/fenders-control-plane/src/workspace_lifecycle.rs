@@ -12,6 +12,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub(crate) const MIGRATION: &str = "
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS allowance_revision bigint NOT NULL DEFAULT 1;
+CREATE OR REPLACE FUNCTION advance_allowance_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.allowance_revision := OLD.allowance_revision + 1; RETURN NEW; END $$;
+CREATE OR REPLACE TRIGGER tenant_allowance_revision BEFORE UPDATE OF
+ cpu_percent,memory_mib,instances,storage_bytes,transfer_bytes ON tenants
+ FOR EACH ROW EXECUTE FUNCTION advance_allowance_revision();
+CREATE TABLE IF NOT EXISTS operator_request_receipts (
+ actor text NOT NULL, request_key text NOT NULL, tenant_id text NOT NULL REFERENCES tenants(id),
+ request_hash text NOT NULL, response jsonb NOT NULL, created timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(actor,request_key));
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS lifecycle_state text NOT NULL DEFAULT 'active'
  CHECK (lifecycle_state IN ('active','suspending','suspended'));
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS lifecycle_revision bigint NOT NULL DEFAULT 1;
@@ -20,7 +30,9 @@ ALTER TABLE tenants ADD COLUMN IF NOT EXISTS lifecycle_reason text;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkspaceAction {
-    id: String,
+    /// The workspace: from the request's path, never its body.
+    #[serde(skip_deserializing)]
+    pub(crate) id: String,
     request_key: String,
     expected_revision: i64,
     action: String,

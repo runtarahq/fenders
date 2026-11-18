@@ -29,10 +29,6 @@ pub struct Principal {
     pub tenant_id: Option<String>,
     pub project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub membership_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_permissions: Option<Vec<String>>,
 }
 impl Principal {
