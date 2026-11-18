@@ -268,6 +268,15 @@ knows its own users and calls this API.
   Every audit record of a change a key makes carries its label, and
   `GET /v1/me` with the key returns it. That is how actions lead back to
   your users.
+- Read the trail with `GET /v1/workspaces/TENANT/audit`: every change made
+  in the workspace, newest first, paged as every list is, and filtered by
+  `action`, `actor_label`, `since` and `until`. With the operator credential
+  each record is whole. With a tenant's key the records its workspace's own
+  keys made are whole, label and detail; a record the operator or the
+  control plane made says what was done, of what and when, with `actor`
+  `operator` or `control-plane` and no detail (the reason you gave for a
+  suspension is yours). A key of one project reads what was done in that
+  project.
 - A key cannot issue, list or revoke keys, whatever it holds: those are the
   operator's.
 

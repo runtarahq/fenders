@@ -950,6 +950,12 @@ async fn every_operation_answers_as_the_contract_says() {
         });
     }
 
+    // What all of that left behind, as the operator reads it and as the
+    // workspace's key does.
+    let trail = t.ok(&operator, "GET", &format!("{w}/audit"), None).await;
+    assert!(trail["items"].as_array().unwrap().len() > 10);
+    t.ok(&key, "GET", &format!("{w}/audit?limit=5"), None).await;
+
     // Refusals are answers too.
     t.send(&key, "GET", &format!("{p}/apps/{}", uid()), None)
         .await;

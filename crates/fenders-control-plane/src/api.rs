@@ -423,6 +423,13 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         ("GET", ["v1", "control-plane", "status"]) => store.background_status(&p)?,
         ("GET", ["v1", "workspaces"]) => store.workspaces(&p, list_page(&parts.uri)?).await?,
         ("GET", ["v1", "workspaces", tenant]) => store.workspace(&p, tenant).await?,
+        ("GET", ["v1", "workspaces", tenant, "audit"]) => {
+            let page =
+                axum::extract::Query::<crate::audit_trail::AuditPage>::try_from_uri(&parts.uri)
+                    .map_err(|_| Error::invalid("invalid audit query"))?
+                    .0;
+            store.audit_trail(&p, tenant, page).await?
+        }
         ("GET", ["v1", "nodes"]) => store.node_page(&p, list_page(&parts.uri)?).await?,
         ("GET", ["v1", "public-egress-policy"]) => store.public_egress_policy(&p).await?,
         ("PUT", ["v1", "public-egress-policy"]) => {

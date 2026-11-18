@@ -2763,3 +2763,266 @@ async fn a_workspace_is_read_by_itself() {
     }
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_workspaces_audit_trail_is_read_by_the_operator_and_by_its_keys() {
+    let l = Lab::new().await;
+    let workspace = format!("/v1/workspaces/{}", l.tenant);
+    let project = format!("{workspace}/projects/{}", l.project);
+    let issue = |label: &'static str, scope: Option<String>| {
+        let (l, workspace) = (&l, workspace.clone());
+        async move {
+            let (status, key) = call(
+                l,
+                &l.token,
+                "POST",
+                &format!("{workspace}/api-keys"),
+                json!({"name":"audited","project_id":scope,"permissions":["read","secrets:write","connections:write"],"ttl_seconds":3600,"label":label}),
+                &uid(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{key}");
+            key
+        }
+    };
+    let alice = issue("user:alice", None).await;
+    let bob = issue("user:bob", Some(l.project.clone())).await;
+    let (alice_token, bob_token) = (s(&alice["token"]), s(&bob["token"]));
+    // Alice and Bob each do something in the project; the operator
+    // changes the workspace's limits.
+    for (token, name) in [(alice_token, "alice-secret"), (bob_token, "bob-secret")] {
+        let made = call(
+            &l,
+            token,
+            "POST",
+            &format!("{project}/secrets"),
+            json!({"name":name,"value":"hunter22"}),
+            &uid(),
+        )
+        .await;
+        assert_eq!(made.0, StatusCode::CREATED, "{}", made.1);
+    }
+    let limited = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &format!("{workspace}/http-limits"),
+        json!({"concurrent_requests":8,"requests_per_minute":120}),
+        "",
+    )
+    .await;
+    assert_eq!(limited.0, StatusCode::OK);
+    let trail = |token: &'static str, query: &'static str| {
+        let (l, workspace) = (&l, workspace.clone());
+        let token = match token {
+            "operator" => l.token.clone(),
+            "alice" => alice_token.to_owned(),
+            _ => bob_token.to_owned(),
+        };
+        async move {
+            let (status, page) = call(
+                l,
+                &token,
+                "GET",
+                &format!("{workspace}/audit{query}"),
+                json!({}),
+                "",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{query}: {page}");
+            page
+        }
+    };
+    let actions = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| s(&record["action"]).to_owned())
+            .collect()
+    };
+
+    // The operator reads all of it, newest first, each record whole.
+    let all = trail("operator", "").await;
+    let items = all["items"].as_array().unwrap();
+    let sequences: Vec<i64> = items
+        .iter()
+        .map(|r| r["sequence"].as_i64().unwrap())
+        .collect();
+    assert!(
+        sequences.windows(2).all(|pair| pair[0] > pair[1]),
+        "{sequences:?}"
+    );
+    assert_eq!(items[0]["action"], "tenant.http-limits");
+    assert_eq!(items[0]["actor"], l.operator.id);
+    assert_eq!(items[0]["detail"]["concurrent_requests"], 8);
+    let by_bob = &items[1];
+    assert_eq!(by_bob["action"], "secret.create");
+    assert_eq!(by_bob["actor"], bob["id"]);
+    assert_eq!(by_bob["actor_label"], "user:bob");
+    assert_eq!(by_bob["project_id"], l.project);
+    assert!(!all.to_string().contains("hunter22"));
+    // What was done in no project has none.
+    assert!(items[0]["project_id"].is_null());
+
+    // Alice's key reads the same trail. What keys of her workspace did is
+    // whole, the label of each on it: that is how a product tells its
+    // users apart. What the operator did happened, and is the operator's.
+    let hers = trail("alice", "").await;
+    let hers = hers["items"].as_array().unwrap();
+    assert_eq!(hers.len(), items.len());
+    assert_eq!(hers[1], *by_bob);
+    assert_eq!(hers[2]["actor_label"], "user:alice");
+    let operators = &hers[0];
+    assert_eq!(operators["action"], "tenant.http-limits");
+    assert_eq!(operators["sequence"], items[0]["sequence"]);
+    assert_eq!(operators["actor"], "operator");
+    assert!(operators["detail"].is_null() && operators["actor_label"].is_null());
+    assert!(
+        !Value::Array(hers.clone())
+            .to_string()
+            .contains(&l.operator.id)
+    );
+
+    // Bob's key is of one project: it reads what was done in that project.
+    let his = trail("bob", "").await;
+    // The two secrets, the component the lab uploaded there, and the
+    // issuing of his own key for it; nothing of the workspace at large.
+    assert_eq!(
+        actions(&his),
+        [
+            "secret.create",
+            "secret.create",
+            "api-key.create",
+            "artifact.upload"
+        ]
+    );
+    assert!(
+        !actions(&his)
+            .iter()
+            .any(|action| action.starts_with("tenant.") || action == "project.create")
+    );
+    assert!(
+        his["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record["project_id"] == l.project)
+    );
+
+    // By action, by label, by time; and by pages.
+    assert_eq!(
+        actions(&trail("alice", "?action=secret.create").await).len(),
+        2
+    );
+    let labelled = trail("operator", "?actor_label=user:alice").await;
+    assert_eq!(actions(&labelled), ["secret.create"]);
+    assert_eq!(labelled["items"][0]["actor"], alice["id"]);
+    assert!(
+        trail("operator", "?actor_label=user:nobody").await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        trail("operator", "?until=2000-01-01T00:00:00Z").await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        trail("operator", "?since=2000-01-01T00:00:00Z").await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        items.len()
+    );
+    let first = trail("operator", "?limit=2").await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    let cursor = s(&first["next"]).to_owned();
+    let (_, second) = call(
+        &l,
+        &l.token,
+        "GET",
+        &format!("{workspace}/audit?limit=2&before={cursor}"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(second["items"][0], items[2]);
+    let mut walked = 0;
+    let mut cursor: Option<String> = None;
+    loop {
+        let query = cursor.map_or("?limit=3".to_owned(), |c| format!("?limit=3&before={c}"));
+        let (_, page) = call(
+            &l,
+            &l.token,
+            "GET",
+            &format!("{workspace}/audit{query}"),
+            json!({}),
+            "",
+        )
+        .await;
+        walked += page["items"].as_array().unwrap().len();
+        match page["next"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    assert_eq!(walked, items.len());
+
+    // Malformed, and not its own.
+    for query in [
+        "?limit=0",
+        "?before=soon",
+        "?since=yesterday",
+        "?actor=x",
+        "?action=",
+    ] {
+        let refused = call(
+            &l,
+            alice_token,
+            "GET",
+            &format!("{workspace}/audit{query}"),
+            json!({}),
+            "",
+        )
+        .await;
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST, "{query}");
+    }
+    let other = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/workspaces",
+        json!({"name":"other","allowance":{"cpu_percent":100,"memory_mib":512,"storage_bytes":1048576,"instances":1,"transfer_bytes":1048576}}),
+        "other",
+    )
+    .await;
+    for (token, expected) in [
+        (alice_token, StatusCode::NOT_FOUND),
+        (l.token.as_str(), StatusCode::OK),
+    ] {
+        let read = call(
+            &l,
+            token,
+            "GET",
+            &format!("/v1/workspaces/{}/audit", s(&other.1["id"])),
+            json!({}),
+            "",
+        )
+        .await;
+        assert_eq!(read.0, expected);
+    }
+    let nothing = call(
+        &l,
+        &l.token,
+        "GET",
+        &format!("/v1/workspaces/{}/audit", uid()),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(nothing.0, StatusCode::NOT_FOUND);
+    l.finish().await;
+}

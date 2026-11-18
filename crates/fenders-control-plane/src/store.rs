@@ -419,7 +419,8 @@ impl Store {
     ) -> Result<()> {
         sqlx::query(
             // With the label of the key that did it, where a key did.
-            "INSERT INTO audit (tenant_id,actor,action,resource_id,detail,actor_label) VALUES ($1,$2,$3,$4,$5,(SELECT label FROM credentials WHERE id=$2))",
+            // And with the project it was done in, where it was done in one.
+            "INSERT INTO audit (tenant_id,actor,action,resource_id,detail,actor_label,project_id) VALUES ($1,$2,$3,$4,$5,(SELECT label FROM credentials WHERE id=$2),NULLIF(current_setting('fenders.project',true),''))",
         )
         .bind(tenant)
         .bind(&actor.id)
@@ -452,6 +453,12 @@ impl Store {
         if !exists {
             return Err(Error::missing());
         }
+        // What this transaction goes on to record, it records of this
+        // project: the audit trail of a project is what was done in it.
+        sqlx::query("SELECT set_config('fenders.project',$1,true)")
+            .bind(project)
+            .execute(&mut **tx)
+            .await?;
         Ok(())
     }
     /// Every workspace, for the control plane's own reads.

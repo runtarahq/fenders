@@ -32,6 +32,7 @@ pub const KEY_ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/v1/workspaces/*", "read"),
     ("GET", "/v1/workspaces/*/projects", "read"),
     ("POST", "/v1/workspaces/*/projects", "projects:write"),
+    ("GET", "/v1/workspaces/*/audit", "read"),
     ("GET", "/v1/workspaces/*/usage", "read"),
     ("GET", "/v1/workspaces/*/usage/history", "read"),
     ("GET", "/v1/workspaces/*/projects/*/usage", "read"),

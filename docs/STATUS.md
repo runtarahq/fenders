@@ -124,7 +124,8 @@ was decided on as `expected_revision`.
   changes a minute between them (counted in memory, as the gateway's rate
   is). These are constants. Audit records, operations and request receipts
   are kept for good: their growth is bounded by that rate, not by a
-  retention.
+  retention. A record made before the trail kept a record's project has
+  none, and is not shown to a key of one project.
 - The operator credential is one bearer token, written to
   `STATE/operator.token` at first start. It is not scoped; whoever holds it
   can do anything. It is valid for as long as it is that file's: to replace

@@ -3780,6 +3780,84 @@
           }
         }
       }
+    },
+    "/workspaces/{workspace}/audit": {
+      "get": {
+        "operationId": "get__workspaces_workspace_audit",
+        "summary": "Read a workspace's audit trail",
+        "description": "Every change made in the workspace, newest first. The operator reads any workspace's. A key reads its own workspace's; a key of one project reads what was done in that project. Required permission: read.",
+        "tags": [
+          "workspace"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Workspace"
+          },
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Records of this action alone.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_label",
+            "in": "query",
+            "description": "Records made by keys issued with this label.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Records made at or after this time.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "Records made before this time.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the trail.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -9218,6 +9296,112 @@
           "detail"
         ],
         "additionalProperties": false
+      },
+      "AuditRecord": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One change that was made: who made it, what it was, of what, and when. To a workspace's key, a record one of the workspace's own keys made is whole; one the operator or the control plane made says that it happened, of what and when, and not who exactly or the detail.",
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "description": "Its place in the trail. Later records have greater ones."
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "action": {
+            "type": "string",
+            "description": "What was done, as app.create or api-key.create. Actions may be added."
+          },
+          "resource_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "What it was done to."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "description": "The project it was done in, where it was done in one. Records made before this was kept have none."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "actor": {
+            "type": "string",
+            "description": "The id of the credential that made it. To a key, for a record that is not one of its workspace's keys': operator or control-plane."
+          },
+          "actor_label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The label the key that made it was issued with."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "object",
+                "description": "What the action recorded of itself. null to a key for a record the operator or the control plane made."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "sequence",
+          "created",
+          "action",
+          "resource_id",
+          "project_id",
+          "actor",
+          "actor_label",
+          "detail"
+        ]
+      },
+      "AuditPage": {
+        "type": "object",
+        "description": "A page of a workspace's audit trail, newest first.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditRecord"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
       }
     }
   }
