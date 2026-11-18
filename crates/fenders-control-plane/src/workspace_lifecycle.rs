@@ -71,7 +71,8 @@ impl Store {
             return Err(Error::new(
                 StatusCode::FORBIDDEN,
                 "workspace is suspended; read-only access remains available",
-            ));
+            )
+            .coded("workspace_suspended"));
         }
         Ok(())
     }
@@ -111,7 +112,9 @@ impl Store {
         )
         .await?;
         if before["lifecycle_revision"] != input.expected_revision {
-            return Err(conflict("workspace changed; refresh before editing"));
+            return Err(
+                conflict("workspace changed; refresh before editing").coded("revision_conflict")
+            );
         }
         if input.action == "suspend" {
             if before["lifecycle_state"] != "active" {

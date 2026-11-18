@@ -18,6 +18,18 @@ pub struct Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Every reason an error may be given, beside the names of the statuses.
+/// The contract lists them: one given here and not there fails a test.
+pub const REASONS: &[&str] = &[
+    "idempotency_key_required",
+    "idempotency_key_reused",
+    "revision_conflict",
+    "already_exists",
+    "not_validated",
+    "workspace_suspended",
+    "permission_denied",
+];
+
 impl Error {
     pub fn new(status: StatusCode, message: &'static str) -> Self {
         Self {
@@ -29,6 +41,7 @@ impl Error {
     }
     /// The same error with the reason `code`.
     pub fn coded(mut self, code: &'static str) -> Self {
+        debug_assert!(REASONS.contains(&code), "{code} is not a listed reason");
         self.reason = Some(code);
         self
     }
@@ -67,7 +80,7 @@ impl From<sqlx::Error> for Error {
         // Database errors may contain tenant data and connection details. Never echo them.
         match error {
             sqlx::Error::Database(ref e) if e.code().is_some_and(|c| c == "23505") => {
-                Self::new(StatusCode::CONFLICT, "resource already exists")
+                Self::new(StatusCode::CONFLICT, "resource already exists").coded("already_exists")
             }
             sqlx::Error::Database(ref e) if e.code().is_some_and(|c| c == "23503") => {
                 Self::missing()
@@ -126,5 +139,32 @@ mod tests {
         // A node's error keeps its reason on the way through.
         let node = fenders_node_protocol::error::Error::invalid("refused").coded("specific");
         assert_eq!(Error::from(node).code(), "specific");
+    }
+
+    #[test]
+    fn the_contract_lists_every_code() {
+        let spec: serde_json::Value =
+            serde_json::from_str(include_str!("../static/api/openapi.json")).unwrap();
+        let listed: Vec<&str> =
+            spec["components"]["schemas"]["Error"]["properties"]["code"]["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|code| code.as_str().unwrap())
+                .collect();
+        for reason in REASONS {
+            assert!(listed.contains(reason), "{reason} is not in the contract");
+        }
+        // And what the contract lists is a reason, or a status this names.
+        let statuses: Vec<&str> = (400..600)
+            .filter_map(|status| StatusCode::from_u16(status).ok())
+            .map(fenders_node_protocol::error::status_code)
+            .collect();
+        for code in listed {
+            assert!(
+                REASONS.contains(&code) || statuses.contains(&code),
+                "the contract lists {code}, which nothing answers"
+            );
+        }
     }
 }

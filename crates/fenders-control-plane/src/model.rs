@@ -39,7 +39,9 @@ pub struct Principal {
 impl Principal {
     pub fn operator(&self) -> Result<()> {
         if self.role != Role::Operator {
-            return Err(Error::new(StatusCode::FORBIDDEN, "operator required"));
+            return Err(
+                Error::new(StatusCode::FORBIDDEN, "operator required").coded("permission_denied")
+            );
         }
         Ok(())
     }
@@ -64,7 +66,9 @@ impl Principal {
         }
         // What is the operator's alone: a tenant's keys and its settings.
         if operator {
-            return Err(Error::new(StatusCode::FORBIDDEN, "operator required"));
+            return Err(
+                Error::new(StatusCode::FORBIDDEN, "operator required").coded("permission_denied")
+            );
         }
         // Beside the table of what each route takes (customer_api): a key
         // that may change nothing changes nothing, however it is asked.
@@ -74,7 +78,8 @@ impl Principal {
                 .as_ref()
                 .is_some_and(|held| held.iter().any(|v| v.ends_with(":write")))
         {
-            return Err(Error::new(StatusCode::FORBIDDEN, "read-only credential"));
+            return Err(Error::new(StatusCode::FORBIDDEN, "read-only credential")
+                .coded("permission_denied"));
         }
         Ok(())
     }

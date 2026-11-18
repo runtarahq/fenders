@@ -103,12 +103,14 @@ pub fn authorize(p: &Principal, method: &str, path: &[&str]) -> Result<()> {
     if let Some(permissions) = &p.api_permissions {
         let required = permission(method, path).ok_or_else(|| {
             Error::new(StatusCode::FORBIDDEN, "API key cannot access this endpoint")
+                .coded("permission_denied")
         })?;
         if !permissions.iter().any(|v| v == required) {
             return Err(Error::new(
                 StatusCode::FORBIDDEN,
                 "API key lacks the required permission",
-            ));
+            )
+            .coded("permission_denied"));
         }
     }
     Ok(())
@@ -147,9 +149,10 @@ CREATE TABLE IF NOT EXISTS customer_request_receipts (
 /// A request key is what its caller chose: 1 to 128 bytes, nothing more.
 pub(crate) fn request_key(key: &str) -> Result<()> {
     if key.is_empty() || key.len() > 128 {
-        return Err(Error::invalid(
-            "Idempotency-Key is required (1–128 characters)",
-        ));
+        return Err(
+            Error::invalid("Idempotency-Key is required (1–128 characters)")
+                .coded("idempotency_key_required"),
+        );
     }
     Ok(())
 }
@@ -183,7 +186,8 @@ pub(crate) async fn operator_receipt(
             return Err(Error::new(
                 StatusCode::CONFLICT,
                 "idempotency key has different arguments",
-            ));
+            )
+            .coded("idempotency_key_reused"));
         }
         return Ok(Some(previous["response"].clone()));
     }
@@ -218,7 +222,8 @@ pub(crate) async fn receipt(
             return Err(Error::new(
                 StatusCode::CONFLICT,
                 "idempotency key has different arguments",
-            ));
+            )
+            .coded("idempotency_key_reused"));
         }
         return Ok(Some(previous["response"].clone()));
     }

@@ -3622,10 +3622,37 @@
         "additionalProperties": false,
         "properties": {
           "error": {
-            "type": "string"
+            "type": "string",
+            "description": "For a person to read. Its wording may change; branch on code."
           },
           "code": {
-            "type": "string"
+            "type": "string",
+            "description": "Why the request was refused, for a program to branch on. Either the status named, or a reason more specific than it. Codes may be added.",
+            "enum": [
+              "invalid_request",
+              "unauthorized",
+              "forbidden",
+              "not_found",
+              "method_not_allowed",
+              "request_timeout",
+              "conflict",
+              "gone",
+              "payload_too_large",
+              "unsupported_media_type",
+              "rate_limited",
+              "internal_error",
+              "not_available",
+              "bad_gateway",
+              "unavailable",
+              "gateway_timeout",
+              "idempotency_key_required",
+              "idempotency_key_reused",
+              "revision_conflict",
+              "already_exists",
+              "not_validated",
+              "workspace_suspended",
+              "permission_denied"
+            ]
           },
           "request_id": {
             "type": "string",

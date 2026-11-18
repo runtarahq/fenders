@@ -342,7 +342,8 @@ impl Store {
         )
         .await?;
         if triggers["revision"] != value["expected_revision"] {
-            return Err(conflict("trigger revision changed; reload before saving"));
+            return Err(conflict("trigger revision changed; reload before saving")
+                .coded("revision_conflict"));
         }
         let schedule = Self::schedule_config(
             value.get("schedule"),
@@ -443,7 +444,9 @@ impl Store {
             return Ok(op);
         }
         if row["revision"] != value["expected_revision"] {
-            return Err(conflict("app revision changed; reload before saving"));
+            return Err(
+                conflict("app revision changed; reload before saving").coded("revision_conflict")
+            );
         }
         idle(&mut tx, app).await?;
         let version = one(&mut tx,"SELECT * FROM app_versions WHERE tenant_id=$1 AND project_id=$2 AND app_id=$3 AND id=$4",args![tenant,project,app,version_id]).await?;
@@ -507,9 +510,10 @@ impl Store {
             return Err(Error::missing());
         }
         if version["inspection"]["runtime"] != RUNTIME {
-            return Err(conflict(
-                "code version requires validation for the supported runtime",
-            ));
+            return Err(
+                conflict("code version requires validation for the supported runtime")
+                    .coded("not_validated"),
+            );
         }
         let triggers = one(tx, "SELECT * FROM app_triggers WHERE app_id=$1", args![app]).await?;
         let scheduled = Self::schedule_row(tx, app).await?["enabled"] == true;
@@ -564,7 +568,9 @@ impl Store {
             return Ok(op);
         }
         if row["revision"] != value["expected_revision"] {
-            return Err(conflict("app revision changed; reload before saving"));
+            return Err(
+                conflict("app revision changed; reload before saving").coded("revision_conflict")
+            );
         }
         if value["desired"] == "stopped" {
             Self::cancel_schedule_dispatch(&mut tx, app, "app-stopped").await?;

@@ -211,7 +211,9 @@ impl Store {
     ) -> Result<()> {
         let existing = one(tx,"SELECT EXISTS(SELECT 1 FROM external_endpoints WHERE tenant_id=$1 AND project_id=$2 AND name=$3) OR EXISTS(SELECT 1 FROM external_https_endpoints WHERE tenant_id=$1 AND project_id=$2 AND name=$3) AS present",args![tenant,project,name]).await?;
         if b(&existing["present"]) {
-            return Err(conflict("a connection with this name already exists"));
+            return Err(
+                conflict("a connection with this name already exists").coded("already_exists")
+            );
         }
         let count = one(tx,"SELECT (SELECT count(*) FROM external_endpoints WHERE tenant_id=$1)+(SELECT count(*) FROM external_https_endpoints WHERE tenant_id=$1) n",args![tenant]).await?;
         if n(&count["n"]) >= 256 {

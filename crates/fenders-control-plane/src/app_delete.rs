@@ -43,7 +43,9 @@ impl Store {
         }
         let row = Self::app_row(&mut tx, tenant, project, app).await?;
         if row["revision"] != value["expected_revision"] {
-            return Err(conflict("app revision changed; reload before deleting"));
+            return Err(
+                conflict("app revision changed; reload before deleting").coded("revision_conflict")
+            );
         }
         let op =
             Self::operation(&mut tx, tenant, project, key, &request, app, "delete-app").await?;

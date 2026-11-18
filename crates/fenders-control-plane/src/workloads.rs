@@ -27,9 +27,10 @@ impl Store {
         request: &Value,
     ) -> Result<Option<Value>> {
         if key.is_empty() || key.len() > 128 {
-            return Err(Error::invalid(
-                "Idempotency-Key is required (1–128 characters)",
-            ));
+            return Err(
+                Error::invalid("Idempotency-Key is required (1–128 characters)")
+                    .coded("idempotency_key_required"),
+            );
         }
         let previous = optional(
             tx,
@@ -41,7 +42,9 @@ impl Store {
             .as_ref()
             .is_some_and(|p| p["request_hash"] != fingerprint(request))
         {
-            return Err(conflict("idempotency key has different arguments"));
+            return Err(
+                conflict("idempotency key has different arguments").coded("idempotency_key_reused")
+            );
         }
         Ok(previous)
     }

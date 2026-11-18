@@ -1482,3 +1482,130 @@ async fn what_became_of_a_request_is_found_by_whatever_key_it_was_made_with() {
     }
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_refusals_code_says_why_where_the_status_does_not() {
+    let l = Lab::new().await;
+    let writer = key(&l, None, &["read", "apps:write", "projects:write"]).await;
+    let reader = key(&l, None, &["read"]).await;
+    let (writer, reader) = (s(&writer["token"]), s(&reader["token"]));
+    let projects = format!("/v1/workspaces/{}/projects", l.tenant);
+    let base = format!("{projects}/{}", l.project);
+    let refused = |token: &'static str,
+                   method: &'static str,
+                   path: String,
+                   body: Value,
+                   key: &'static str| {
+        let l = &l;
+        let token = match token {
+            "operator" => l.token.clone(),
+            "writer" => writer.to_owned(),
+            _ => reader.to_owned(),
+        };
+        async move {
+            let (status, value) = call(l, &token, method, &path, body, key).await;
+            (status, s(&value["code"]).to_owned())
+        }
+    };
+    let named = json!({"name":"Coded"});
+
+    // 400: the key is missing, not the body malformed.
+    assert_eq!(
+        refused("writer", "POST", projects.clone(), named.clone(), "").await,
+        (StatusCode::BAD_REQUEST, "idempotency_key_required".into())
+    );
+    assert_eq!(
+        refused("writer", "POST", projects.clone(), json!({"nom":"x"}), "k0").await,
+        (StatusCode::BAD_REQUEST, "invalid_request".into())
+    );
+    // 409, three ways: the key was used for something else, the thing
+    // exists, the caller's copy is old.
+    assert_eq!(
+        call(&l, writer, "POST", &projects, named.clone(), "k1")
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        refused(
+            "writer",
+            "POST",
+            projects.clone(),
+            json!({"name":"Another"}),
+            "k1"
+        )
+        .await,
+        (StatusCode::CONFLICT, "idempotency_key_reused".into())
+    );
+    assert_eq!(
+        refused("writer", "POST", projects.clone(), named.clone(), "k2").await,
+        (StatusCode::CONFLICT, "already_exists".into())
+    );
+    // The lab's component has not been inspected.
+    let deploy =
+        json!({"name":"coded","artifact_id":l.artifact,"triggers":{"manual":true,"http":false}});
+    assert_eq!(
+        refused(
+            "writer",
+            "POST",
+            base.clone() + "/apps/deploy",
+            deploy,
+            "k3"
+        )
+        .await,
+        (StatusCode::CONFLICT, "not_validated".into())
+    );
+    let app = l.command_app().await;
+    assert_eq!(
+        refused(
+            "writer",
+            "PATCH",
+            format!("{base}/apps/{app}"),
+            json!({"desired":"stopped","expected_revision":999}),
+            "k4"
+        )
+        .await,
+        (StatusCode::CONFLICT, "revision_conflict".into())
+    );
+    // 403: the key may not, as against the workspace may not.
+    assert_eq!(
+        refused("reader", "POST", projects.clone(), named.clone(), "k5").await,
+        (StatusCode::FORBIDDEN, "permission_denied".into())
+    );
+    assert_eq!(
+        refused("reader", "GET", "/v1/nodes".into(), json!({}), "").await,
+        (StatusCode::FORBIDDEN, "permission_denied".into())
+    );
+    let suspend = json!({"action":"suspend","reason":"Coded","expected_revision":1});
+    let lifecycle = format!("/v1/tenants/{}/lifecycle", l.tenant);
+    assert_eq!(
+        call(&l, &l.token, "POST", &lifecycle, suspend, "k6")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        refused(
+            "writer",
+            "POST",
+            projects.clone(),
+            json!({"name":"Suspended"}),
+            "k7"
+        )
+        .await,
+        (StatusCode::FORBIDDEN, "workspace_suspended".into())
+    );
+    // A status with one meaning keeps its own name.
+    assert_eq!(
+        refused(
+            "writer",
+            "GET",
+            format!("{projects}/{}/apps", uid()),
+            json!({}),
+            ""
+        )
+        .await,
+        (StatusCode::NOT_FOUND, "not_found".into())
+    );
+    l.finish().await;
+}

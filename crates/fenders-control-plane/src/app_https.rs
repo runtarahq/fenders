@@ -105,7 +105,9 @@ impl Store {
         )
         .await?;
         if old["revision"] != value["expected_revision"] {
-            return Err(conflict("public egress policy revision changed"));
+            return Err(
+                conflict("public egress policy revision changed").coded("revision_conflict")
+            );
         }
         let digest = if value["enabled"] == true {
             value["digest"].clone()

@@ -113,9 +113,10 @@ impl Store {
         identity(artifact)?;
         let row = one(tx, "SELECT v.state,v.inspection,a.digest,a.size FROM artifacts a JOIN artifact_validations v ON v.artifact_id=a.id WHERE a.tenant_id=$1 AND a.project_id=$2 AND a.id=$3 AND a.retired_at IS NULL", args![tenant,project,artifact]).await?;
         if row["state"] != "valid" {
-            return Err(conflict(
-                "component must finish validation before attaching code",
-            ));
+            return Err(
+                conflict("component must finish validation before attaching code")
+                    .coded("not_validated"),
+            );
         }
         validate_inspection(
             &row["inspection"],
@@ -123,9 +124,10 @@ impl Store {
             n(&row["size"]) as usize,
         )?;
         if row["inspection"]["runtime"] != RUNTIME {
-            return Err(conflict(
-                "component requires validation for the supported runtime",
-            ));
+            return Err(
+                conflict("component requires validation for the supported runtime")
+                    .coded("not_validated"),
+            );
         }
         Ok(row["inspection"].clone())
     }
@@ -374,7 +376,9 @@ impl Store {
         }
         let current = Self::app_row(&mut tx, tenant, project, app).await?;
         if current["revision"] != revision {
-            return Err(conflict("app revision changed; reload before saving"));
+            return Err(
+                conflict("app revision changed; reload before saving").coded("revision_conflict")
+            );
         }
         let inspection = Self::validated_code(&mut tx, tenant, project, artifact).await?;
         // Reattaching the same immutable artifact with a new request key points
