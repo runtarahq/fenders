@@ -71,6 +71,8 @@ mod schema_migrations;
 mod supervision;
 #[path = "cases/usage.rs"]
 mod usage;
+#[path = "cases/workspace_lifecycle.rs"]
+mod workspace_lifecycle;
 
 struct Lab {
     store: Store,
