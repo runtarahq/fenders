@@ -3,12 +3,6 @@
 mod component_diagnostics;
 #[path = "cases/customer_api.rs"]
 mod customer_api;
-#[path = "cases/demos.rs"]
-mod demos;
-#[path = "common/durable.rs"]
-mod durable;
-#[path = "cases/operator_api.rs"]
-mod operator_api;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},

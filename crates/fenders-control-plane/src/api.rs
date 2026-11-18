@@ -511,35 +511,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 tenant,
                 "projects",
                 project,
-                "demo-components",
-            ],
-        ) => store.demo_components(&p, tenant, project).await?,
-        (
-            "POST",
-            [
-                "v1",
-                "tenants",
-                tenant,
-                "projects",
-                project,
-                "demo-components",
-                demo,
-                "artifacts",
-            ],
-        ) => {
-            status = StatusCode::CREATED;
-            store
-                .select_demo(&p, tenant, project, demo, parse(&bytes)?)
-                .await?
-        }
-        (
-            "GET",
-            [
-                "v1",
-                "tenants",
-                tenant,
-                "projects",
-                project,
                 "apps",
                 app,
                 "connections",

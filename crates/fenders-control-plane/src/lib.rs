@@ -20,7 +20,6 @@ pub mod customer_api;
 pub mod customer_identity;
 pub mod customer_onboarding;
 pub mod db;
-pub mod demos;
 mod dispatch_retention;
 pub mod egress_budget;
 pub mod egress_periods;
