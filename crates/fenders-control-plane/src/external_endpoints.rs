@@ -274,7 +274,7 @@ impl Store {
         project: &str,
         key: &str,
     ) -> Result<Value> {
-        identity(key)?;
+        crate::customer_api::submitted_key(key)?;
         let mut tx = self.transaction(false, false).await?;
         Self::project(&mut tx, p, tenant, project, false).await?;
         one(&mut tx, "SELECT id,resource_id,kind,state,error,created,updated FROM operations WHERE tenant_id=$1 AND project_id=$2 AND request_key=$3 AND kind IN ('create-external-endpoint','remove-external-endpoint')", args![tenant,project,key]).await

@@ -154,6 +154,12 @@ pub(crate) fn request_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// A key named in a path, to ask what became of the request made with it.
+/// One that no request could have been made with names nothing.
+pub(crate) fn submitted_key(key: &str) -> Result<()> {
+    request_key(key).map_err(|_| Error::missing())
+}
+
 /// Receipts of the operator's own changes, which may have no tenant (a
 /// node's registration has none).
 pub(crate) const OPERATOR_RECEIPTS_MIGRATION: &str =

@@ -1389,3 +1389,87 @@ async fn the_operators_other_changes_honour_a_key_and_do_not_require_one() {
     assert_eq!(audits("public-egress.activate").await, 1);
     l.finish().await;
 }
+
+#[tokio::test]
+async fn what_became_of_a_request_is_found_by_whatever_key_it_was_made_with() {
+    let l = Lab::new().await;
+    l.validated().await;
+    let k = key(
+        &l,
+        Some(&l.project),
+        &["read", "apps:write", "runs:write", "connections:write"],
+    )
+    .await;
+    let token = s(&k["token"]);
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
+    let found = |path: String| {
+        let (l, base) = (&l, base.clone());
+        async move { call(l, token, "GET", &(base + &path), json!({}), "").await }
+    };
+
+    // A key is its caller's to choose: here with a space, a slash and a hash.
+    let chosen = "deploy 2026/11 #1";
+    let encoded = "deploy%202026%2F11%20%231";
+    let (status, deployed) = call(
+        &l,
+        token,
+        "POST",
+        &(base.clone() + "/apps/deploy"),
+        json!({"name":"found","artifact_id":l.artifact,"triggers":{"manual":true,"http":false}}),
+        chosen,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{deployed}");
+    let (status, submission) = found(format!("/app-submissions/{encoded}")).await;
+    assert_eq!(status, StatusCode::OK, "{submission}");
+    assert_eq!(submission["id"], deployed["id"]);
+    assert_eq!(submission["resource_id"], deployed["resource_id"]);
+
+    // A short one, which is no identifier.
+    let app = s(&deployed["resource_id"]);
+    let (status, run) = call(
+        &l,
+        token,
+        "POST",
+        &format!("{base}/apps/{app}/runs"),
+        json!({}),
+        "r1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    let (status, submission) = found(format!("/apps/{app}/submissions/r1")).await;
+    assert_eq!(status, StatusCode::OK, "{submission}");
+    assert_eq!(submission["id"], run["id"]);
+    // An app's actions are found through that app, a deployment is not one.
+    assert_eq!(
+        found(format!("/apps/{app}/submissions/{encoded}")).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    let (status, connection) = call(
+        &l,
+        token,
+        "POST",
+        &(base.clone() + "/connections"),
+        json!({"type":"https","name":"example","origin":"https://example.com"}),
+        "connect 1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{connection}");
+    let (status, submission) = found("/endpoint-submissions/connect%201".into()).await;
+    assert_eq!(status, StatusCode::OK, "{submission}");
+    assert_eq!(submission["id"], connection["id"]);
+
+    // A key nothing was made with, one no request could carry, and bytes
+    // that are no text all name nothing.
+    for missing in ["never-sent".to_owned(), "k".repeat(129), "%ff".to_owned()] {
+        for path in [
+            format!("/app-submissions/{missing}"),
+            format!("/apps/{app}/submissions/{missing}"),
+            format!("/endpoint-submissions/{missing}"),
+        ] {
+            assert_eq!(found(path.clone()).await.0, StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+    l.finish().await;
+}

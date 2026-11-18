@@ -912,6 +912,7 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "libc",
+ "percent-encoding",
  "rcgen",
  "reqwest",
  "rusqlite",

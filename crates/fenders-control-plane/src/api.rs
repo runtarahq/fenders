@@ -73,6 +73,14 @@ pub fn gateway(state: ApiState) -> Router {
     Router::new().fallback(gateway_dispatch).with_state(state)
 }
 
+/// A request key as a path names it. A key is whatever its caller chose,
+/// so one with a `/` or a space in it arrives percent-encoded.
+fn path_key(segment: &str) -> Result<String> {
+    percent_encoding::percent_decode_str(segment)
+        .decode_utf8()
+        .map(|key| key.into_owned())
+        .map_err(|_| Error::missing())
+}
 /// The key of a change that does not require one: none when none was sent.
 fn offered(key: &str) -> Option<&str> {
     (!key.is_empty()).then_some(key)
@@ -406,7 +414,11 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "app-submissions",
                 key,
             ],
-        ) => store.app_submission(&p, tenant, project, key).await?,
+        ) => {
+            store
+                .app_submission(&p, tenant, project, &path_key(key)?)
+                .await?
+        }
         (
             "GET",
             [
@@ -422,7 +434,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             ],
         ) => {
             store
-                .app_action_submission(&p, tenant, project, app, key)
+                .app_action_submission(&p, tenant, project, app, &path_key(key)?)
                 .await?
         }
         (
@@ -829,7 +841,11 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "endpoint-submissions",
                 key,
             ],
-        ) => store.endpoint_submission(&p, tenant, project, key).await?,
+        ) => {
+            store
+                .endpoint_submission(&p, tenant, project, &path_key(key)?)
+                .await?
+        }
         (
             "DELETE",
             [
