@@ -203,7 +203,7 @@ impl Store {
         };
         Ok(
             json!({"scope":if project.is_some(){"project"}else{"workspace"},"project_id":project,"as_of":clock["as_of"],
-            "items":items,"next":next,"next_before":next,"retention":crate::accounting_retention::policy(),
+            "items":items,"next":next,"retention":crate::accounting_retention::policy(),
             "measurement":{"period":"UTC calendar month","allowance_basis":"admission month","outbound_observation_basis":"socket completion month","observations_are_allowance_charges":false}}),
         )
     }

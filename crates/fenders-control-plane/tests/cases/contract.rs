@@ -910,7 +910,7 @@ async fn every_operation_answers_as_the_contract_says() {
     t.ok(
         &key,
         "GET",
-        &format!("{p}/operations/{}", s(&operations[0]["id"])),
+        &format!("{p}/operations/{}", s(&operations["items"][0]["id"])),
         None,
     )
     .await;

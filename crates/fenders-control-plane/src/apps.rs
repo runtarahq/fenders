@@ -501,15 +501,7 @@ impl Store {
         let counts = one(
             &mut tx,
             include_str!("app_list_counts.sql"),
-            args![
-                tenant,
-                project,
-                search,
-                trigger,
-                status,
-                cursor["created"],
-                cursor["id"]
-            ],
+            args![tenant, project, search, trigger, status],
         )
         .await?;
         let mut items = rows(&mut tx,"SELECT a.*,EXISTS(SELECT 1 FROM app_runs r LEFT JOIN executions e ON e.id=r.execution_id WHERE r.app_id=a.id AND (r.admission='pending' OR e.reserved)) AS command_busy,COALESCE((SELECT bool_and(r.source='schedule' AND (r.admission='pending' OR r.admission='admitted' AND e.node_id IS NULL AND e.reserved)) FROM app_runs r LEFT JOIN executions e ON e.id=r.execution_id WHERE r.app_id=a.id AND (r.admission='pending' OR e.reserved)),false) AS scheduled_work_cancellable FROM customer_app_summaries a WHERE tenant_id=$1 AND project_id=$2 AND ($3::timestamptz IS NULL OR (created,id)<($3::timestamptz,$4)) AND position(lower($5) in lower(name))>0 AND CASE WHEN $7='' THEN true WHEN $7='none' THEN NOT (triggers->>'http')::boolean AND NOT (triggers->>'manual')::boolean AND NOT (triggers->>'schedule')::boolean ELSE (triggers->>$7)::boolean END AND ($8='' OR state=$8) ORDER BY created DESC,id DESC LIMIT $6",args![tenant,project,cursor["created"],cursor["id"],search,limit+1,trigger,status]).await?;
@@ -525,9 +517,7 @@ impl Store {
         for item in &mut items {
             crate::app_diagnostics::app(item);
         }
-        Ok(
-            json!({"items":items,"next":next,"summary":counts["summary"],"total":counts["total"],"offset":counts["offset"]}),
-        )
+        Ok(json!({"items":items,"next":next,"summary":counts["summary"],"total":counts["total"]}))
     }
 
     pub async fn app_versions(
@@ -548,8 +538,9 @@ impl Store {
         let more = items.len() > 100;
         items.truncate(100);
         items.iter_mut().for_each(last_release);
+        // A cursor is text, whatever it is made of: here, a version's number.
         let next = if more {
-            items.last().unwrap()["number"].clone()
+            json!(items.last().unwrap()["number"].to_string())
         } else {
             Value::Null
         };

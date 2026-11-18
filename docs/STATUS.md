@@ -94,6 +94,14 @@ place. Each breaks a client written against what was there before.
 - **A project's `name` is the name it was given.** It was the slug, with the
   given name in `display_name`. The slug is `slug`. The same in a usage
   answer's `projects`.
+- **Every list is a page.** Workspaces, projects, artifacts, secrets,
+  connections, operations, nodes and API keys were bare arrays (API keys
+  an object with `items` alone), some cut at a thousand rows without
+  saying. Each answers `{items, next}`, newest first, at most 100 at once,
+  with `limit` and `before`. Workspaces, projects and nodes were oldest
+  first. The app list no longer has `offset`, and usage history no longer
+  `next_before`. A version list's `next` is a string. A query parameter a
+  list does not take is `400`.
 
 ## Limits
 

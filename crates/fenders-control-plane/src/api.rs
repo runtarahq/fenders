@@ -115,6 +115,14 @@ fn present(value: &mut Value) {
         _ => {}
     }
 }
+/// The page of a list a request asks for: `limit`, 1 to 100, and `before`,
+/// the cursor a page before gave. Anything else in the query is refused.
+fn list_page(uri: &axum::http::Uri) -> Result<crate::store::ListPage> {
+    axum::extract::Query::<crate::store::ListPage>::try_from_uri(uri)
+        .map_err(|_| Error::invalid("a list takes limit and before"))?
+        .0
+        .at_most(100)
+}
 /// The store's name for a kind of thing a project holds. A connection is
 /// kept as an external endpoint; the rest are kept as they are asked for.
 fn stored(kind: &str) -> &str {
@@ -388,8 +396,8 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         }
         ("GET", ["v1", "me"]) => serde_json::to_value(&p).map_err(|_| Error::internal())?,
         ("GET", ["v1", "control-plane", "status"]) => store.background_status(&p)?,
-        ("GET", ["v1", "workspaces"]) => store.tenants(&p).await?,
-        ("GET", ["v1", "nodes"]) => store.nodes(&p).await?,
+        ("GET", ["v1", "workspaces"]) => store.workspaces(&p, list_page(&parts.uri)?).await?,
+        ("GET", ["v1", "nodes"]) => store.node_page(&p, list_page(&parts.uri)?).await?,
         ("GET", ["v1", "public-egress-policy"]) => store.public_egress_policy(&p).await?,
         ("PUT", ["v1", "public-egress-policy"]) => {
             store
@@ -432,14 +440,22 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .update_http_limits_keyed(&p, tenant, parse(&bytes)?, offered(key))
                 .await?
         }
-        ("GET", ["v1", "workspaces", tenant, "projects"]) => store.projects(&p, tenant).await?,
+        ("GET", ["v1", "workspaces", tenant, "projects"]) => {
+            store
+                .project_page(&p, tenant, list_page(&parts.uri)?)
+                .await?
+        }
         ("POST", ["v1", "workspaces", tenant, "projects"]) => {
             status = StatusCode::CREATED;
             store
                 .create_project_keyed(&p, tenant, parse(&bytes)?, Some(key))
                 .await?
         }
-        ("GET", ["v1", "workspaces", tenant, "api-keys"]) => store.api_keys(&p, tenant).await?,
+        ("GET", ["v1", "workspaces", tenant, "api-keys"]) => {
+            store
+                .api_key_page(&p, tenant, list_page(&parts.uri)?)
+                .await?
+        }
         ("POST", ["v1", "workspaces", tenant, "api-keys"]) => {
             let issued = store
                 .create_api_key(&p, tenant, parse(&bytes)?, key)
@@ -1006,7 +1022,14 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             ],
         ) => {
             store
-                .resources(&p, tenant, project, stored(kind), None)
+                .resource_page(
+                    &p,
+                    tenant,
+                    project,
+                    stored(kind),
+                    None,
+                    list_page(&parts.uri)?,
+                )
                 .await?
         }
         (

@@ -353,13 +353,24 @@ pub(crate) async fn save_receipt(
 }
 
 impl Store {
+    /// Every key of a workspace, for the control plane's own reads.
     pub async fn api_keys(&self, p: &Principal, tenant: &str) -> Result<Value> {
+        self.api_key_page(p, tenant, crate::store::ListPage::whole())
+            .await
+    }
+    pub async fn api_key_page(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        page: crate::store::ListPage,
+    ) -> Result<Value> {
         p.scope(tenant, None, false, true)?;
+        let (before, limit) = page.bounds(1000)?;
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
-        let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'label',label,'prefix',prefix,'created_by',created_by,'expires',expires,'revoked',revoked,'created',created,'last_used',last_used) FROM credentials WHERE tenant_id=$1 AND api_permissions IS NOT NULL ORDER BY created DESC,id")
-            .bind(tenant).fetch_all(&mut *tx).await?;
-        Ok(json!({"items":rows}))
+        let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',r.id,'name',r.name,'project_id',r.project_id,'permissions',r.api_permissions,'label',r.label,'prefix',r.prefix,'created_by',r.created_by,'expires',r.expires,'revoked',r.revoked,'created',r.created,'last_used',r.last_used) FROM credentials r WHERE r.tenant_id=$1 AND r.api_permissions IS NOT NULL AND ($2::text IS NULL OR (r.created,r.id)<(SELECT c.created,c.id FROM credentials c WHERE c.id=$2)) ORDER BY r.created DESC,r.id DESC LIMIT $3")
+            .bind(tenant).bind(before).bind(limit + 1).fetch_all(&mut *tx).await?;
+        Ok(crate::store::ListPage::page(rows, limit))
     }
     pub async fn create_api_key(
         &self,

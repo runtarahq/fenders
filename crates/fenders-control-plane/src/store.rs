@@ -98,6 +98,65 @@ pub(crate) fn token(prefix: &str) -> Result<String> {
             .collect::<String>()
     ))
 }
+/// Which page of a list is asked for: the `limit` newest, or the `limit`
+/// next after the cursor a page before gave as its `next`.
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListPage {
+    pub before: Option<String>,
+    pub limit: Option<i64>,
+}
+impl ListPage {
+    /// As many as a list held before it was paged: for the control plane's
+    /// own reads, which are not the API's.
+    pub(crate) fn whole() -> Self {
+        Self {
+            before: None,
+            limit: Some(1000),
+        }
+    }
+    /// The page, if it asks for no more than the API gives at once.
+    pub fn at_most(self, most: i64) -> Result<Self> {
+        if self.limit.is_some_and(|limit| !(1..=most).contains(&limit)) {
+            return Err(Error::invalid("page limit must be between 1 and 100"));
+        }
+        Ok(self)
+    }
+    /// The cursor and the limit, once they are known to be ones. A cursor
+    /// is the id of the last thing a page showed. That is not said to a
+    /// caller, who passes back what it was given.
+    pub(crate) fn bounds(&self, most: i64) -> Result<(Option<&str>, i64)> {
+        let limit = self.limit.unwrap_or(100);
+        if !(1..=most).contains(&limit) {
+            return Err(Error::invalid("page limit must be between 1 and 100"));
+        }
+        if let Some(before) = &self.before
+            && identity(before).is_err()
+        {
+            return Err(Error::invalid("invalid page cursor"));
+        }
+        Ok((self.before.as_deref(), limit))
+    }
+    /// `{items, next}` of rows read one past the limit: `next` is the
+    /// cursor to the page after this one, or null when there is none.
+    pub(crate) fn page(mut items: Vec<Value>, limit: i64) -> Value {
+        let more = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        let next = match (more, items.last()) {
+            (true, Some(last)) => last["id"].clone(),
+            _ => Value::Null,
+        };
+        json!({"items":items,"next":next})
+    }
+}
+/// Newest first, and after a cursor: for a list of rows `r` of `table`.
+/// `$b` is the cursor's parameter.
+fn after_cursor(table: &str, b: usize) -> String {
+    format!(
+        "(${b}::text IS NULL OR (r.created,r.id)<(SELECT c.created,c.id FROM {table} c WHERE c.id=${b}))"
+    )
+}
+
 /// A workspace `t` as the API shows it to the operator: what it is called,
 /// what it may use, how it stands, and the revisions the operator's own
 /// changes expect. Not a column more: a column added to the table is not
@@ -383,20 +442,29 @@ impl Store {
         }
         Ok(())
     }
+    /// Every workspace, for the control plane's own reads.
     pub async fn tenants(&self, p: &Principal) -> Result<Value> {
+        Ok(self.workspaces(p, ListPage::whole()).await?["items"].take())
+    }
+    /// A page of the workspaces a credential may see: all of them to the
+    /// operator, and a key its own.
+    pub async fn workspaces(&self, p: &Principal, page: ListPage) -> Result<Value> {
+        let (before, limit) = page.bounds(1000)?;
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
         let rows = sqlx::query_scalar::<_, Value>(
             // A workspace's own credentials see its plan and its state, not
             // what the operator wrote of it for itself: the reason it gave
             // for a suspension, and the revisions of its own edits.
-            &format!("SELECT CASE WHEN $1 THEN {WORKSPACE} ELSE {WORKSPACE}-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE $1 OR id=$2 ORDER BY created"),
+            &format!("SELECT CASE WHEN $1 THEN {WORKSPACE} ELSE {WORKSPACE}-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE ($1 OR t.id=$2) AND ($3::text IS NULL OR (t.created,t.id)<(SELECT c.created,c.id FROM tenants c WHERE c.id=$3)) ORDER BY t.created DESC,t.id DESC LIMIT $4"),
         )
         .bind(p.role == Role::Operator)
         .bind(&p.tenant_id)
+        .bind(before)
+        .bind(limit + 1)
         .fetch_all(&mut *tx)
         .await?;
-        Ok(Value::Array(rows))
+        Ok(ListPage::page(rows, limit))
     }
     pub async fn create_tenant(&self, p: &Principal, value: CreateTenant) -> Result<Value> {
         self.create_tenant_keyed(p, value, None).await
@@ -575,12 +643,18 @@ impl Store {
             .bind(tenant).bind(a.cpu_percent).bind(a.memory_mib).bind(a.storage_bytes).bind(a.instances).bind(a.transfer_bytes).fetch_optional(&mut **tx).await?.ok_or_else(Error::missing)?;
         Ok(row)
     }
+    /// Every project of a workspace that a credential may see.
     pub async fn projects(&self, p: &Principal, tenant: &str) -> Result<Value> {
+        Ok(self.project_page(p, tenant, ListPage::whole()).await?["items"].take())
+    }
+    pub async fn project_page(&self, p: &Principal, tenant: &str, page: ListPage) -> Result<Value> {
         p.scope(tenant, p.project_id.as_deref(), false, false)?;
+        let (before, limit) = page.bounds(1000)?;
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
-        Ok(Value::Array(sqlx::query_scalar::<_, Value>(&format!("SELECT {PROJECT} FROM projects p WHERE tenant_id=$1 AND ($2::text IS NULL OR id=$2) ORDER BY created"))
-            .bind(tenant).bind(&p.project_id).fetch_all(&mut *tx).await?))
+        let rows = sqlx::query_scalar::<_, Value>(&format!("SELECT {PROJECT} FROM projects p WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2) AND ($3::text IS NULL OR (p.created,p.id)<(SELECT c.created,c.id FROM projects c WHERE c.id=$3)) ORDER BY p.created DESC,p.id DESC LIMIT $4"))
+            .bind(tenant).bind(&p.project_id).bind(before).bind(limit + 1).fetch_all(&mut *tx).await?;
+        Ok(ListPage::page(rows, limit))
     }
     pub async fn create_project(&self, p: &Principal, tenant: &str, value: Named) -> Result<Value> {
         self.create_project_keyed(p, tenant, value, None).await
@@ -769,26 +843,32 @@ impl Store {
         tenant: &str,
         project: &str,
         id: Option<&str>,
+        page: ListPage,
     ) -> Result<Value> {
         if let Some(id) = id {
             identity(id)?;
         }
+        let (before, limit) = page.bounds(1000)?;
         let mut tx = self.transaction(false, false).await?;
         Self::project(&mut tx, p, tenant, project, false).await?;
         let mut rows = sqlx::query_scalar::<_, Value>(&format!(
-            "SELECT {OPERATION} FROM operations o {OPERATION_RUN} WHERE o.tenant_id=$1 AND o.project_id=$2 AND ($3::text IS NULL OR o.id=$3) ORDER BY o.created DESC LIMIT 1000"
+            "SELECT {OPERATION} FROM operations o {OPERATION_RUN} WHERE o.tenant_id=$1 AND o.project_id=$2 AND ($3::text IS NULL OR o.id=$3) AND ($4::text IS NULL OR (o.created,o.id)<(SELECT c.created,c.id FROM operations c WHERE c.id=$4)) ORDER BY o.created DESC,o.id DESC LIMIT $5"
         ))
         .bind(tenant)
         .bind(project)
         .bind(id)
+        .bind(before)
+        .bind(limit + 1)
         .fetch_all(&mut *tx)
         .await?;
         if id.is_some() {
             rows.pop().ok_or_else(Error::missing)
         } else {
-            Ok(Value::Array(rows))
+            Ok(ListPage::page(rows, limit))
         }
     }
+    /// One thing of a kind a project holds, or all of that kind: for the
+    /// control plane's own reads.
     pub async fn resources(
         &self,
         p: &Principal,
@@ -797,12 +877,33 @@ impl Store {
         kind: &str,
         id: Option<&str>,
     ) -> Result<Value> {
+        let mut found = self
+            .resource_page(p, tenant, project, kind, id, ListPage::whole())
+            .await?;
+        Ok(if id.is_some() {
+            found
+        } else {
+            found["items"].take()
+        })
+    }
+    /// One thing of a kind a project holds, or a page of that kind.
+    pub async fn resource_page(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        kind: &str,
+        id: Option<&str>,
+        page: ListPage,
+    ) -> Result<Value> {
         // Only this exhaustive mapping may introduce an SQL identifier.
         if kind == "external-endpoints" {
-            return self.external_connections(p, tenant, project, id).await;
+            return self
+                .external_connections(p, tenant, project, id, page)
+                .await;
         }
         if kind == "operations" {
-            return self.operations(p, tenant, project, id).await;
+            return self.operations(p, tenant, project, id, page).await;
         }
         let (table, projection) = match kind {
             "artifacts" => ("artifacts", ARTIFACT_OF_R),
@@ -824,20 +925,24 @@ impl Store {
         }
         let mut tx = self.transaction(false, false).await?;
         Self::project(&mut tx, p, tenant, project, false).await?;
+        let (before, limit) = page.bounds(1000)?;
         let query = format!(
-            "SELECT {projection} FROM {table} r WHERE tenant_id=$1 AND project_id=$2 AND ($3::text IS NULL OR id=$3) AND ($4<>'artifacts' OR to_jsonb(r)->>'retired_at' IS NULL) ORDER BY created DESC LIMIT 1000"
+            "SELECT {projection} FROM {table} r WHERE r.tenant_id=$1 AND r.project_id=$2 AND ($3::text IS NULL OR r.id=$3) AND ($4<>'artifacts' OR to_jsonb(r)->>'retired_at' IS NULL) AND {} ORDER BY r.created DESC,r.id DESC LIMIT $6",
+            after_cursor(table, 5)
         );
         let mut rows = sqlx::query_scalar::<_, Value>(&query)
             .bind(tenant)
             .bind(project)
             .bind(id)
             .bind(kind)
+            .bind(before)
+            .bind(limit + 1)
             .fetch_all(&mut *tx)
             .await?;
         if id.is_some() {
             rows.pop().ok_or_else(Error::missing)
         } else {
-            Ok(Value::Array(rows))
+            Ok(ListPage::page(rows, limit))
         }
     }
 }

@@ -149,7 +149,7 @@ up() {
   sleep 1
   pgrep -f "$stage/build/fenders-node --state" | head -1 > "$state/node.pid"
   for _ in $(seq 30); do
-    [[ $(api GET /nodes | jq -r '.[0].observed_confinement // empty') == landlock6-seccomp-v2 ]] && break
+    [[ $(api GET /nodes | jq -r '.items[0].observed_confinement // empty') == landlock6-seccomp-v2 ]] && break
     sleep 1
   done
   status
@@ -165,7 +165,7 @@ status() {
   if running "$state/control.pid"; then
     echo "management api $manage/v1   token: $state/control/operator.token   CA: $state/pki/ca.pem"
     echo "api contract   $manage/api/openapi.json"
-    api GET /nodes | jq -r '.[] | "node \(.name): confinement=\(.observed_confinement) last_seen=\(.last_seen)"'
+    api GET /nodes | jq -r '.items[] | "node \(.name): confinement=\(.observed_confinement) last_seen=\(.last_seen)"'
     jq -r '"workspace \(.tenant)  project \(.project)"' "$state/scope.json"
   fi
 }

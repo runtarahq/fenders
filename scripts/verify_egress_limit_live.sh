@@ -81,7 +81,7 @@ allow() { # BYTES: sets the workspace's transfer allowance, keeping the rest
 tenant=$(jq -er .tenant "$state/scope.json")
 scope=/workspaces/$tenant/projects/$(jq -er .project "$state/scope.json")
 tag=$(date +%H%M%S)
-api GET /nodes | jq -e '.[0] | .egress_budget_required and .observed_egress_budget != null' >/dev/null ||
+api GET /nodes | jq -e '.items[0] | .egress_budget_required and .observed_egress_budget != null' >/dev/null ||
   { echo 'the local node does not run under the outbound byte limit' >&2; exit 2; }
 api GET "/workspaces/$tenant/usage" > "$out/usage-before.json"
 original=$(jq -er .allowance.transfer_bytes "$out/usage-before.json")

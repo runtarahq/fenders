@@ -3,7 +3,7 @@
   "info": {
     "title": "Fenders management API",
     "version": "0.1.0",
-    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/workspaces/{workspace}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records. A change that answers with an operation is 202 while the operation is pending and 200 or 201 once it is not; nothing else is ever 202. HEAD is answered wherever GET is. A route asked with a method it does not take is 405 with Allow."
+    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/workspaces/{workspace}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records. A change that answers with an operation is 202 while the operation is pending and 200 or 201 once it is not; nothing else is ever 202. HEAD is answered wherever GET is. A route asked with a method it does not take is 405 with Allow. Every list answers {items, next}, newest first, and takes limit (1 to 100) and before; a run's output alone is read forwards, with after."
   },
   "servers": [
     {
@@ -65,7 +65,14 @@
         "operationId": "get__workspaces",
         "summary": "List accessible workspaces",
         "description": "Required permission: read.",
-        "parameters": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Accepted result. Follow operation/app/run state where applicable.",
@@ -77,10 +84,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Workspace"
-                  }
+                  "$ref": "#/components/schemas/WorkspacePage"
                 }
               }
             }
@@ -159,6 +163,12 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/Workspace"
+          },
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
           }
         ],
         "responses": {
@@ -172,10 +182,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Project"
-                  }
+                  "$ref": "#/components/schemas/ProjectPage"
                 }
               }
             }
@@ -292,11 +299,7 @@
             "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "before",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
+            "$ref": "#/components/parameters/PageBefore"
           },
           {
             "name": "limit",
@@ -390,11 +393,7 @@
             "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "before",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
+            "$ref": "#/components/parameters/PageBefore"
           },
           {
             "name": "limit",
@@ -637,20 +636,10 @@
             "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "before",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
+            "$ref": "#/components/parameters/PageBefore"
           },
           {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            }
+            "$ref": "#/components/parameters/PageLimit"
           },
           {
             "name": "search",
@@ -1050,12 +1039,7 @@
             "$ref": "#/components/parameters/App"
           },
           {
-            "name": "before",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "minimum": 1
-            }
+            "$ref": "#/components/parameters/PageBefore"
           }
         ],
         "responses": {
@@ -1222,20 +1206,10 @@
             "$ref": "#/components/parameters/App"
           },
           {
-            "name": "before",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
+            "$ref": "#/components/parameters/PageBefore"
           },
           {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            }
+            "$ref": "#/components/parameters/PageLimit"
           }
         ],
         "responses": {
@@ -1402,20 +1376,10 @@
             "$ref": "#/components/parameters/App"
           },
           {
-            "name": "before",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
+            "$ref": "#/components/parameters/PageBefore"
           },
           {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            }
+            "$ref": "#/components/parameters/PageLimit"
           },
           {
             "name": "trigger",
@@ -1992,13 +1956,7 @@
             }
           },
           {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            }
+            "$ref": "#/components/parameters/PageLimit"
           },
           {
             "name": "release_id",
@@ -2066,20 +2024,10 @@
             "$ref": "#/components/parameters/App"
           },
           {
-            "name": "before",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
+            "$ref": "#/components/parameters/PageBefore"
           },
           {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            }
+            "$ref": "#/components/parameters/PageLimit"
           },
           {
             "name": "release_id",
@@ -2156,6 +2104,12 @@
           },
           {
             "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
           }
         ],
         "responses": {
@@ -2169,10 +2123,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Artifact"
-                  }
+                  "$ref": "#/components/schemas/ArtifactPage"
                 }
               }
             }
@@ -2298,6 +2249,12 @@
           },
           {
             "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
           }
         ],
         "responses": {
@@ -2311,10 +2268,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Connection"
-                  }
+                  "$ref": "#/components/schemas/ConnectionPage"
                 }
               }
             }
@@ -2519,6 +2473,12 @@
           },
           {
             "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
           }
         ],
         "responses": {
@@ -2532,10 +2492,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Secret"
-                  }
+                  "$ref": "#/components/schemas/SecretPage"
                 }
               }
             }
@@ -2662,6 +2619,12 @@
           },
           {
             "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
           }
         ],
         "responses": {
@@ -2675,10 +2638,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Operation"
-                  }
+                  "$ref": "#/components/schemas/OperationPage"
                 }
               }
             }
@@ -3184,6 +3144,12 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/Workspace"
+          },
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
           }
         ],
         "responses": {
@@ -3197,18 +3163,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "items": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/ApiKey"
-                      }
-                    }
-                  },
-                  "required": [
-                    "items"
-                  ]
+                  "$ref": "#/components/schemas/ApiKeyPage"
                 }
               }
             }
@@ -3365,7 +3320,14 @@
         "operationId": "get__nodes",
         "summary": "List nodes",
         "description": "Operator only.",
-        "parameters": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Accepted result. Follow operation/app/run state where applicable.",
@@ -3377,10 +3339,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Node"
-                  }
+                  "$ref": "#/components/schemas/NodePage"
                 }
               }
             }
@@ -3807,6 +3766,25 @@
           "maxLength": 128
         },
         "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+      },
+      "PageLimit": {
+        "name": "limit",
+        "in": "query",
+        "description": "How many to answer with at most.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 100
+        }
+      },
+      "PageBefore": {
+        "name": "before",
+        "in": "query",
+        "description": "The next of the page before, to continue after it. Pass back what was given: a cursor is not made up.",
+        "schema": {
+          "type": "string"
+        }
       }
     },
     "headers": {
@@ -6205,19 +6183,8 @@
               {
                 "type": "null"
               }
-            ]
-          },
-          "next_before": {
-            "anyOf": [
-              {
-                "type": "string",
-                "description": "The same as next. It goes when the list shapes are made one.",
-                "deprecated": true
-              },
-              {
-                "type": "null"
-              }
-            ]
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
           },
           "project_id": {
             "anyOf": [
@@ -7146,10 +7113,8 @@
               {
                 "type": "null"
               }
-            ]
-          },
-          "offset": {
-            "type": "integer"
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
           },
           "summary": {
             "type": "object",
@@ -7357,7 +7322,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
           }
         },
         "required": [
@@ -7478,7 +7444,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
           }
         },
         "required": [
@@ -7739,7 +7706,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
           }
         },
         "required": [
@@ -8620,7 +8588,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
           },
           "retention_days": {
             "type": "integer"
@@ -8716,7 +8685,7 @@
       },
       "LogPage": {
         "type": "object",
-        "description": "A page of Log records. next is the cursor for the page after it, or null.",
+        "description": "A page of a run's output, oldest first. Unlike other lists it is read forwards, with after.",
         "properties": {
           "items": {
             "type": "array",
@@ -8777,17 +8746,12 @@
             "type": "string"
           },
           "has_more": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether more is already there to read."
           },
           "next": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "type": "string",
+            "description": "Where this page ends: pass it as after to read on, now or later. Always given, because output is read forwards and more may come."
           },
           "retention": {
             "type": "object",
@@ -8865,6 +8829,230 @@
         },
         "required": [
           "period"
+        ]
+      },
+      "WorkspacePage": {
+        "type": "object",
+        "description": "A page of Workspace records, newest first.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Workspace"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "ProjectPage": {
+        "type": "object",
+        "description": "A page of Project records, newest first.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Project"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "ArtifactPage": {
+        "type": "object",
+        "description": "A page of Artifact records, newest first.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Artifact"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "SecretPage": {
+        "type": "object",
+        "description": "A page of Secret records, newest first.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Secret"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "ConnectionPage": {
+        "type": "object",
+        "description": "A page of Connection records, newest first.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Connection"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "OperationPage": {
+        "type": "object",
+        "description": "A page of Operation records, newest first.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Operation"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "NodePage": {
+        "type": "object",
+        "description": "A page of Node records, newest first.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "ApiKeyPage": {
+        "type": "object",
+        "description": "A page of ApiKey records, newest first.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiKey"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
         ]
       }
     }

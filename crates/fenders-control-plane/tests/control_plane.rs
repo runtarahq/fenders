@@ -2068,7 +2068,7 @@ async fn customer_apps_have_scoped_pages_and_nested_version_boundaries() {
     }
     let mut cursor = None;
     let mut listed = Vec::new();
-    for index in 0..3 {
+    for _ in 0..3 {
         let page = l
             .store
             .apps(
@@ -2088,7 +2088,9 @@ async fn customer_apps_have_scoped_pages_and_nested_version_boundaries() {
         assert_eq!(page["items"].as_array().unwrap().len(), 1);
         assert_eq!(page["summary"]["total"], 3);
         assert_eq!(page["total"], 3);
-        assert_eq!(page["offset"], index);
+        // A page says what there is and where the next begins, not how far
+        // in it is: a client that counts its pages knows.
+        assert!(page.get("offset").is_none());
         listed.push(s(&page["items"][0]["id"]).to_owned());
         cursor = page["next"].as_str().map(str::to_owned);
     }

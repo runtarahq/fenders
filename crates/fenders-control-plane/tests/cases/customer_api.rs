@@ -2289,7 +2289,7 @@ async fn an_operation_says_what_was_asked_and_nothing_of_who_asked() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let listed = listed.as_array().unwrap();
+    let listed = listed["items"].as_array().unwrap();
     assert!(listed.len() >= 2);
     for operation in listed {
         assert_eq!(names(operation), shown);
@@ -2340,5 +2340,134 @@ async fn an_operation_says_what_was_asked_and_nothing_of_who_asked() {
     )
     .await;
     assert_eq!(read["workspace_id"], l.tenant);
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn every_list_is_pages_of_items_newest_first() {
+    let l = Lab::new().await;
+    let operator = l.token.clone();
+    let workspace = format!("/v1/workspaces/{}", l.tenant);
+    let project = format!("{workspace}/projects/{}", l.project);
+    // Three of each kind of thing, beside what the lab has.
+    for n in 0..3 {
+        let allowance = json!({"cpu_percent":100,"memory_mib":512,"storage_bytes":1048576,"instances":1,"transfer_bytes":1048576});
+        for (path, body) in [
+            (
+                "/v1/workspaces".to_owned(),
+                json!({"name":format!("w{n}"),"allowance":allowance}),
+            ),
+            (
+                format!("{workspace}/projects"),
+                json!({"name":format!("Project {n}")}),
+            ),
+            (
+                format!("{project}/secrets"),
+                json!({"name":format!("secret-{n}"),"value":"value"}),
+            ),
+            (
+                format!("{project}/connections"),
+                json!({"type":"https","name":format!("origin-{n}"),"origin":format!("https://o{n}.example.com")}),
+            ),
+            (
+                format!("{workspace}/api-keys"),
+                json!({"name":format!("key-{n}"),"permissions":["read"],"ttl_seconds":60}),
+            ),
+            (
+                "/v1/nodes".to_owned(),
+                json!({"name":format!("node-{n}"),"cert_sha256":format!("{n}").repeat(64),"endpoint":format!("https://node-{n}.internal:9443"),"backend":"wasm","architecture":"x86_64","runtime":"wasmtime-50.0.0-fenders-v1","cpu_percent":200,"memory_mib":1024,"instances":4}),
+            ),
+        ] {
+            let made = call(&l, &operator, "POST", &path, body, &uid()).await;
+            assert!(made.0.is_success(), "POST {path}: {}", made.1);
+        }
+        l.store
+            .upload(
+                &l.operator,
+                &l.tenant,
+                &l.project,
+                format!("\0asm\x0d\0\x01\0 {n}").as_bytes(),
+            )
+            .await
+            .unwrap();
+    }
+    for list in [
+        "/v1/workspaces".to_owned(),
+        format!("{workspace}/projects"),
+        format!("{workspace}/api-keys"),
+        "/v1/nodes".to_owned(),
+        format!("{project}/artifacts"),
+        format!("{project}/secrets"),
+        format!("{project}/connections"),
+        format!("{project}/operations"),
+    ] {
+        // All at once: items, and no page after them.
+        let (status, whole) = call(&l, &operator, "GET", &list, json!({}), "").await;
+        assert_eq!(status, StatusCode::OK, "{list}: {whole}");
+        assert!(whole["next"].is_null(), "{list}");
+        let whole: Vec<Value> = whole["items"].as_array().unwrap().clone();
+        assert!(whole.len() >= 3, "{list}: {}", whole.len());
+        // Newest first.
+        let created: Vec<&str> = whole.iter().map(|item| s(&item["created"])).collect();
+        assert!(
+            created.windows(2).all(|pair| pair[0] >= pair[1]),
+            "{list}: {created:?}"
+        );
+        // The same by twos: each page's next continues it, and the last has none.
+        let mut walked = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let path = match &cursor {
+                Some(cursor) => format!("{list}?limit=2&before={cursor}"),
+                None => format!("{list}?limit=2"),
+            };
+            let (status, page) = call(&l, &operator, "GET", &path, json!({}), "").await;
+            assert_eq!(status, StatusCode::OK, "{path}: {page}");
+            let items = page["items"].as_array().unwrap();
+            assert!(items.len() <= 2 && !items.is_empty(), "{path}");
+            walked.extend(items.iter().cloned());
+            match page["next"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break,
+            }
+            assert_eq!(items.len(), 2, "{path}: a page with a next is a full one");
+            assert!(walked.len() <= whole.len(), "{list} does not end");
+        }
+        assert_eq!(walked, whole, "{list}");
+        // What a list takes, and nothing else.
+        for (query, status) in [
+            ("limit=0", StatusCode::BAD_REQUEST),
+            ("limit=101", StatusCode::BAD_REQUEST),
+            ("limit=many", StatusCode::BAD_REQUEST),
+            ("before=not-a-cursor", StatusCode::BAD_REQUEST),
+            ("offset=2", StatusCode::BAD_REQUEST),
+            ("limit=100", StatusCode::OK),
+        ] {
+            let path = format!("{list}?{query}");
+            assert_eq!(
+                call(&l, &operator, "GET", &path, json!({}), "").await.0,
+                status,
+                "{path}"
+            );
+        }
+        // A cursor that names nothing has nothing after it.
+        let (status, page) = call(
+            &l,
+            &operator,
+            "GET",
+            &format!("{list}?before={}", uid()),
+            json!({}),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page, json!({"items":[],"next":null}), "{list}");
+    }
+    // A key's lists are its own, paged the same.
+    let k = key(&l, None, &["read"]).await;
+    let (_, mine) = call(&l, s(&k["token"]), "GET", "/v1/workspaces", json!({}), "").await;
+    assert_eq!(mine["items"].as_array().unwrap().len(), 1);
+    assert_eq!(mine["items"][0]["id"], l.tenant);
+    assert!(mine["next"].is_null());
     l.finish().await;
 }

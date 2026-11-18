@@ -112,7 +112,7 @@ allowance='{"cpu_percent":200,"memory_mib":1024,"storage_bytes":1073741824,"inst
 declare -A tenant project key run_state exit_code
 for name in alpha beta; do
   tenant[$name]=$(api POST /workspaces "$(jq -n --arg n "$name" --argjson a "$allowance" '{name:$n,allowance:$a}')" | jq -er .id)
-  project[$name]=$(api GET "/workspaces/${tenant[$name]}/projects" | jq -er '.[0].id')
+  project[$name]=$(api GET "/workspaces/${tenant[$name]}/projects" | jq -er '.items[] | select(.is_default) | .id')
   key[$name]=$(api POST "/workspaces/${tenant[$name]}/api-keys" \
     '{"name":"product","permissions":["read","apps:write","runs:write"],"ttl_seconds":3600}' | jq -er .token)
 done
@@ -153,7 +153,7 @@ other=/workspaces/${tenant[beta]}/projects/${project[beta]}
 cross_read=$(as "${key[alpha]}" GET "$other/apps" | status)
 cross_app=$(as "${key[alpha]}" GET "$other/apps/$app_beta" | status)
 cross_run=$(as "${key[alpha]}" POST "$other/apps/$app_beta/runs" '{}' | status)
-cross_list=$(as "${key[alpha]}" GET /workspaces | ok | jq -c '[.[].id]')
+cross_list=$(as "${key[alpha]}" GET /workspaces | ok | jq -c '[.items[].id]')
 operator_tenants=$(as "${key[alpha]}" POST /workspaces "$(jq -n --argjson a "$allowance" '{name:"gamma",allowance:$a}')" | status)
 operator_nodes=$(as "${key[alpha]}" GET /nodes | status)
 # A key issues no keys, on the operator's route or under its own workspace.

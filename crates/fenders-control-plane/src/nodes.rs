@@ -117,17 +117,21 @@ impl Store {
         tx.commit().await?;
         Ok(row)
     }
+    /// Every node, for the control plane's own reads.
     pub async fn nodes(&self, p: &Principal) -> Result<Value> {
+        Ok(self.node_page(p, crate::store::ListPage::whole()).await?["items"].take())
+    }
+    pub async fn node_page(&self, p: &Principal, page: crate::store::ListPage) -> Result<Value> {
         p.operator()?;
+        let (before, limit) = page.bounds(1000)?;
         let mut tx = self.transaction(false, false).await?;
-        Ok(json!(
-            rows(
-                &mut tx,
-                &format!("SELECT {NODE} FROM nodes ORDER BY created"),
-                args![]
-            )
-            .await?
-        ))
+        let found = rows(
+            &mut tx,
+            &format!("SELECT {NODE} FROM nodes r WHERE ($1::text IS NULL OR (r.created,r.id)<(SELECT c.created,c.id FROM nodes c WHERE c.id=$1)) ORDER BY r.created DESC,r.id DESC LIMIT $2"),
+            args![before, limit + 1],
+        )
+        .await?;
+        Ok(crate::store::ListPage::page(found, limit))
     }
     pub async fn node_mode(&self, p: &Principal, node: &str, value: Value) -> Result<Value> {
         self.node_mode_keyed(p, node, value, None).await

@@ -114,7 +114,7 @@ POST /v1/workspaces
 #    Keep the id: a name is a label, and two tenants may share one. Only
 #    the Idempotency-Key tells a retry from a request for another tenant.
 
-GET  /v1/workspaces/TENANT/projects            # -> [{"id": "PROJECT", …}]
+GET  /v1/workspaces/TENANT/projects            # -> {"items": [{"id": "PROJECT", …}], "next": null}
 POST /v1/workspaces/TENANT/projects            {"name": "staging"}
 PATCH /v1/workspaces/TENANT                    {"allowance": {…}}
 PATCH /v1/workspaces/TENANT                    {"default_app_size": "medium"}   # for apps that name no size
@@ -177,6 +177,13 @@ pending, or the resource it names. If the answer was lost, ask after it by
 the key it was made with: `GET $S/app-submissions/KEY` for a deployment,
 `GET $S/apps/APP/submissions/KEY` for a change to an app,
 `GET $S/endpoint-submissions/KEY` for a connection (the key percent-encoded).
+
+Every list answers `{"items": […], "next": CURSOR or null}`, newest first,
+and takes `limit` (1 to 100, 100 unless said) and `before`. To read on, pass
+`next` back as `before`; it is `null` on the last page. A cursor is to be
+passed back as it was given, not made up. A run's output alone is read the
+other way, oldest first with `after`, and its `next` is always given: more
+may come.
 
 The contract gives every answer a schema, and the tests hold the API to it.
 A field it does not name may still be present: do not depend on one.
