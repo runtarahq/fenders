@@ -562,6 +562,10 @@ async fn a_run_is_cancelled_through_its_app_by_a_key_that_may_run() {
     // The run had not been given to a node, so it is stopped already.
     assert_eq!(status, StatusCode::OK, "{stopped}");
     assert_eq!(stopped["state"], "succeeded");
+    // The operation is of the run that was named, not of the execution
+    // the control plane stopped for it, which no route reads.
+    assert_eq!(stopped["kind"], "cancel-run");
+    assert_eq!(stopped["resource_id"], started["resource_id"]);
     // The same request again is the same answer, not a second stop.
     assert_eq!(
         call(
@@ -2237,5 +2241,104 @@ async fn the_api_has_one_name_for_a_thing() {
     .await;
     assert_eq!(read.0, StatusCode::OK, "{}", read.1);
     assert_eq!(read.1["name"], "example");
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn an_operation_says_what_was_asked_and_nothing_of_who_asked() {
+    let l = Lab::new().await;
+    let app = l.command_app().await;
+    let writer = key(&l, Some(&l.project), &["read", "runs:write"]).await;
+    let reader = key(&l, Some(&l.project), &["read"]).await;
+    let (writer, reader) = (s(&writer["token"]), s(&reader["token"]));
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
+    let (status, run) = call(
+        &l,
+        writer,
+        "POST",
+        &format!("{base}/apps/{app}/runs"),
+        json!({}),
+        "the writer's own key",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    let names = |operation: &Value| {
+        operation
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let shown = "created,error,id,kind,resource_id,state,updated";
+    assert_eq!(names(&run), shown);
+    let cancel = format!("{base}/apps/{app}/runs/{}/cancel", s(&run["resource_id"]));
+    let (_, cancelled) = call(&l, writer, "POST", &cancel, json!({}), "cancel it").await;
+    assert_eq!(names(&cancelled), shown);
+
+    // Another key of the project reads the operations: what was done, and
+    // not the keys the writer made its requests with.
+    let (status, listed) = call(
+        &l,
+        reader,
+        "GET",
+        &format!("{base}/operations"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = listed.as_array().unwrap();
+    assert!(listed.len() >= 2);
+    for operation in listed {
+        assert_eq!(names(operation), shown);
+    }
+    let text = Value::Array(listed.clone()).to_string();
+    assert!(!text.contains("the writer's own key") && !text.contains("cancel it"));
+    // The cancellation is read as it was answered, wherever it is read.
+    let read = listed
+        .iter()
+        .find(|operation| operation["id"] == cancelled["id"])
+        .unwrap();
+    assert_eq!(read["kind"], "cancel-run");
+    assert_eq!(read["resource_id"], run["resource_id"]);
+    let (_, one) = call(
+        &l,
+        reader,
+        "GET",
+        &format!("{base}/operations/{}", s(&cancelled["id"])),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(&one, read);
+    // By the key it was made with, through the app it was made of.
+    let (status, found) = call(
+        &l,
+        reader,
+        "GET",
+        &format!("{base}/apps/{app}/submissions/cancel%20it"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(&found, read);
+
+    // A workspace is a workspace in what is answered, as in what is asked.
+    let (_, me) = call(&l, reader, "GET", "/v1/me", json!({}), "").await;
+    assert_eq!(me["workspace_id"], l.tenant);
+    assert!(me.get("tenant_id").is_none());
+    let (_, read) = call(
+        &l,
+        reader,
+        "GET",
+        &format!("{base}/apps/{app}"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(read["workspace_id"], l.tenant);
     l.finish().await;
 }

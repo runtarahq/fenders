@@ -812,8 +812,14 @@ impl Store {
                 "run has nothing started to stop",
             ));
         };
-        self.stop_execution(p, tenant, project, execution, key)
-            .await
+        let mut operation = self
+            .stop_execution(p, tenant, project, execution, key)
+            .await?;
+        // What was asked was to cancel a run, and a run is what the API
+        // names: the execution it stops is the control plane's own.
+        operation["kind"] = json!("cancel-run");
+        operation["resource_id"] = run["id"].clone();
+        Ok(operation)
     }
 
     pub async fn app_release(

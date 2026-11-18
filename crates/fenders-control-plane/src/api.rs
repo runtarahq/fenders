@@ -81,6 +81,40 @@ fn path_key(segment: &str) -> Result<String> {
         .map(|key| key.into_owned())
         .map_err(|_| Error::missing())
 }
+/// What the store answers, as the API says it. Two things are the store's
+/// own and not a caller's:
+///
+/// - Its name for a workspace. A row's `tenant_id` is a `workspace_id`
+///   here, as the paths say.
+/// - What an operation keeps of the request that asked for it: the key and
+///   the hash it was made with, the revision it aimed at, and whose it is,
+///   which its path already says. An operation is what was asked, of what,
+///   and how it stands.
+///
+/// It is done here, for every answer, so that no route can forget to.
+fn present(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("request_hash") {
+                for internal in [
+                    "request_hash",
+                    "request_key",
+                    "target_revision",
+                    "tenant_id",
+                    "project_id",
+                ] {
+                    map.remove(internal);
+                }
+            }
+            if let Some(workspace) = map.remove("tenant_id") {
+                map.insert("workspace_id".to_owned(), workspace);
+            }
+            map.values_mut().for_each(present);
+        }
+        Value::Array(items) => items.iter_mut().for_each(present),
+        _ => {}
+    }
+}
 /// The store's name for a kind of thing a project holds. A connection is
 /// kept as an external endpoint; the rest are kept as they are asked for.
 fn stored(kind: &str) -> &str {
@@ -1003,6 +1037,8 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
     {
         status = StatusCode::ACCEPTED;
     }
+    let mut value = value;
+    present(&mut value);
     Ok((
         status,
         [

@@ -3960,13 +3960,16 @@
       },
       "Operation": {
         "type": "object",
+        "description": "A change that was asked for, and how it stands: nothing of the request that asked it. state is pending until it is made; then succeeded, or failed with error. resource_id is what it changes or makes: an app, a version, a release, a run, a connection.",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "type": "string",
             "pattern": "^[0-9a-f]{32}$"
           },
           "kind": {
-            "type": "string"
+            "type": "string",
+            "description": "What was asked: deploy-app, create-app, attach-app-version, activate-app-release, run-app, cancel-run, app-lifecycle, app-triggers, app-connections, delete-app, create-external-endpoint, remove-external-endpoint. Kinds may be added."
           },
           "resource_id": {
             "type": "string",
@@ -4003,9 +4006,11 @@
           "id",
           "kind",
           "resource_id",
-          "state"
-        ],
-        "description": "A change that was asked for, and how it stands. state is pending until it is made; then succeeded, or failed with error. resource_id is what it changes or makes."
+          "state",
+          "error",
+          "created",
+          "updated"
+        ]
       },
       "ProjectCreate": {
         "type": "object",
@@ -5538,6 +5543,18 @@
           },
           "role": {
             "type": "string"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The key's workspace; null for the operator."
           }
         },
         "required": [
@@ -5564,6 +5581,10 @@
           },
           "slug": {
             "type": "string"
+          },
+          "workspace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
           }
         },
         "required": [
@@ -6393,6 +6414,10 @@
           },
           "size": {
             "type": "integer"
+          },
+          "workspace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
           }
         },
         "required": [
@@ -6542,6 +6567,10 @@
           },
           "type": {
             "type": "string"
+          },
+          "workspace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
           }
         },
         "required": [
@@ -7077,6 +7106,10 @@
           "updated": {
             "type": "string",
             "format": "date-time"
+          },
+          "workspace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
           }
         },
         "required": [
@@ -7286,6 +7319,10 @@
                 "type": "null"
               }
             ]
+          },
+          "workspace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
           }
         },
         "required": [
@@ -7661,6 +7698,10 @@
                 "type": "null"
               }
             ]
+          },
+          "workspace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
           }
         },
         "required": [
@@ -8483,6 +8524,10 @@
                 "type": "null"
               }
             ]
+          },
+          "workspace_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
           }
         },
         "required": [

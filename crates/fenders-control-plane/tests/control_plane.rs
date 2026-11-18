@@ -936,8 +936,16 @@ async fn app_manual_runs_require_explicit_events_and_track_observed_outcomes() {
         l.store
             .run_app(&editor, &l.tenant, &l.project, &app, "run-once")
     );
-    assert_eq!(a.unwrap(), op);
-    assert_eq!(b.unwrap(), op);
+    // The API shows of an operation what was asked and how it stands; the
+    // store's own row has the request's key and hash besides. They are the
+    // same operation.
+    for retried in [a.unwrap(), b.unwrap()] {
+        for shown in ["id", "kind", "resource_id", "state", "created"] {
+            assert_eq!(retried[shown], op[shown], "{shown}");
+        }
+        assert_eq!(retried["request_key"], "run-once");
+    }
+    assert!(op.get("request_key").is_none() && op.get("request_hash").is_none());
     let run = s(&op["resource_id"]);
     let observed = l
         .store

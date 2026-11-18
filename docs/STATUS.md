@@ -78,6 +78,13 @@ place. Each breaks a client written against what was there before.
   is no longer answered. A connection is `…/connections`;
   `…/external-endpoints` is no longer answered. The operator's changes
   require an `Idempotency-Key` wherever a key's do.
+- **An operation is what was asked.** It has `id`, `kind`, `resource_id`,
+  `state`, `error`, `created` and `updated`, and no longer the key and hash
+  of the request that asked it, the revision it aimed at, or the ids of its
+  workspace and project. Cancelling a run answers an operation of kind
+  `cancel-run` whose `resource_id` is the run, not `stop` of an execution.
+- **`workspace_id`, not `tenant_id`,** in every answer that has one,
+  `GET /v1/me` among them.
 
 ## Limits
 

@@ -329,6 +329,20 @@ fn the_contract_is_made_of_what_the_checker_knows() {
     }
 }
 
+/// Every name an answer uses, at any depth.
+fn keys<'a>(value: &'a Value, found: &mut Vec<&'a str>) {
+    match value {
+        Value::Object(map) => {
+            for (name, inner) in map {
+                found.push(name);
+                keys(inner, found);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| keys(item, found)),
+        _ => {}
+    }
+}
+
 /// Checks one answer the API gave, from any test, against the contract:
 /// the tour below asks every operation once, and the other tests ask them
 /// in states the tour does not reach (a run on a node, an app being
@@ -356,6 +370,19 @@ pub(crate) fn conforms(method: &str, path: &str, status: StatusCode, body: &Valu
         return;
     }
     let at = format!("{method} {path} -> {}", status.as_u16());
+    // What is the store's own is in no answer, whatever its schema allows.
+    let mut names = Vec::new();
+    keys(body, &mut names);
+    for internal in [
+        "tenant_id",
+        "request_hash",
+        "request_key",
+        "target_revision",
+        "token_hash",
+        "ciphertext",
+    ] {
+        assert!(!names.contains(&internal), "{at}: {internal} in {body}");
+    }
     let responses = &operation["responses"];
     let code = status.as_u16().to_string();
     assert!(
@@ -944,6 +971,7 @@ async fn every_operation_answers_as_the_contract_says() {
         }
         let schema = &response["content"]["application/json"]["schema"];
         check(&spec, schema, &seen.body, &at, &mut wrong);
+        conforms(&seen.method, &seen.path, seen.status, &seen.body);
     }
     assert!(
         wrong.is_empty(),

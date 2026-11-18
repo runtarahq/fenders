@@ -98,6 +98,12 @@ pub(crate) fn token(prefix: &str) -> Result<String> {
             .collect::<String>()
     ))
 }
+/// An operation `o` as the API shows it. Stopping an execution that is a
+/// run's is shown as what was asked for: cancelling that run.
+pub(crate) const OPERATION: &str = "jsonb_build_object('id',o.id,'kind',CASE WHEN cancelled.id IS NULL THEN o.kind ELSE 'cancel-run' END,'resource_id',COALESCE(cancelled.id,o.resource_id),'state',o.state,'error',o.error,'created',o.created,'updated',o.updated)";
+/// The run an operation `o` cancels, where it is one that does.
+pub(crate) const OPERATION_RUN: &str = "LEFT JOIN LATERAL (SELECT r.id FROM app_runs r WHERE o.kind='stop' AND r.execution_id=o.resource_id LIMIT 1) cancelled ON true";
+
 /// The most rows of each kind a workspace may have: projects, secrets, apps,
 /// and credentials (API keys among them) that still open anything.
 pub(crate) const MAX_PROJECTS: i64 = 256;
@@ -739,6 +745,35 @@ impl Store {
         tx.commit().await?;
         Ok(row)
     }
+    /// A project's operations, as the API shows one: what was asked, of
+    /// what, and how it stands. Not the key or the hash of the request that
+    /// asked it, which are the caller's own and nobody else's to read.
+    async fn operations(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        id: Option<&str>,
+    ) -> Result<Value> {
+        if let Some(id) = id {
+            identity(id)?;
+        }
+        let mut tx = self.transaction(false, false).await?;
+        Self::project(&mut tx, p, tenant, project, false).await?;
+        let mut rows = sqlx::query_scalar::<_, Value>(&format!(
+            "SELECT {OPERATION} FROM operations o {OPERATION_RUN} WHERE o.tenant_id=$1 AND o.project_id=$2 AND ($3::text IS NULL OR o.id=$3) ORDER BY o.created DESC LIMIT 1000"
+        ))
+        .bind(tenant)
+        .bind(project)
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if id.is_some() {
+            rows.pop().ok_or_else(Error::missing)
+        } else {
+            Ok(Value::Array(rows))
+        }
+    }
     pub async fn resources(
         &self,
         p: &Principal,
@@ -750,6 +785,9 @@ impl Store {
         // Only this exhaustive mapping may introduce an SQL identifier.
         if kind == "external-endpoints" {
             return self.external_connections(p, tenant, project, id).await;
+        }
+        if kind == "operations" {
+            return self.operations(p, tenant, project, id).await;
         }
         let (table, projection) = match kind {
             "artifacts" => ("artifacts", "to_jsonb(r)"),
