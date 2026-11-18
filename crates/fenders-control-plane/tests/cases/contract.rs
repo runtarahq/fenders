@@ -946,6 +946,23 @@ async fn every_operation_answers_as_the_contract_says() {
         .await;
     t.ok(&key, "DELETE", &spare, None).await;
 
+    // A component that was uploaded and never made an app's code.
+    let unused = t
+        .ok(
+            &key,
+            "POST",
+            &format!("{p}/artifacts"),
+            Some(json!("\0asm\x0d\0\x01\0 unused")),
+        )
+        .await;
+    t.ok(
+        &key,
+        "DELETE",
+        &format!("{p}/artifacts/{}", s(&unused["id"])),
+        None,
+    )
+    .await;
+
     // Whether it is up and can serve, asked with no credential.
     for probe in ["/healthz", "/readyz"] {
         let response = api::router(l.store.clone())

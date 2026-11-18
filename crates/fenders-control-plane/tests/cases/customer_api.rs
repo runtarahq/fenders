@@ -3219,3 +3219,120 @@ async fn a_secret_is_given_another_value_and_deleted_when_nothing_names_it() {
     );
     l.finish().await;
 }
+
+/// A request with no body, as a deletion is, checked against the contract.
+async fn bare(l: &Lab, token: &str, method: &str, path: &str, key: &str) -> (StatusCode, Value) {
+    let response = api::router(l.store.clone())
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Idempotency-Key", key)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    super::contract::conforms(method, path, status, &body);
+    (status, body)
+}
+
+#[tokio::test]
+async fn an_artifact_that_is_no_apps_code_is_deleted_and_its_storage_returned() {
+    let l = Lab::new().await;
+    let k = key(&l, Some(&l.project), &["read", "apps:write"]).await;
+    let token = s(&k["token"]);
+    let artifacts = format!(
+        "/v1/workspaces/{}/projects/{}/artifacts",
+        l.tenant, l.project
+    );
+    let component = b"\0asm\x0d\0\x01\0 one that is never deployed".to_vec();
+    let unused = l
+        .store
+        .upload(&l.operator, &l.tenant, &l.project, &component)
+        .await
+        .unwrap();
+    let unused_id = s(&unused["id"]).to_owned();
+    let stored = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(sum(bytes),0)::bigint FROM storage_reservations WHERE tenant_id=$1",
+        )
+        .bind(&l.tenant)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap()
+    };
+    let before = stored().await;
+    // The lab's own component becomes an app's code.
+    l.command_app().await;
+    let used = bare(
+        &l,
+        token,
+        "DELETE",
+        &format!("{artifacts}/{}", l.artifact),
+        "used",
+    )
+    .await;
+    assert_eq!(used.0, StatusCode::CONFLICT, "{}", used.1);
+    assert_eq!(used.1["code"], "in_use");
+
+    let route = format!("{artifacts}/{unused_id}");
+    let gone = bare(&l, token, "DELETE", &route, "unused").await;
+    assert_eq!(gone.0, StatusCode::OK, "{}", gone.1);
+    assert_eq!(gone.1, json!({"id":unused_id}));
+    // Its storage is the workspace's again at once.
+    assert_eq!(stored().await, before - component.len() as i64);
+    assert_eq!(
+        call(&l, token, "GET", &route, json!({}), "").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, listed) = call(&l, token, "GET", &artifacts, json!({}), "").await;
+    let ids: Vec<&str> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| s(&a["id"]))
+        .collect();
+    assert_eq!(ids, [l.artifact.as_str()]);
+    // Its bytes go when the control plane next clears what nothing has.
+    let blob = l.root.path().join("blobs").join(s(&unused["digest"]));
+    assert!(blob.exists());
+    l.store.schedule().await.unwrap();
+    assert!(!blob.exists());
+    // A retry is the first answer; asked anew, there is nothing to delete.
+    assert_eq!(bare(&l, token, "DELETE", &route, "unused").await, gone);
+    assert_eq!(
+        bare(&l, token, "DELETE", &route, "anew").await.0,
+        StatusCode::NOT_FOUND
+    );
+    // The same bytes uploaded again are the same artifact, back.
+    let back = l
+        .store
+        .upload(&l.operator, &l.tenant, &l.project, &component)
+        .await
+        .unwrap();
+    assert_eq!(back["id"], unused["id"]);
+    assert!(blob.exists());
+    assert_eq!(stored().await, before);
+    // A key that may only read deletes nothing.
+    let reader = key(&l, Some(&l.project), &["read"]).await;
+    assert_eq!(
+        bare(&l, s(&reader["token"]), "DELETE", &route, "no")
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit WHERE action='artifact.delete' AND resource_id=$1",
+    )
+    .bind(&unused_id)
+    .fetch_one(&l.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(recorded, 1);
+    l.finish().await;
+}

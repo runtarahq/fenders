@@ -2240,6 +2240,54 @@
         "tags": [
           "workspace"
         ]
+      },
+      "delete": {
+        "operationId": "delete__workspaces_workspace_projects_project_artifacts_artifact",
+        "summary": "Delete an artifact",
+        "description": "Its storage is the workspace's again at once; its bytes are removed when no artifact has the same. 409 in_use while a version of an app names it (a version is kept for good, so an artifact that was ever an app's code stays), an execution names it, or a node is inspecting it. The same bytes uploaded again are the same artifact, back. Required permission: apps:write.",
+        "tags": [
+          "workspace"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Workspace"
+          },
+          {
+            "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/Artifact"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deleted"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        }
       }
     },
     "/workspaces/{workspace}/projects/{project}/connections": {

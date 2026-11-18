@@ -140,6 +140,11 @@ pub const KEY_ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("GET", "/v1/workspaces/*/projects/*/artifacts/*", "read"),
     (
+        "DELETE",
+        "/v1/workspaces/*/projects/*/artifacts/*",
+        "apps:write",
+    ),
+    (
         "GET",
         "/v1/workspaces/*/projects/*/artifacts/*/inspection",
         "read",

@@ -1100,6 +1100,23 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .delete_secret(&p, tenant, project, secret, key)
                 .await?
         }
+        (
+            "DELETE",
+            [
+                "v1",
+                "workspaces",
+                tenant,
+                "projects",
+                project,
+                "artifacts",
+                artifact,
+            ],
+        ) => {
+            no_body(&bytes)?;
+            store
+                .delete_artifact(&p, tenant, project, artifact, key)
+                .await?
+        }
         // What a project holds beside its apps, by kind.
         (
             "GET",
