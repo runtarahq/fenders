@@ -3,7 +3,7 @@
   "info": {
     "title": "Fenders management API",
     "version": "0.1.0",
-    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/tenants/{tenant}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records. A change that answers with an operation is 202 while the operation is pending and 200 or 201 once it is not; nothing else is ever 202."
+    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/tenants/{tenant}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records. A change that answers with an operation is 202 while the operation is pending and 200 or 201 once it is not; nothing else is ever 202. HEAD is answered wherever GET is. A route asked with a method it does not take is 405 with Allow."
   },
   "servers": [
     {
@@ -37,10 +37,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -51,15 +48,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -78,10 +71,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -95,15 +85,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -118,13 +104,7 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           }
         ],
         "responses": {
@@ -132,10 +112,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -149,15 +126,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -170,24 +143,10 @@
         "description": "Required permission: projects:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -195,10 +154,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -209,15 +165,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -242,13 +197,7 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           }
         ],
         "responses": {
@@ -256,10 +205,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -270,15 +216,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -293,13 +235,7 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
             "name": "before",
@@ -323,10 +259,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -337,15 +270,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -360,22 +289,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           }
         ],
         "responses": {
@@ -383,10 +300,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -397,15 +311,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -420,22 +330,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
             "name": "before",
@@ -459,10 +357,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -473,15 +368,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -496,22 +387,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           }
         ],
         "responses": {
@@ -519,10 +398,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -533,15 +409,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -556,22 +428,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           }
         ],
         "responses": {
@@ -579,10 +439,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -593,15 +450,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -616,22 +469,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           }
         ],
         "responses": {
@@ -639,10 +480,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -653,15 +491,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -686,22 +523,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           }
         ],
         "responses": {
@@ -709,10 +534,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -723,15 +545,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -756,22 +577,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
             "name": "before",
@@ -816,10 +625,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -830,15 +636,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -851,33 +653,13 @@
         "description": "Required permission: apps:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -885,10 +667,7 @@
             "description": "The change is made: the operation has succeeded or failed, and what it made exists.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -903,10 +682,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -917,15 +693,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -950,33 +725,13 @@
         "description": "Required permission: apps:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -984,10 +739,7 @@
             "description": "The change is made: the operation has succeeded or failed, and what it made exists.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1002,10 +754,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1016,15 +765,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -1049,31 +797,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           }
         ],
         "responses": {
@@ -1081,10 +811,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1095,15 +822,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -1116,42 +839,16 @@
         "description": "Required permission: apps:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -1159,10 +856,7 @@
             "description": "The change is made: the operation has succeeded or failed.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1177,10 +871,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1191,15 +882,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -1222,42 +912,16 @@
         "description": "Stops the app, takes back its connections and hides it; its history is kept. The revision is sent in a JSON body. The operation is pending until its executions have ended. Required permission: apps:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -1265,10 +929,7 @@
             "description": "The change is made: the operation has succeeded or failed.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1283,10 +944,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1297,15 +955,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -1330,31 +987,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
             "name": "before",
@@ -1370,10 +1009,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1384,15 +1020,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -1405,42 +1037,16 @@
         "description": "Required permission: apps:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -1448,10 +1054,7 @@
             "description": "The change is made: the operation has succeeded or failed, and what it made exists.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1466,10 +1069,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1480,15 +1080,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -1513,40 +1112,16 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "version",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Version"
           }
         ],
         "responses": {
@@ -1554,10 +1129,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1568,15 +1140,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -1591,31 +1159,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
             "name": "before",
@@ -1639,10 +1189,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1653,15 +1200,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -1674,42 +1217,16 @@
         "description": "Required permission: apps:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -1717,10 +1234,7 @@
             "description": "The change is made: the operation has succeeded or failed, and what it made exists.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1735,10 +1249,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1749,15 +1260,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -1782,40 +1292,16 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "release",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Release"
           }
         ],
         "responses": {
@@ -1823,10 +1309,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1837,15 +1320,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -1860,31 +1339,13 @@
         "description": "Required permission: read. Lists HTTP, manual and scheduled invocations. HTTP request recording begins when enabled; retained for 30 days. HTTP paths exclude query strings; output links refer to the shared worker execution.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
             "name": "before",
@@ -1921,10 +1382,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -1935,15 +1393,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -1956,42 +1410,16 @@
         "description": "Required permission: runs:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -1999,10 +1427,7 @@
             "description": "A retry of a run that has ended: its operation.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2017,10 +1442,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2031,15 +1453,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -2064,40 +1485,16 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "run",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Run"
           }
         ],
         "responses": {
@@ -2105,10 +1502,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2119,15 +1513,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -2142,51 +1532,19 @@
         "description": "Required permission: runs:write. Stops a run that has not ended; one that has is answered 409.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "run",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Run"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2194,10 +1552,7 @@
             "description": "The change is made: the operation has succeeded or failed.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2212,10 +1567,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2226,15 +1578,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -2249,31 +1600,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           }
         ],
         "responses": {
@@ -2281,10 +1614,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2295,15 +1625,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -2316,42 +1642,16 @@
         "description": "Required permission: apps:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2359,10 +1659,7 @@
             "description": "The change is made: the operation has succeeded or failed.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2377,10 +1674,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2391,15 +1685,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -2424,31 +1717,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           }
         ],
         "responses": {
@@ -2456,10 +1731,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2470,15 +1742,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -2491,42 +1759,16 @@
         "description": "Required permission: apps:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2534,10 +1776,7 @@
             "description": "The change is made: the operation has succeeded or failed.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2552,10 +1791,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2566,15 +1802,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -2599,31 +1834,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           }
         ],
         "responses": {
@@ -2631,10 +1848,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2645,15 +1859,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -2668,31 +1878,13 @@
         "description": "Whether the app accepts WebSocket connections, how many the gateway holds for it now, and each with the path its client asked for and when it opened.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           }
         ],
         "responses": {
@@ -2700,10 +1892,7 @@
             "description": "The app's open WebSocket connections",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2740,15 +1929,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -2763,31 +1948,13 @@
         "description": "Records carry base64-encoded output. next is a polling cursor; has_more indicates more stored records. Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
             "name": "after",
@@ -2832,10 +1999,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2846,15 +2010,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -2869,31 +2029,13 @@
         "description": "Required permission: read. One timeline, newest first: each HTTP, manual or scheduled invocation is one entry (entry=run, as in List runs) interleaved with recorded lifecycle changes (entry=lifecycle). Command admission and execution transitions are summarized by their invocation unless type=lifecycle or a release, run or execution filter is set; those filters list recorded transitions only. Lifecycle changes and HTTP requests are retained for 30 days.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
             "name": "before",
@@ -2952,10 +2094,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -2966,15 +2105,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -2989,22 +2124,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           }
         ],
         "responses": {
@@ -3012,10 +2135,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3029,15 +2149,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -3050,22 +2166,10 @@
         "description": "Identical bytes reuse the project artifact. Inspect before deployment. Required permission: apps:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           }
         ],
         "responses": {
@@ -3073,10 +2177,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3087,15 +2188,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -3122,31 +2222,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "artifact",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Artifact"
           }
         ],
         "responses": {
@@ -3154,10 +2236,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3168,15 +2247,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -3191,22 +2266,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           }
         ],
         "responses": {
@@ -3214,10 +2277,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3231,15 +2291,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -3252,33 +2308,13 @@
         "description": "Required permission: connections:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -3286,10 +2322,7 @@
             "description": "The change is made: the operation has succeeded or failed, and what it made exists.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3304,10 +2337,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3318,15 +2348,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -3351,31 +2380,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "connection",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Connection"
           }
         ],
         "responses": {
@@ -3383,10 +2394,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3397,15 +2405,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -3418,42 +2422,16 @@
         "description": "Required permission: connections:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "connection",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Connection"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -3461,10 +2439,7 @@
             "description": "The change is made: the operation has succeeded or failed.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3479,10 +2454,7 @@
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3493,15 +2465,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -3516,22 +2487,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           }
         ],
         "responses": {
@@ -3539,10 +2498,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3556,15 +2512,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -3577,33 +2529,13 @@
         "description": "Required permission: secrets:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -3611,10 +2543,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3625,15 +2554,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -3658,31 +2586,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "secret",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Secret"
           }
         ],
         "responses": {
@@ -3690,10 +2600,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3704,15 +2611,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -3727,22 +2630,10 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           }
         ],
         "responses": {
@@ -3750,10 +2641,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3767,15 +2655,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -3790,31 +2674,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "operation",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Operation"
           }
         ],
         "responses": {
@@ -3822,10 +2688,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3836,15 +2699,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -3859,31 +2718,13 @@
         "description": "Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "artifact",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Artifact"
           }
         ],
         "responses": {
@@ -3891,10 +2732,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3905,15 +2743,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -3928,31 +2762,13 @@
         "description": "Makes one request of the app through the gateway, as a client of its URL would, and reports what came back. It is admitted, counted and charged as any request of the app is. The answer is 200 whatever the app or the gateway said; read outcome. Required permission: runs:write.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           }
         ],
         "responses": {
@@ -3960,10 +2776,7 @@
             "description": "What became of the request.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -3974,15 +2787,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -4007,33 +2819,13 @@
         "description": "The operation of POST …/apps/deploy made with this key. Asks after a request whose answer was lost. 404 does not show that the request failed: it may still be in flight. Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "key",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "The Idempotency-Key the request was made with, percent-encoded as a path segment: a key with a slash or a space in it is found as %2F and %20."
+            "$ref": "#/components/parameters/SubmissionKey"
           }
         ],
         "responses": {
@@ -4041,10 +2833,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4055,15 +2844,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -4078,42 +2863,16 @@
         "description": "The operation of a change to this app (a run, a version, a release, its triggers, connections, lifecycle or deletion) made with this key. Asks after a request whose answer was lost. 404 does not show that the request failed: it may still be in flight. Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "app",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/App"
           },
           {
-            "name": "key",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "The Idempotency-Key the request was made with, percent-encoded as a path segment: a key with a slash or a space in it is found as %2F and %20."
+            "$ref": "#/components/parameters/SubmissionKey"
           }
         ],
         "responses": {
@@ -4121,10 +2880,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4135,15 +2891,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -4158,33 +2910,13 @@
         "description": "The operation of creating or revoking a connection made with this key. Asks after a request whose answer was lost. 404 does not show that the request failed: it may still be in flight. Required permission: read.",
         "parameters": [
           {
-            "name": "workspace",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Workspace"
           },
           {
-            "name": "project",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Project"
           },
           {
-            "name": "key",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "The Idempotency-Key the request was made with, percent-encoded as a path segment: a key with a slash or a space in it is found as %2F and %20."
+            "$ref": "#/components/parameters/SubmissionKey"
           }
         ],
         "responses": {
@@ -4192,10 +2924,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4206,15 +2935,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -4229,15 +2954,7 @@
         "description": "A workspace, with what it may use, and a default project in it. Listed by GET /workspaces. Operator only.",
         "parameters": [
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -4245,10 +2962,7 @@
             "description": "The tenant; a retry is answered with it again.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4259,15 +2973,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -4297,13 +3010,7 @@
         "description": "Its allowance, the size its apps take when they name none, or both. An allowance below what is in use is 409. Operator only.",
         "parameters": [
           {
-            "name": "tenant",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Tenant"
           },
           {
             "name": "Idempotency-Key",
@@ -4322,10 +3029,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4336,15 +3040,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -4374,13 +3077,7 @@
         "description": "Operator only.",
         "parameters": [
           {
-            "name": "tenant",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Tenant"
           },
           {
             "name": "Idempotency-Key",
@@ -4399,10 +3096,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4413,15 +3107,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -4451,13 +3144,7 @@
         "description": "A suspended workspace's runs are stopped and its keys may only read. Operator only.",
         "parameters": [
           {
-            "name": "tenant",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Tenant"
           },
           {
             "name": "Idempotency-Key",
@@ -4476,10 +3163,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4490,15 +3174,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -4528,13 +3211,7 @@
         "description": "Without their tokens. Operator only.",
         "parameters": [
           {
-            "name": "tenant",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Tenant"
           }
         ],
         "responses": {
@@ -4542,10 +3219,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4567,15 +3241,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -4593,53 +3263,18 @@
         "description": "For the tenant, or for one project of it. Operator only.",
         "parameters": [
           {
-            "name": "tenant",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Tenant"
           },
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
-          "201": {
-            "description": "The key, with its token, shown once.",
-            "headers": {
-              "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiKeyIssued"
-                }
-              }
-            }
-          },
           "200": {
             "description": "A retry: nothing was issued, token is null and replayed is true.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4650,15 +3285,29 @@
               }
             }
           },
-          "default": {
-            "description": "Request rejected or unavailable.",
+          "201": {
+            "description": "The key, with its token, shown once.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/ApiKeyIssued"
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -4681,29 +3330,17 @@
         ]
       }
     },
-    "/tenants/{tenant}/api-keys/{key}": {
+    "/tenants/{tenant}/api-keys/{api_key}": {
       "delete": {
-        "operationId": "delete__tenants_tenant_api_keys_key",
+        "operationId": "delete__tenants_tenant_api_keys_api_key",
         "summary": "Revoke a key",
         "description": "It stops working at once. Revoking one already revoked is answered the same. Operator only.",
         "parameters": [
           {
-            "name": "tenant",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Tenant"
           },
           {
-            "name": "key",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/ApiKey"
           }
         ],
         "responses": {
@@ -4711,10 +3348,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4734,15 +3368,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -4766,10 +3399,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4783,15 +3413,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -4809,15 +3435,7 @@
         "description": "With the pin of its certificate, before it is started. Operator only.",
         "parameters": [
           {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -4825,10 +3443,7 @@
             "description": "The node; a retry is answered with it again.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4839,15 +3454,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -4877,13 +3491,7 @@
         "description": "Operator only.",
         "parameters": [
           {
-            "name": "node",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{32}$"
-            }
+            "$ref": "#/components/parameters/Node"
           },
           {
             "name": "Idempotency-Key",
@@ -4902,10 +3510,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4916,15 +3521,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -4958,10 +3562,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -4972,15 +3573,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -5014,10 +3611,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -5028,15 +3622,14 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "requestBody": {
@@ -5070,10 +3663,7 @@
             "description": "Accepted result. Follow operation/app/run state where applicable.",
             "headers": {
               "X-Request-Id": {
-                "schema": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
-                }
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -5084,15 +3674,11 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "default": {
-            "description": "Request rejected or unavailable.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
+            "$ref": "#/components/responses/Refused"
           }
         },
         "tags": [
@@ -5117,6 +3703,247 @@
         "type": "http",
         "scheme": "bearer",
         "description": "The operator credential, written to STATE/operator.token at first start. Not scoped: it may call every route, a workspace's among them."
+      }
+    },
+    "parameters": {
+      "Workspace": {
+        "name": "workspace",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "Project": {
+        "name": "project",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "App": {
+        "name": "app",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "Version": {
+        "name": "version",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "Release": {
+        "name": "release",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "Run": {
+        "name": "run",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "Artifact": {
+        "name": "artifact",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "Connection": {
+        "name": "connection",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "Secret": {
+        "name": "secret",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "Operation": {
+        "name": "operation",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "Tenant": {
+        "name": "tenant",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "description": "A workspace's id, as the operator's routes name it."
+      },
+      "Node": {
+        "name": "node",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "ApiKey": {
+        "name": "api_key",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "SubmissionKey": {
+        "name": "key",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "description": "The Idempotency-Key the request was made with, percent-encoded as a path segment: a key with a slash or a space in it is found as %2F and %20."
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+      }
+    },
+    "headers": {
+      "RequestId": {
+        "description": "This request's id, which a refusal's body carries too. Quote it when asking after a request.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "RetryAfter": {
+        "description": "Seconds to wait before asking again.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "Allow": {
+        "description": "The methods the route takes.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "WwwAuthenticate": {
+        "description": "Bearer: a bearer credential is wanted.",
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "Refused": {
+        "description": "The request was refused or could not be served. Error.code says why. 400 for a malformed request, 403 for a credential that may not, 404 for what does not exist or is another workspace's, 409 for a conflict with what is, 413 and 415 for a body too large or not of the type the route takes, 5xx when the control plane could not serve it.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "No credential, or one that is revoked, expired or unknown.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "WWW-Authenticate": {
+            "$ref": "#/components/headers/WwwAuthenticate"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "MethodNotAllowed": {
+        "description": "The path is a route and does not take this method. Any path may answer this; it is not listed with each.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "Allow": {
+            "$ref": "#/components/headers/Allow"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Too many changes by this workspace's credentials in a minute, or too much in progress at once. An allowance or a limit reached is 409 quota_exhausted, not this.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       }
     },
     "schemas": {

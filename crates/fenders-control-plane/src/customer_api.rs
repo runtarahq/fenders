@@ -507,6 +507,71 @@ mod tests {
     }
 
     #[test]
+    fn every_operation_says_how_it_is_refused_and_names_its_parameters_once() {
+        let spec: Value = serde_json::from_str(include_str!("../static/api/openapi.json")).unwrap();
+        let reference = |name: &str| json!({"$ref": format!("#/components/responses/{name}")});
+        for (path, methods) in spec["paths"].as_object().unwrap() {
+            for (method, operation) in methods.as_object().unwrap() {
+                let at = format!("{method} {path}");
+                let responses = &operation["responses"];
+                assert_eq!(responses["401"], reference("Unauthorized"), "{at}");
+                assert_eq!(responses["default"], reference("Refused"), "{at}");
+                // Changes are what a workspace's rate counts.
+                assert_eq!(responses.get("429").is_some(), method != "get", "{at}");
+                if method != "get" {
+                    assert_eq!(responses["429"], reference("RateLimited"), "{at}");
+                }
+                // A path's parameters are the shared ones, each the name
+                // the path gives it; and every one the path has is there.
+                let mut named = BTreeSet::new();
+                for parameter in operation["parameters"].as_array().unwrap() {
+                    let parameter = match parameter["$ref"].as_str() {
+                        Some(pointer) => {
+                            let found = spec.pointer(pointer.trim_start_matches('#'));
+                            found.unwrap_or_else(|| panic!("{at}: {pointer} is nothing"))
+                        }
+                        None => {
+                            assert_ne!(parameter["in"], "path", "{at}: {parameter}");
+                            parameter
+                        }
+                    };
+                    if parameter["in"] == "path" {
+                        named.insert(format!("{{{}}}", parameter["name"].as_str().unwrap()));
+                    }
+                }
+                let in_path: BTreeSet<_> = path
+                    .split('/')
+                    .filter(|segment| segment.starts_with('{'))
+                    .map(str::to_owned)
+                    .collect();
+                assert_eq!(named, in_path, "{at}");
+            }
+        }
+        // Nothing is referred to that is not there.
+        fn references(value: &Value, found: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    if let Some(Value::String(pointer)) = map.get("$ref") {
+                        found.push(pointer.clone());
+                    }
+                    map.values().for_each(|value| references(value, found));
+                }
+                Value::Array(items) => items.iter().for_each(|value| references(value, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        references(&spec, &mut found);
+        assert!(found.len() > 100);
+        for pointer in found {
+            assert!(
+                spec.pointer(pointer.trim_start_matches('#')).is_some(),
+                "{pointer} is nothing"
+            );
+        }
+    }
+
+    #[test]
     fn a_route_is_one_thing() {
         // No two rows for one request, and none that is both a key's and
         // the operator's by the same method.
