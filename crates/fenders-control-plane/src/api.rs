@@ -280,6 +280,19 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "request body too large",
         ));
     }
+    // What a body is said to be, without its parameters.
+    let media = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(|v| v.trim().to_ascii_lowercase());
+    let unsupported = |message| Err(Error::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, message));
+    // A component is sent as one, and is not read when it is said to be
+    // something else.
+    if is_upload && media.as_deref() != Some("application/wasm") {
+        return unsupported("an upload's Content-Type is application/wasm");
+    }
     let bytes: Bytes = tokio::time::timeout(BODY_WITHIN, to_bytes(body, limit))
         .await
         .map_err(|_| {
@@ -289,6 +302,11 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             )
         })?
         .map_err(|_| Error::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"))?;
+    // Every other body is JSON, and says so: one sent as a form, or as
+    // nothing in particular, is not guessed at.
+    if !is_upload && !bytes.is_empty() && media.as_deref() != Some("application/json") {
+        return unsupported("a request body's Content-Type is application/json");
+    }
     if (public_api || p.api_permissions.is_some())
         && matches!(
             (method, segments.as_slice()),

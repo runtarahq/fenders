@@ -14,6 +14,7 @@ async fn request(l: &Lab, token: &str, app: &str, key: &str, revision: i64) -> (
                 ))
                 .header("authorization", format!("Bearer {token}"))
                 .header("Idempotency-Key", key)
+                .header("Content-Type", "application/json")
                 .body(Body::from(
                     json!({"expected_revision":revision}).to_string(),
                 ))

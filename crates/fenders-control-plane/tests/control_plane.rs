@@ -2042,6 +2042,7 @@ async fn customer_apps_have_scoped_pages_and_nested_version_boundaries() {
                         format!("Bearer {}", s(&credential["token"])),
                     )
                     .header("Idempotency-Key", name)
+                    .header("Content-Type", "application/json")
                     .body(Body::from(
                         json!({"name":name,"artifact_id":l.artifact}).to_string(),
                     ))
@@ -2673,7 +2674,8 @@ async fn schedule_preview_is_scoped_deterministic_and_read_only() {
     let response=api::router(l.store.clone()).oneshot(Request::builder().method("POST")
         .uri(format!("/v1/tenants/{}/projects/{}/schedules/preview",l.tenant,l.project))
         .header("Authorization",format!("Bearer {}",s(&token["token"])))
-        .body(Body::from(json!({"expression":"30 1 * * *","timezone":"America/New_York","after":"2026-11-01T00:00:00Z"}).to_string())).unwrap()).await.unwrap();
+        .header("Content-Type", "application/json")
+.body(Body::from(json!({"expression":"30 1 * * *","timezone":"America/New_York","after":"2026-11-01T00:00:00Z"}).to_string())).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();

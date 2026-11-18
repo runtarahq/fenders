@@ -1797,6 +1797,7 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
             .header("Authorization", format!("Bearer {token}"))
             .header("Cookie", "management-secret=never-forward")
             .header("X-CSRF-Token", "never-forward")
+            .header("Content-Type", "application/json")
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
     };

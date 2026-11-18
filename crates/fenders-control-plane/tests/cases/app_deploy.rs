@@ -145,6 +145,7 @@ async fn http_wizard_api_returns_one_durable_operation_and_no_implicit_command()
             ))
             .header("Authorization", format!("Bearer {}", l.token))
             .header("Idempotency-Key", key)
+            .header("Content-Type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
     };

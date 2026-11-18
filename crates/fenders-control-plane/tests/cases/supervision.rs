@@ -337,6 +337,7 @@ async fn overlap(l: Lab) {
         .post(format!("{origin_b}{path}"))
         .bearer_auth(token)
         .header("Idempotency-Key", &key)
+        .header("Content-Type", "application/json")
         .body(body.clone())
         .send()
         .await
@@ -364,6 +365,7 @@ async fn overlap(l: Lab) {
         .post(format!("{origin}{path}"))
         .bearer_auth(token)
         .header("Idempotency-Key", &key)
+        .header("Content-Type", "application/json")
         .body(body)
         .send()
         .await
@@ -434,6 +436,7 @@ async fn real_daemon_reports_recovery_failures_resumes_and_resets_observations_o
         client
             .post(format!("{origin}/v1/tenants/{}/projects", l.tenant))
             .bearer_auth(&l.token)
+            .header("Content-Type", "application/json")
             .body(json!({"name":"recovery-refused"}).to_string())
             .send()
             .await

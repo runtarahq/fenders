@@ -109,7 +109,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             format!("{}{path}", args.url.trim_end_matches('/')),
         )
         .bearer_auth(token)
-        .header("Content-Type", "application/json")
+        // A component is sent as what it is; everything else is JSON.
+        .header(
+            "Content-Type",
+            if method == "POST" && path.ends_with("/artifacts") {
+                "application/wasm"
+            } else {
+                "application/json"
+            },
+        )
         .body(body);
     if let Some(key) = key {
         request = request.header("Idempotency-Key", key);

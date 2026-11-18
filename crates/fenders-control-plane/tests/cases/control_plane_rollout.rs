@@ -225,6 +225,7 @@ async fn upload(l: &Lab, client: &reqwest::Client, door: &FrontDoor, path: &Path
             door.addresses[0], l.tenant, l.project
         ))
         .bearer_auth(&l.token)
+        .header("Content-Type", "application/wasm")
         .body(fs::read(path).unwrap())
         .send()
         .await

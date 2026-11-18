@@ -1812,3 +1812,91 @@ async fn a_refusal_names_the_credential_wanted_and_the_methods_taken() {
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_body_is_what_it_says_it_is_or_is_not_read() {
+    let l = Lab::new().await;
+    let k = key(&l, None, &["read", "apps:write", "projects:write"]).await;
+    let token = s(&k["token"]);
+    let send = |path: String, media: Option<&'static str>, body: Vec<u8>| {
+        let l = &l;
+        async move {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Idempotency-Key", uid());
+            if let Some(media) = media {
+                request = request.header("Content-Type", media);
+            }
+            let response = api::router(l.store.clone())
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                    .unwrap();
+            (status, body)
+        }
+    };
+    let projects = format!("/v1/workspaces/{}/projects", l.tenant);
+    let project = |name: &str| json!({"name":name}).to_string().into_bytes();
+    // JSON sent as a form, as curl -d does unasked, or as nothing at all.
+    for media in [
+        Some("application/x-www-form-urlencoded"),
+        Some("text/plain"),
+        None,
+    ] {
+        let (status, body) = send(projects.clone(), media, project("Unsaid")).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{media:?}");
+        assert_eq!(body["code"], "unsupported_media_type");
+    }
+    let made: i64 = sqlx::query_scalar("SELECT count(*) FROM projects WHERE display_name='Unsaid'")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(made, 0);
+    // Its parameters and its case are not what is asked about.
+    for (media, name) in [
+        ("application/json", "Plain"),
+        ("application/json; charset=utf-8", "Charset"),
+        ("Application/JSON", "Shouted"),
+    ] {
+        let (status, body) = send(projects.clone(), Some(media), project(name)).await;
+        assert_eq!(status, StatusCode::CREATED, "{media}: {body}");
+    }
+    // A request with no body says nothing about one.
+    let app = l.command_app().await;
+    let runs = format!("{projects}/{}/apps/{app}/runs", l.project);
+    let runner = key(&l, None, &["read", "runs:write"]).await;
+    let response = api::router(l.store.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&runs)
+                .header("Authorization", format!("Bearer {}", s(&runner["token"])))
+                .header("Idempotency-Key", uid())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    // A component is application/wasm, and JSON is not one.
+    let artifacts = format!("{projects}/{}/artifacts", l.project);
+    let component = b"\0asm\x0d\0\x01\0 another".to_vec();
+    for media in [
+        Some("application/json"),
+        Some("application/octet-stream"),
+        None,
+    ] {
+        let (status, body) = send(artifacts.clone(), media, component.clone()).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{media:?}");
+        assert_eq!(body["code"], "unsupported_media_type");
+    }
+    let (status, body) = send(artifacts, Some("application/wasm"), component).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    l.finish().await;
+}

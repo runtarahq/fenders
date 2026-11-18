@@ -539,6 +539,7 @@ async fn http_domain_is_server_owned_and_customer_status_is_project_scoped() {
                     .uri(&uri)
                     .header("Authorization", format!("Bearer {}", l.token))
                     .header("Idempotency-Key", "on")
+                    .header("Content-Type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
