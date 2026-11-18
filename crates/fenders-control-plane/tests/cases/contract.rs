@@ -221,6 +221,114 @@ fn the_checker_refuses_what_a_schema_forbids() {
     }
 }
 
+/// The keywords [`check`] knows, and the ones that only describe.
+const KEYWORDS: [&str; 22] = [
+    "$ref",
+    "type",
+    "enum",
+    "const",
+    "anyOf",
+    "oneOf",
+    "properties",
+    "required",
+    "additionalProperties",
+    "items",
+    "minItems",
+    "maxItems",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "pattern",
+    "format",
+    "description",
+    "default",
+    "deprecated",
+    "writeOnly",
+];
+
+/// Every schema in `value`, a request's as much as an answer's.
+fn schemas<'a>(value: &'a Value, is_schema: bool, found: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(map) => {
+            if is_schema {
+                found.push(value);
+            }
+            for (key, inner) in map {
+                let inner_is_schema = match key.as_str() {
+                    // A map from names to schemas.
+                    "properties" | "schemas" if is_schema || key == "schemas" => {
+                        for schema in inner.as_object().unwrap().values() {
+                            schemas(schema, true, found);
+                        }
+                        continue;
+                    }
+                    "schema" | "items" => true,
+                    "additionalProperties" => inner.is_object(),
+                    "anyOf" | "oneOf" if is_schema => {
+                        for schema in inner.as_array().unwrap() {
+                            schemas(schema, true, found);
+                        }
+                        continue;
+                    }
+                    _ if is_schema => continue,
+                    _ => false,
+                };
+                schemas(inner, inner_is_schema, found);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| schemas(item, false, found)),
+        _ => {}
+    }
+}
+
+#[test]
+fn the_contract_is_made_of_what_the_checker_knows() {
+    let spec = spec();
+    let mut found = Vec::new();
+    schemas(&spec, false, &mut found);
+    assert!(found.len() > 500, "{}", found.len());
+    for schema in found {
+        for keyword in schema.as_object().unwrap().keys() {
+            assert!(
+                KEYWORDS.contains(&keyword.as_str()),
+                "a schema uses {keyword}, which nothing here checks: {schema}"
+            );
+        }
+        // A type is one of JSON's, and an object's required names are its own.
+        if let Some(kind) = schema.get("type") {
+            let kinds = [
+                "object", "array", "string", "integer", "number", "boolean", "null",
+            ];
+            assert!(kinds.contains(&kind.as_str().unwrap()), "{schema}");
+        }
+        if let (Some(required), Some(properties)) =
+            (schema.get("required"), schema.get("properties"))
+        {
+            for name in required.as_array().unwrap() {
+                assert!(
+                    properties.get(name.as_str().unwrap()).is_some(),
+                    "{name} is required and is no property: {schema}"
+                );
+            }
+        }
+    }
+    // An operation has an id of its own, a summary, and a tag.
+    let mut ids = BTreeSet::new();
+    for (path, methods) in spec["paths"].as_object().unwrap() {
+        for (method, operation) in methods.as_object().unwrap() {
+            let id = operation["operationId"].as_str().unwrap();
+            assert!(ids.insert(id), "{id} names two operations");
+            assert!(
+                operation["summary"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "{method} {path} has no summary"
+            );
+        }
+    }
+}
+
 /// Checks one answer the API gave, from any test, against the contract:
 /// the tour below asks every operation once, and the other tests ask them
 /// in states the tour does not reach (a run on a node, an app being
