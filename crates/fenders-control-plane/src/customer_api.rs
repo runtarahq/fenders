@@ -279,7 +279,12 @@ impl Store {
             Self::project(&mut tx, p, tenant, project, false).await?;
         }
         let request = json!({"kind":"api-key.create","value":value});
-        if let Some(row) = receipt(&mut tx, tenant, key, &request).await? {
+        // The token is not kept, so a retry cannot be given it. It is told
+        // so: the key it asked for exists and nobody holds it, to be revoked
+        // by its id and issued again.
+        if let Some(mut row) = receipt(&mut tx, tenant, key, &request).await? {
+            row["token"] = Value::Null;
+            row["replayed"] = json!(true);
             return Ok(row);
         }
         Self::metadata_limit(
@@ -308,6 +313,7 @@ impl Store {
         tx.commit().await?;
         let mut row = row;
         row["token"] = json!(secret);
+        row["replayed"] = json!(false);
         Ok(row)
     }
 }

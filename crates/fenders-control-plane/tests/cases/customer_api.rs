@@ -132,16 +132,25 @@ async fn customer_api_key_and_project_retries_do_not_duplicate_or_reveal_keys() 
         call(&l, &l.token, "POST", &route, request.clone(), "issue"),
         call(&l, &l.token, "POST", &route, request.clone(), "issue")
     );
-    assert_eq!(a.0, StatusCode::CREATED);
-    assert_eq!(b.0, StatusCode::CREATED);
     assert_eq!(a.1["id"], b.1["id"]);
-    assert_ne!(a.1.get("token").is_some(), b.1.get("token").is_some());
-    let secret =
-        a.1.get("token")
-            .or(b.1.get("token"))
-            .unwrap()
-            .as_str()
-            .unwrap();
+    // One of them issued the key and is shown its token, once. The other
+    // made nothing, and is told that it holds no token for the key.
+    let (issued, replayed) = if a.0 == StatusCode::CREATED {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    assert_eq!(issued.0, StatusCode::CREATED, "{}", issued.1);
+    assert_eq!(issued.1["replayed"], false);
+    assert_eq!(replayed.0, StatusCode::OK, "{}", replayed.1);
+    assert_eq!(replayed.1["replayed"], true);
+    assert!(replayed.1["token"].is_null());
+    let secret = issued.1["token"].as_str().unwrap();
+    // A later retry is told the same, and the key it cannot use is the
+    // operator's to revoke by the id it was given.
+    let later = call(&l, &l.token, "POST", &route, request.clone(), "issue").await;
+    assert_eq!(later, *replayed);
+    assert!(!later.1.to_string().contains(secret));
     let mut different = request.clone();
     different["ttl_seconds"] = json!(7200);
     assert_eq!(

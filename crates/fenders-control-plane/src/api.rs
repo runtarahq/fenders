@@ -315,10 +315,14 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         }
         ("GET", ["v1", "tenants", tenant, "api-keys"]) => store.api_keys(&p, tenant).await?,
         ("POST", ["v1", "tenants", tenant, "api-keys"]) => {
-            status = StatusCode::CREATED;
-            store
+            let issued = store
                 .create_api_key(&p, tenant, parse(&bytes)?, key)
-                .await?
+                .await?;
+            // A retry made nothing, and has no token to show for it.
+            if issued["replayed"] != true {
+                status = StatusCode::CREATED;
+            }
+            issued
         }
         ("DELETE", ["v1", "tenants", tenant, "api-keys", id]) => {
             store.revoke_credential(&p, tenant, id).await?

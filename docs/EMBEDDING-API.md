@@ -115,7 +115,10 @@ PATCH /v1/tenants/TENANT                    {"default_app_size": "medium"}   # f
 POST /v1/tenants/TENANT/api-keys
 {"name": "product", "permissions": ["read", "apps:write", "runs:write"],
  "ttl_seconds": 2592000}
-# -> {"id": …, "token": "fnd_tok_…"}   the token is shown once
+# -> 201 {"id": …, "token": "fnd_tok_…", "replayed": false}   the token is shown once
+#    A retry with the same Idempotency-Key issues nothing and is answered
+#    200 {"id": …, "token": null, "replayed": true}: the token is not kept.
+#    If the first answer was lost, revoke the key by its id and issue another.
 GET    /v1/tenants/TENANT/api-keys          # the tenant's keys, without their tokens
 DELETE /v1/tenants/TENANT/api-keys/KEY      # it stops working at once
 
