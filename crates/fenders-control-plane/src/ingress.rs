@@ -503,6 +503,15 @@ impl Store {
         tenant: &str,
         value: Value,
     ) -> Result<Value> {
+        self.update_http_limits_keyed(p, tenant, value, None).await
+    }
+    pub async fn update_http_limits_keyed(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        value: Value,
+        key: Option<&str>,
+    ) -> Result<Value> {
         p.operator()?;
         id(&json!(tenant))?;
         let names = ["concurrent_requests", "requests_per_minute"];
@@ -511,8 +520,15 @@ impl Store {
             fenders_node_protocol::value::integer(&value["concurrent_requests"], 1, 10_000)?;
         let rate =
             fenders_node_protocol::value::integer(&value["requests_per_minute"], 1, 10_000_000)?;
+        let request = json!({"kind":"tenant.http-limits","tenant":tenant,"value":value});
         let mut tx = self.transaction(true, false).await?;
         Self::live_principal(&mut tx, p).await?;
+        if let Some(key) = key
+            && let Some(row) =
+                crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
         let row = optional(&mut tx,"UPDATE tenants SET http_concurrent_requests=$2,http_requests_per_minute=$3 WHERE id=$1 RETURNING http_concurrent_requests AS concurrent_requests,http_requests_per_minute AS requests_per_minute",args![tenant,concurrent,rate]).await?.ok_or_else(Error::missing)?;
         Self::audit(
             &mut tx,
@@ -523,6 +539,17 @@ impl Store {
             row.clone(),
         )
         .await?;
+        if let Some(key) = key {
+            crate::customer_api::save_operator_receipt(
+                &mut tx,
+                &p.id,
+                key,
+                Some(tenant),
+                &request,
+                &row,
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(row)
     }

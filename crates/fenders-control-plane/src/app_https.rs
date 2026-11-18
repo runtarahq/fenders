@@ -57,6 +57,17 @@ impl Store {
         Ok(row)
     }
     pub async fn activate_public_egress(&self, p: &Principal, value: Value) -> Result<Value> {
+        self.activate_public_egress_keyed(p, value, None).await
+    }
+    /// A key is not required. With one, a retry of a change that was made
+    /// is answered with the policy as it now stands, where without it the
+    /// revision the retry expects would have passed and it would be refused.
+    pub async fn activate_public_egress_keyed(
+        &self,
+        p: &Principal,
+        value: Value,
+        key: Option<&str>,
+    ) -> Result<Value> {
         p.operator()?;
         fields(
             &value,
@@ -77,7 +88,16 @@ impl Store {
                 "activate the configured public egress policy digest",
             ));
         }
+        let request = json!({"kind":"public-egress.activate","value":value});
         let mut tx = self.transaction(true, false).await?;
+        if let Some(key) = key
+            && crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request)
+                .await?
+                .is_some()
+        {
+            drop(tx);
+            return self.public_egress_policy(p).await;
+        }
         let old = one(
             &mut tx,
             "SELECT * FROM public_egress_policy WHERE singleton",
@@ -104,6 +124,18 @@ impl Store {
                 &json!("public-egress"),
                 &Value::Null,
                 json!({"enabled":value["enabled"],"digest":digest}),
+            )
+            .await?;
+        }
+        if let Some(key) = key {
+            // That it was made, not what it answered: the answer is read anew.
+            crate::customer_api::save_operator_receipt(
+                &mut tx,
+                &p.id,
+                key,
+                None,
+                &request,
+                &Value::Null,
             )
             .await?;
         }

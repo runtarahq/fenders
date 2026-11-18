@@ -451,6 +451,18 @@ impl Store {
         tenant: &str,
         value: UpdateAllowance,
     ) -> Result<Value> {
+        self.update_allowance_keyed(p, tenant, value, None).await
+    }
+    /// A key is not required. With one, a retry is answered as the first
+    /// call was, where without it a lowered allowance might by then be
+    /// refused as below what is in use.
+    pub async fn update_allowance_keyed(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        value: UpdateAllowance,
+        key: Option<&str>,
+    ) -> Result<Value> {
         p.operator()?;
         identity(tenant)?;
         if value.allowance.is_none() && value.default_app_size.is_none() {
@@ -464,8 +476,15 @@ impl Store {
         {
             return Err(Error::invalid("default app size is small, medium or large"));
         }
+        let request = json!({"kind":"tenant.update","tenant":tenant,"allowance":value.allowance,"default_app_size":value.default_app_size});
         let mut tx = self.transaction(true, false).await?;
         Self::live_principal(&mut tx, p).await?;
+        if let Some(key) = key
+            && let Some(row) =
+                crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
         if let Some(size) = &value.default_app_size {
             let changed = sqlx::query("UPDATE tenants SET default_app_size=$2 WHERE id=$1")
                 .bind(tenant)
@@ -506,6 +525,17 @@ impl Store {
                     .await?
             }
         };
+        if let Some(key) = key {
+            crate::customer_api::save_operator_receipt(
+                &mut tx,
+                &p.id,
+                key,
+                Some(tenant),
+                &request,
+                &row,
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(row)
     }

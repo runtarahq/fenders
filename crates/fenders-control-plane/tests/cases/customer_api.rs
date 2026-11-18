@@ -1305,3 +1305,87 @@ async fn a_retried_node_registration_is_answered_with_the_node() {
     assert_eq!(recorded, 2);
     l.finish().await;
 }
+
+#[tokio::test]
+async fn the_operators_other_changes_honour_a_key_and_do_not_require_one() {
+    let l = Lab::new().await;
+    let audits = |action: &'static str| {
+        let pool = l.store.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM audit WHERE action=$1")
+                .bind(action)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    // An allowance: the retry is answered as the first call was, though the
+    // tenant has changed since.
+    let tenant = format!("/v1/tenants/{}", l.tenant);
+    let allowance = json!({"allowance":{"cpu_percent":300,"memory_mib":2048,"instances":3,"storage_bytes":20000000000i64,"transfer_bytes":10000000}});
+    let first = call(&l, &l.token, "PATCH", &tenant, allowance.clone(), "allow").await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(first.1["cpu_percent"], 300);
+    let size = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &tenant,
+        json!({"default_app_size":"medium"}),
+        "",
+    )
+    .await;
+    assert_eq!(size.0, StatusCode::OK, "{}", size.1);
+    let again = call(&l, &l.token, "PATCH", &tenant, allowance, "allow").await;
+    assert_eq!(again, first);
+    assert_eq!(audits("tenant.allowance").await, 1);
+    assert_eq!(
+        call(
+            &l,
+            &l.token,
+            "PATCH",
+            &tenant,
+            json!({"default_app_size":"large"}),
+            "allow"
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+
+    // HTTP limits.
+    let route = format!("/v1/tenants/{}/http-limits", l.tenant);
+    let limits = json!({"concurrent_requests":8,"requests_per_minute":120});
+    let a = call(&l, &l.token, "PATCH", &route, limits.clone(), "limits").await;
+    let b = call(&l, &l.token, "PATCH", &route, limits.clone(), "limits").await;
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(a, b);
+    assert_eq!(audits("tenant.http-limits").await, 1);
+    assert_eq!(
+        call(&l, &l.token, "PATCH", &route, limits, "").await.0,
+        StatusCode::OK
+    );
+    assert_eq!(audits("tenant.http-limits").await, 2);
+
+    // The egress policy is guarded by a revision, which a change advances:
+    // a retry without a key is refused, and with one is given the policy.
+    let policy = "/v1/public-egress-policy";
+    let before = call(&l, &l.token, "GET", policy, json!({}), "").await.1;
+    sqlx::query("UPDATE public_egress_policy SET enabled=true,digest=repeat('a',64)")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let disable = json!({"expected_revision":before["revision"],"enabled":false});
+    let a = call(&l, &l.token, "PUT", policy, disable.clone(), "egress").await;
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(a.1["enabled"], false);
+    assert_ne!(a.1["revision"], before["revision"]);
+    let b = call(&l, &l.token, "PUT", policy, disable.clone(), "egress").await;
+    assert_eq!((b.0, &b.1["revision"]), (StatusCode::OK, &a.1["revision"]));
+    assert_eq!(
+        call(&l, &l.token, "PUT", policy, disable, "").await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(audits("public-egress.activate").await, 1);
+    l.finish().await;
+}

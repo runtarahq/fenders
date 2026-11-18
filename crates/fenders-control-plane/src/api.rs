@@ -253,7 +253,9 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         ("GET", ["v1", "nodes"]) => store.nodes(&p).await?,
         ("GET", ["v1", "public-egress-policy"]) => store.public_egress_policy(&p).await?,
         ("PUT", ["v1", "public-egress-policy"]) => {
-            store.activate_public_egress(&p, parse(&bytes)?).await?
+            store
+                .activate_public_egress_keyed(&p, parse(&bytes)?, offered(key))
+                .await?
         }
         ("POST", ["v1", "nodes"]) => {
             status = StatusCode::CREATED;
@@ -274,7 +276,9 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         }
         // A tenant's allowance, and the size its apps take when they name none.
         ("PATCH", ["v1", "tenants", tenant]) => {
-            store.update_allowance(&p, tenant, parse(&bytes)?).await?
+            store
+                .update_allowance_keyed(&p, tenant, parse(&bytes)?, offered(key))
+                .await?
         }
         // Suspend a workspace, or resume it: the operator's, with a reason.
         ("POST", ["v1", "tenants", tenant, "lifecycle"]) => {
@@ -284,7 +288,9 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             store.operator_workspace_action(&p.id, action).await?
         }
         ("PATCH", ["v1", "tenants", tenant, "http-limits"]) => {
-            store.update_http_limits(&p, tenant, parse(&bytes)?).await?
+            store
+                .update_http_limits_keyed(&p, tenant, parse(&bytes)?, offered(key))
+                .await?
         }
         ("GET", ["v1", "tenants", tenant, "projects"]) => store.projects(&p, tenant).await?,
         ("POST", ["v1", "tenants", tenant, "projects"]) => {
