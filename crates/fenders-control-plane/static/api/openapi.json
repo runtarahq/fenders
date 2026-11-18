@@ -2610,6 +2610,112 @@
         "tags": [
           "workspace"
         ]
+      },
+      "put": {
+        "operationId": "put__workspaces_workspace_projects_project_secrets_secret",
+        "summary": "Give a secret another value",
+        "description": "Its id and name stand, so what names it goes on naming it. A run is given a secret's value when it is started: runs started after this have the new value, and one that is running keeps the old until it ends. A retry with the same key is answered as the first was, whatever value it carries. Required permission: secrets:write.",
+        "tags": [
+          "workspace"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Workspace"
+          },
+          {
+            "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/Secret"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Give a secret another value.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Secret"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretRotate"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete__workspaces_workspace_projects_project_secrets_secret",
+        "summary": "Delete a secret",
+        "description": "Its value is destroyed. 409 in_use while an app's release, a run that has not ended, or a connection names it. Required permission: secrets:write.",
+        "tags": [
+          "workspace"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Workspace"
+          },
+          {
+            "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/Secret"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delete a secret.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deleted"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        }
       }
     },
     "/workspaces/{workspace}/projects/{project}/operations": {
@@ -4159,7 +4265,8 @@
               "not_validated",
               "workspace_suspended",
               "permission_denied",
-              "quota_exhausted"
+              "quota_exhausted",
+              "in_use"
             ]
           },
           "request_id": {
@@ -9401,6 +9508,35 @@
         "required": [
           "items",
           "next"
+        ]
+      },
+      "SecretRotate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "value": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 1024,
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "Deleted": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "What was deleted.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          }
+        },
+        "required": [
+          "id"
         ]
       }
     }

@@ -932,6 +932,20 @@ async fn every_operation_answers_as_the_contract_says() {
     .await;
     t.ok(&key, "GET", &format!("{p}/apps"), None).await;
 
+    // A secret nothing names is given another value, and deleted.
+    let spare = t
+        .ok(
+            &key,
+            "POST",
+            &format!("{p}/secrets"),
+            Some(json!({"name":"spare","value":"first-value"})),
+        )
+        .await;
+    let spare = format!("{p}/secrets/{}", s(&spare["id"]));
+    t.ok(&key, "PUT", &spare, Some(json!({"value":"second-value"})))
+        .await;
+    t.ok(&key, "DELETE", &spare, None).await;
+
     // Whether it is up and can serve, asked with no credential.
     for probe in ["/healthz", "/readyz"] {
         let response = api::router(l.store.clone())

@@ -116,6 +116,14 @@ fn present(value: &mut Value) {
         _ => {}
     }
 }
+/// A deletion has no body, and one that is sent is not read as one.
+fn no_body(bytes: &[u8]) -> Result<()> {
+    if bytes.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::invalid("a deletion takes no body"))
+    }
+}
 /// Which revision of an app a deletion is of: the one its caller read.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1057,6 +1065,39 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             }
             store
                 .remove_endpoint(&p, tenant, project, endpoint, key)
+                .await?
+        }
+        (
+            "PUT",
+            [
+                "v1",
+                "workspaces",
+                tenant,
+                "projects",
+                project,
+                "secrets",
+                secret,
+            ],
+        ) => {
+            store
+                .rotate_secret(&p, tenant, project, secret, parse(&bytes)?, key)
+                .await?
+        }
+        (
+            "DELETE",
+            [
+                "v1",
+                "workspaces",
+                tenant,
+                "projects",
+                project,
+                "secrets",
+                secret,
+            ],
+        ) => {
+            no_body(&bytes)?;
+            store
+                .delete_secret(&p, tenant, project, secret, key)
                 .await?
         }
         // What a project holds beside its apps, by kind.

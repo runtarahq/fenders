@@ -3026,3 +3026,196 @@ async fn a_workspaces_audit_trail_is_read_by_the_operator_and_by_its_keys() {
     assert_eq!(nothing.0, StatusCode::NOT_FOUND);
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_secret_is_given_another_value_and_deleted_when_nothing_names_it() {
+    let l = Lab::new().await;
+    let node = l.node("worker").await;
+    let k = key(&l, Some(&l.project), &["read", "secrets:write"]).await;
+    let token = s(&k["token"]);
+    let secrets = format!("/v1/workspaces/{}/projects/{}/secrets", l.tenant, l.project);
+    let (status, made) = call(
+        &l,
+        token,
+        "POST",
+        &secrets,
+        json!({"name":"token","value":"first-value"}),
+        "make",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    let id = s(&made["id"]).to_owned();
+    let route = format!("{secrets}/{id}");
+
+    // Another value: the same secret, by id and by name.
+    let (status, rotated) = call(
+        &l,
+        token,
+        "PUT",
+        &route,
+        json!({"value":"second-value"}),
+        "rotate",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rotated}");
+    assert_eq!(rotated, made);
+    assert!(!rotated.to_string().contains("value"));
+    // A retry is the first answer, whatever it carries, and changes nothing:
+    // were it compared with what is stored, it would say whether a guess
+    // was right.
+    let (status, again) = call(
+        &l,
+        token,
+        "PUT",
+        &route,
+        json!({"value":"a-guess-at-it"}),
+        "rotate",
+    )
+    .await;
+    assert_eq!((status, &again), (StatusCode::OK, &rotated));
+    // A run started now is given the value it has now.
+    let app = l
+        .try_configured_app(json!({"secret_env":{"TOKEN":id}}))
+        .await
+        .unwrap();
+    let op = l.start_app(&app, "run").await.unwrap();
+    l.store.schedule().await.unwrap();
+    let e = l.run(&op).await;
+    let given = l
+        .store
+        .assignment(s(&node["id"]), s(&e["id"]), n(&e["generation"]))
+        .await
+        .unwrap()["spec"]["env"]["TOKEN"]
+        .clone();
+    assert_eq!(given, "second-value");
+    // What a value must be, as when it was made; and a secret that is none.
+    for (path, body, expected) in [
+        (
+            route.clone(),
+            json!({"value":"abc"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            route.clone(),
+            json!({"name":"other","value":"long-enough"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!("{secrets}/{}", uid()),
+            json!({"value":"long-enough"}),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            call(&l, token, "PUT", &path, body, &uid()).await.0,
+            expected,
+            "{path}"
+        );
+    }
+
+    // It is named by an app's release and held by a run: not to be deleted.
+    let delete = |path: String, key: &'static str| {
+        let l = &l;
+        async move {
+            let response = api::router(l.store.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(&path)
+                        .header("Authorization", format!("Bearer {token}"))
+                        .header("Idempotency-Key", key)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                    .unwrap();
+            super::contract::conforms("DELETE", &path, status, &body);
+            (status, body)
+        }
+    };
+    let held = delete(route.clone(), "delete-held").await;
+    assert_eq!(held.0, StatusCode::CONFLICT, "{}", held.1);
+    assert_eq!(held.1["code"], "in_use");
+    assert_eq!(
+        call(&l, token, "GET", &route, json!({}), "").await.0,
+        StatusCode::OK
+    );
+
+    // One that nothing names goes, value and all.
+    let (_, spare) = call(
+        &l,
+        token,
+        "POST",
+        &secrets,
+        json!({"name":"spare","value":"spare-value"}),
+        "spare",
+    )
+    .await;
+    let spare_route = format!("{secrets}/{}", s(&spare["id"]));
+    let gone = delete(spare_route.clone(), "delete-spare").await;
+    assert_eq!(gone.0, StatusCode::OK, "{}", gone.1);
+    assert_eq!(gone.1, json!({"id":spare["id"]}));
+    assert_eq!(
+        call(&l, token, "GET", &spare_route, json!({}), "").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM secrets WHERE id=$1")
+        .bind(s(&spare["id"]))
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    // The retry is the first answer; another request for it finds nothing.
+    assert_eq!(delete(spare_route.clone(), "delete-spare").await, gone);
+    assert_eq!(
+        delete(spare_route, "delete-again").await.0,
+        StatusCode::NOT_FOUND
+    );
+    // Its name is free again.
+    let (status, _) = call(
+        &l,
+        token,
+        "POST",
+        &secrets,
+        json!({"name":"spare","value":"another-one"}),
+        "spare-2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // Both changes are in the trail, and no value is.
+    let recorded: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM audit WHERE action LIKE 'secret.%' ORDER BY sequence",
+    )
+    .fetch_all(&l.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded,
+        [
+            "secret.create",
+            "secret.rotate",
+            "secret.create",
+            "secret.delete",
+            "secret.create"
+        ]
+    );
+    let reader = key(&l, Some(&l.project), &["read"]).await;
+    assert_eq!(
+        call(
+            &l,
+            s(&reader["token"]),
+            "PUT",
+            &route,
+            json!({"value":"long-enough"}),
+            "no"
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    l.finish().await;
+}

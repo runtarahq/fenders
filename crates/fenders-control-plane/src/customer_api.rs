@@ -168,6 +168,16 @@ pub const KEY_ROUTES: &[(&str, &str, &str)] = &[
         "secrets:write",
     ),
     ("GET", "/v1/workspaces/*/projects/*/secrets/*", "read"),
+    (
+        "PUT",
+        "/v1/workspaces/*/projects/*/secrets/*",
+        "secrets:write",
+    ),
+    (
+        "DELETE",
+        "/v1/workspaces/*/projects/*/secrets/*",
+        "secrets:write",
+    ),
     ("GET", "/v1/workspaces/*/projects/*/operations", "read"),
     ("GET", "/v1/workspaces/*/projects/*/operations/*", "read"),
 ];
