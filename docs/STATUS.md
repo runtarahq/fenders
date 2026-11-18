@@ -84,9 +84,10 @@ as both control plane and node.
   writes a new one and revokes the old.
 - A tenant's key lives at most 30 days. A host product re-issues it with
   the operator credential.
-- The OpenAPI contract (`/api/openapi.json`) covers the workspace API. The
-  operator calls are described in [EMBEDDING-API.md](EMBEDDING-API.md), not
-  yet in the contract.
+- The OpenAPI contract (`/api/openapi.json`) describes every route the
+  management API answers, the operator's among them (tagged `operator`), and
+  a test fails when the two differ. Most responses are still described
+  only as an object.
 - The node's control protocol has no written, versioned specification: the
   `fenders-node-protocol` crate and the control plane's `/internal` routes are
   the reference ([EMBEDDING-NODE.md](EMBEDDING-NODE.md)).

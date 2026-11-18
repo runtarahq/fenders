@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Fenders workspace API",
+    "title": "Fenders management API",
     "version": "1.0.0",
-    "description": "The workspace API. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/v1/tenants/{workspace}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records."
+    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/tenants/{tenant}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records."
   },
   "servers": [
     {
@@ -13,6 +13,16 @@
   "security": [
     {
       "apiKey": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "workspace",
+      "description": "What a workspace's key may be given. The operator credential may call these too."
+    },
+    {
+      "name": "operator",
+      "description": "The operator's own routes. No key is ever given one: a key that asks is answered 403."
     }
   ],
   "paths": {
@@ -51,7 +61,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces": {
@@ -92,7 +105,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects": {
@@ -143,7 +159,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "post": {
         "operationId": "post__workspaces_workspace_projects",
@@ -210,7 +229,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/usage": {
@@ -258,7 +280,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/usage/history": {
@@ -322,7 +347,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/usage": {
@@ -379,7 +407,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/usage/history": {
@@ -452,7 +483,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/app-sizes": {
@@ -509,7 +543,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/https-access": {
@@ -566,7 +603,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/https-access/validate": {
@@ -633,7 +673,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/schedules/preview": {
@@ -700,7 +743,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps": {
@@ -794,7 +840,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "post": {
         "operationId": "post__workspaces_workspace_projects_project_apps",
@@ -888,7 +937,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/deploy": {
@@ -984,7 +1036,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}": {
@@ -1050,7 +1105,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "patch": {
         "operationId": "patch__workspaces_workspace_projects_project_apps_app",
@@ -1153,7 +1211,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "delete": {
         "operationId": "delete__workspaces_workspace_projects_project_apps_app",
@@ -1238,7 +1299,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/versions": {
@@ -1312,7 +1376,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "post": {
         "operationId": "post__workspaces_workspace_projects_project_apps_app_versions",
@@ -1415,7 +1482,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/versions/{version}": {
@@ -1490,7 +1560,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/releases": {
@@ -1572,7 +1645,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "post": {
         "operationId": "post__workspaces_workspace_projects_project_apps_app_releases",
@@ -1675,7 +1751,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/releases/{release}": {
@@ -1750,7 +1829,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/runs": {
@@ -1845,7 +1927,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "post": {
         "operationId": "post__workspaces_workspace_projects_project_apps_app_runs",
@@ -1930,7 +2015,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/runs/{run}": {
@@ -2005,7 +2093,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/runs/{run}/cancel": {
@@ -2091,7 +2182,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/triggers": {
@@ -2157,7 +2251,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "put": {
         "operationId": "put__workspaces_workspace_projects_project_apps_app_triggers",
@@ -2260,7 +2357,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/connections": {
@@ -2326,7 +2426,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "put": {
         "operationId": "put__workspaces_workspace_projects_project_apps_app_connections",
@@ -2429,7 +2532,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/http": {
@@ -2495,7 +2601,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/websocket": {
@@ -2587,7 +2696,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/logs": {
@@ -2690,7 +2802,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/events": {
@@ -2807,7 +2922,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/artifacts": {
@@ -2867,7 +2985,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "post": {
         "operationId": "post__workspaces_workspace_projects_project_artifacts",
@@ -2934,7 +3055,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/artifacts/{artifact}": {
@@ -3000,7 +3124,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/connections": {
@@ -3060,7 +3187,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "post": {
         "operationId": "post__workspaces_workspace_projects_project_connections",
@@ -3136,7 +3266,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/connections/{connection}": {
@@ -3202,7 +3335,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "delete": {
         "operationId": "delete__workspaces_workspace_projects_project_connections_connection",
@@ -3295,7 +3431,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/secrets": {
@@ -3355,7 +3494,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       },
       "post": {
         "operationId": "post__workspaces_workspace_projects_project_secrets",
@@ -3431,7 +3573,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/secrets/{secret}": {
@@ -3497,7 +3642,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/operations": {
@@ -3557,7 +3705,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/operations/{operation}": {
@@ -3623,7 +3774,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/artifacts/{artifact}/inspection": {
@@ -3689,7 +3843,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/http-sample": {
@@ -3765,7 +3922,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/app-submissions/{key}": {
@@ -3833,7 +3993,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/submissions/{key}": {
@@ -3910,7 +4073,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
       }
     },
     "/workspaces/{workspace}/projects/{project}/endpoint-submissions/{key}": {
@@ -3978,7 +4144,893 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "workspace"
+        ]
+      }
+    },
+    "/tenants": {
+      "post": {
+        "operationId": "post__tenants",
+        "summary": "Create a tenant",
+        "description": "A workspace, with what it may use, and a default project in it. Listed by GET /workspaces. Operator only.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The tenant; a retry is answered with it again.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceCreate"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
+    },
+    "/tenants/{tenant}": {
+      "patch": {
+        "operationId": "patch__tenants_tenant",
+        "summary": "Change what a tenant is allowed",
+        "description": "Its allowance, the size its apps take when they name none, or both. An allowance below what is in use is 409. Operator only.",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Not required: the change says what is to be. Given, a retry is answered as the first call was."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceUpdate"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
+    },
+    "/tenants/{tenant}/http-limits": {
+      "patch": {
+        "operationId": "patch__tenants_tenant_http_limits",
+        "summary": "Change a tenant's HTTP limits",
+        "description": "Operator only.",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Not required: the change says what is to be. Given, a retry is answered as the first call was."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpLimits"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HttpLimits"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
+    },
+    "/tenants/{tenant}/lifecycle": {
+      "post": {
+        "operationId": "post__tenants_tenant_lifecycle",
+        "summary": "Suspend or resume a tenant",
+        "description": "A suspended workspace's runs are stopped and its keys may only read. Operator only.",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Any key of 1 to 128 characters. A retry is answered with the first result, though the revision it expects has passed."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LifecycleAction"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
+    },
+    "/tenants/{tenant}/api-keys": {
+      "get": {
+        "operationId": "get__tenants_tenant_api_keys",
+        "summary": "List a tenant's keys",
+        "description": "Without their tokens. Operator only.",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ApiKey"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "post__tenants_tenant_api_keys",
+        "summary": "Issue a key",
+        "description": "For the tenant, or for one project of it. Operator only.",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The key, with its token, shown once.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyIssued"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "A retry: nothing was issued, token is null and replayed is true.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyIssued"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiKeyCreate"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
+    },
+    "/tenants/{tenant}/api-keys/{key}": {
+      "delete": {
+        "operationId": "delete__tenants_tenant_api_keys_key",
+        "summary": "Revoke a key",
+        "description": "It stops working at once. Revoking one already revoked is answered the same. Operator only.",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}$"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
+    },
+    "/nodes": {
+      "get": {
+        "operationId": "get__nodes",
+        "summary": "List nodes",
+        "description": "Operator only.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Node"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "post__nodes",
+        "summary": "Register a node",
+        "description": "With the pin of its certificate, before it is started. Operator only.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The node; a retry is answered with it again.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeRegistration"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
+    },
+    "/nodes/{node}": {
+      "patch": {
+        "operationId": "patch__nodes_node",
+        "summary": "Drain or disable a node, or change its launchers",
+        "description": "Operator only.",
+        "parameters": [
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Not required: the change says what is to be. Given, a retry is answered as the first call was."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeModeResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeMode"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
+    },
+    "/public-egress-policy": {
+      "get": {
+        "operationId": "get__public_egress_policy",
+        "summary": "Read the public egress policy",
+        "description": "Whether apps may be given public HTTPS origins, and under which policy. Operator only.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EgressPolicy"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "put__public_egress_policy",
+        "summary": "Activate or disable the public egress policy",
+        "description": "Disabling stops the executions that hold public HTTPS access. Operator only.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Not required. Given, a retry of a change that was made is answered with the policy as it stands, though the revision it expects has passed."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EgressPolicy"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EgressPolicyUpdate"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
+    },
+    "/control-plane/status": {
+      "get": {
+        "operationId": "get__control_plane_status",
+        "summary": "Read this control plane's loops",
+        "description": "Operator only.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlPlaneStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
       }
     }
   },
@@ -3987,7 +5039,12 @@
       "apiKey": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Workspace API key. Permissions and optional project scope are enforced on every request."
+        "description": "Workspace API key. Permissions and optional project scope are enforced on every request. The operator credential is accepted wherever a key is."
+      },
+      "operator": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The operator credential, written to STATE/operator.token at first start. Not scoped: it may call every route, a workspace's among them."
       }
     },
     "schemas": {
@@ -4644,6 +5701,979 @@
           "method",
           "path",
           "duration_ms"
+        ]
+      },
+      "Allowance": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "What a workspace may use. Always given whole.",
+        "properties": {
+          "cpu_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "CPU its runs may hold at once, in hundredths of a core."
+          },
+          "memory_mib": {
+            "type": "integer",
+            "minimum": 88,
+            "maximum": 100000000
+          },
+          "storage_bytes": {
+            "type": "integer",
+            "minimum": 1024
+          },
+          "instances": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000,
+            "description": "Executions at once."
+          },
+          "transfer_bytes": {
+            "type": "integer",
+            "minimum": 1024,
+            "description": "Outbound and gateway transfer in a UTC month."
+          }
+        },
+        "required": [
+          "cpu_percent",
+          "memory_mib",
+          "storage_bytes",
+          "instances",
+          "transfer_bytes"
+        ]
+      },
+      "WorkspaceCreate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "allowance": {
+            "$ref": "#/components/schemas/Allowance"
+          }
+        },
+        "required": [
+          "name",
+          "allowance"
+        ]
+      },
+      "WorkspaceUpdate": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "At least one of the two.",
+        "properties": {
+          "allowance": {
+            "$ref": "#/components/schemas/Allowance"
+          },
+          "default_app_size": {
+            "type": "string",
+            "enum": [
+              "small",
+              "medium",
+              "large"
+            ]
+          }
+        },
+        "required": []
+      },
+      "Workspace": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "name": {
+            "type": "string",
+            "description": "A label. Two workspaces may share one; the id is what identifies."
+          },
+          "cpu_percent": {
+            "type": "integer"
+          },
+          "memory_mib": {
+            "type": "integer"
+          },
+          "storage_bytes": {
+            "type": "integer"
+          },
+          "instances": {
+            "type": "integer"
+          },
+          "transfer_bytes": {
+            "type": "integer"
+          },
+          "default_app_size": {
+            "type": "string",
+            "enum": [
+              "small",
+              "medium",
+              "large"
+            ]
+          },
+          "http_concurrent_requests": {
+            "type": "integer"
+          },
+          "http_requests_per_minute": {
+            "type": "integer"
+          },
+          "lifecycle_state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "suspending",
+              "suspended"
+            ]
+          },
+          "lifecycle_revision": {
+            "type": "integer",
+            "description": "The operator's alone: what POST …/lifecycle expects."
+          },
+          "lifecycle_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The operator's alone."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "allowance_revision": {
+            "type": "integer",
+            "description": "The operator's alone."
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "cpu_percent",
+          "memory_mib",
+          "storage_bytes",
+          "instances",
+          "transfer_bytes",
+          "default_app_size",
+          "lifecycle_state",
+          "created"
+        ]
+      },
+      "HttpLimits": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "How many requests of a workspace's HTTP apps may be in flight at once, and how many admitted in a minute.",
+        "properties": {
+          "concurrent_requests": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "requests_per_minute": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000000
+          }
+        },
+        "required": [
+          "concurrent_requests",
+          "requests_per_minute"
+        ]
+      },
+      "LifecycleAction": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "suspend",
+              "resume"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The workspace's lifecycle_revision."
+          },
+          "request_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "deprecated": true,
+            "description": "The Idempotency-Key, as it was once sent. Send the header."
+          }
+        },
+        "required": [
+          "action",
+          "reason",
+          "expected_revision"
+        ]
+      },
+      "LifecycleResult": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "suspending",
+              "suspended"
+            ],
+            "description": "suspending until the workspace's executions have ended."
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "audit": {
+            "type": "object",
+            "properties": {
+              "sequence": {
+                "type": "integer"
+              },
+              "created": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "sequence",
+              "created"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "revision",
+          "audit"
+        ]
+      },
+      "ApiKeyCreate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "read",
+                "apps:write",
+                "runs:write",
+                "projects:write",
+                "connections:write",
+                "secrets:write"
+              ]
+            },
+            "minItems": 1,
+            "description": "projects:write is not given to a key of one project."
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 2592000
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "One line the issuer wants recorded with what the key does. Not interpreted."
+          }
+        },
+        "required": [
+          "name",
+          "permissions",
+          "ttl_seconds"
+        ]
+      },
+      "ApiKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "read",
+                "apps:write",
+                "runs:write",
+                "projects:write",
+                "connections:write",
+                "secrets:write"
+              ]
+            }
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prefix": {
+            "type": "string",
+            "description": "The start of the token, to tell keys apart by."
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "expires": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "last_used": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "project_id",
+          "permissions",
+          "prefix",
+          "expires",
+          "created",
+          "revoked"
+        ]
+      },
+      "ApiKeyIssued": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "read",
+                "apps:write",
+                "runs:write",
+                "projects:write",
+                "connections:write",
+                "secrets:write"
+              ]
+            }
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prefix": {
+            "type": "string",
+            "description": "The start of the token, to tell keys apart by."
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "expires": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "Shown once and not kept. null when replayed."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "replayed": {
+            "type": "boolean",
+            "description": "true for a retry: nothing was issued, and no token can be shown. If the first answer was lost, revoke the key by its id and issue another."
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "project_id",
+          "permissions",
+          "prefix",
+          "expires",
+          "created",
+          "token",
+          "replayed"
+        ]
+      },
+      "NodeRegistration": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "cert_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "The pin of the node's certificate."
+          },
+          "endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "An HTTPS origin."
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "wasm"
+            ]
+          },
+          "architecture": {
+            "type": "string",
+            "enum": [
+              "x86_64"
+            ]
+          },
+          "runtime": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "cpu_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "memory_mib": {
+            "type": "integer",
+            "minimum": 88,
+            "maximum": 100000000
+          },
+          "instances": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000
+          },
+          "egress_budget_launcher": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "egress_budget_required": {
+            "type": "boolean",
+            "description": "Requires egress_budget_launcher."
+          }
+        },
+        "required": [
+          "name",
+          "cert_sha256",
+          "endpoint",
+          "backend",
+          "architecture",
+          "runtime",
+          "cpu_percent",
+          "memory_mib",
+          "instances"
+        ]
+      },
+      "Node": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "cert_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "The pin of the node's certificate."
+          },
+          "endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "An HTTPS origin."
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "wasm"
+            ]
+          },
+          "architecture": {
+            "type": "string",
+            "enum": [
+              "x86_64"
+            ]
+          },
+          "runtime": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "cpu_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "memory_mib": {
+            "type": "integer",
+            "minimum": 88,
+            "maximum": 100000000
+          },
+          "instances": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000
+          },
+          "egress_budget_launcher": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "egress_budget_required": {
+            "type": "boolean",
+            "description": "Requires egress_budget_launcher."
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "draining": {
+            "type": "boolean"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "retained_egress_launchers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "last_seen": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "boot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_confinement": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_egress_budget": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_launcher_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_runtime_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "cert_sha256",
+          "endpoint",
+          "backend",
+          "architecture",
+          "runtime",
+          "cpu_percent",
+          "memory_mib",
+          "instances",
+          "draining",
+          "disabled",
+          "egress_budget_required",
+          "created"
+        ]
+      },
+      "NodeMode": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "At least one. What is not named is left as it is.",
+        "properties": {
+          "draining": {
+            "type": "boolean"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "egress_budget_required": {
+            "type": "boolean"
+          },
+          "egress_budget_launcher": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retained_egress_launchers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "maxItems": 32
+          }
+        },
+        "required": []
+      },
+      "NodeModeResult": {
+        "type": "object",
+        "description": "What was asked, with the node's id.",
+        "properties": {
+          "draining": {
+            "type": "boolean"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "egress_budget_required": {
+            "type": "boolean"
+          },
+          "egress_budget_launcher": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retained_egress_launchers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "maxItems": 32
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "EgressPolicy": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configured_digest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "The digest of the policy this control plane was started with, or null when it has none."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "pending_executions": {
+            "type": "integer",
+            "description": "Executions with public HTTPS access still to be stopped."
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "enabled",
+          "digest",
+          "configured_digest",
+          "revision",
+          "pending_executions",
+          "updated"
+        ]
+      },
+      "EgressPolicyUpdate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "enabled=true: the configured_digest being activated."
+          }
+        },
+        "required": [
+          "expected_revision",
+          "enabled"
+        ]
+      },
+      "ControlPlaneStatus": {
+        "type": "object",
+        "description": "How this control plane's own loops are doing. A loop that runs is not proof that work is placed.",
+        "properties": {
+          "process_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "uptime_ms": {
+            "type": "integer"
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "component": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "iterations": {
+                  "type": "integer"
+                },
+                "failures": {
+                  "type": "integer"
+                },
+                "consecutive_failures": {
+                  "type": "integer"
+                },
+                "last_started_age_ms": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "last_completed_age_ms": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "last_success_age_ms": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "last_duration_ms": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "termination": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "component",
+                "state",
+                "iterations",
+                "failures",
+                "consecutive_failures"
+              ]
+            }
+          }
+        },
+        "required": [
+          "process_id",
+          "uptime_ms",
+          "components"
         ]
       }
     }

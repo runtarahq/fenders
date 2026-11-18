@@ -439,9 +439,17 @@ mod tests {
 
     #[test]
     fn the_contract_and_the_router_describe_the_same_routes() {
+        // The operator's routes are under the names the control plane has
+        // for them, and nowhere else.
         let routed: BTreeSet<_> = KEY_ROUTES
             .iter()
             .map(|(method, pattern, _)| public(method, pattern))
+            .chain(OPERATOR_ROUTES.iter().map(|(method, pattern)| {
+                (
+                    method.to_string(),
+                    pattern.trim_start_matches("/v1").to_owned(),
+                )
+            }))
             .collect();
         let documented = documented();
         let undocumented: Vec<_> = routed.difference(&documented).collect();
@@ -454,6 +462,39 @@ mod tests {
             unrouted.is_empty(),
             "in the contract and not routed: {unrouted:?}"
         );
+    }
+
+    #[test]
+    fn the_operators_routes_are_marked_as_the_operators_and_no_others() {
+        let spec: Value = serde_json::from_str(include_str!("../static/api/openapi.json")).unwrap();
+        let operators: BTreeSet<_> = OPERATOR_ROUTES
+            .iter()
+            .map(|(method, pattern)| {
+                (
+                    method.to_string(),
+                    pattern.trim_start_matches("/v1").to_owned(),
+                )
+            })
+            .collect();
+        for (path, methods) in spec["paths"].as_object().unwrap() {
+            let pattern: Vec<&str> = path
+                .split('/')
+                .map(|segment| {
+                    if segment.starts_with('{') {
+                        "*"
+                    } else {
+                        segment
+                    }
+                })
+                .collect();
+            for (method, operation) in methods.as_object().unwrap() {
+                let route = (method.to_uppercase(), pattern.join("/"));
+                let marked = operation["security"] == json!([{"operator":[]}]);
+                assert_eq!(marked, operators.contains(&route), "{route:?}");
+                let tag = if marked { "operator" } else { "workspace" };
+                assert_eq!(operation["tags"], json!([tag]), "{route:?}");
+            }
+        }
     }
 
     #[test]

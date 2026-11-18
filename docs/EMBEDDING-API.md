@@ -200,6 +200,10 @@ Everything else is the tenant API of section 5, which the operator
 credential may also call. There is no third set: a path in neither is
 answered `404` to everyone.
 
+Both sets are in the contract at `/api/openapi.json`, these tagged
+`operator`. The table of routes in `customer_api.rs` is what the control
+plane answers, and a test holds the contract to it.
+
 ## Building a console on it
 
 Fenders has no people in it: no sign-in, no sessions, no users, roles or
@@ -261,5 +265,4 @@ The whole list is the enum of `Error.code` in the contract. Beside it:
 
 [STATUS.md](STATUS.md) lists them all. The ones that shape an integration:
 the operator credential is a single unscoped token; keys live 30 days at
-most; the operator calls are not in the OpenAPI contract yet; HTTP apps'
-traffic passes through one control-plane process.
+most; HTTP apps' traffic passes through one control-plane process.
