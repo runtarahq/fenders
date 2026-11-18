@@ -33,10 +33,29 @@ pub(crate) struct WorkspaceAction {
     /// The workspace: from the request's path, never its body.
     #[serde(skip_deserializing)]
     pub(crate) id: String,
-    request_key: String,
+    /// The Idempotency-Key header's. Read from the body too, as it was
+    /// once sent, until that is removed.
+    #[serde(default)]
+    request_key: Option<String>,
     expected_revision: i64,
     action: String,
     reason: String,
+}
+impl WorkspaceAction {
+    /// The action under the key its request was made with: the header's,
+    /// or the body's when there is no header. Both, and different, is a
+    /// request that does not know which it is.
+    pub(crate) fn keyed(mut self, header: &str) -> Result<Self> {
+        if !header.is_empty() {
+            if self.request_key.as_deref().is_some_and(|key| key != header) {
+                return Err(Error::invalid(
+                    "request_key differs from the Idempotency-Key header; send the header alone",
+                ));
+            }
+            self.request_key = Some(header.to_owned());
+        }
+        Ok(self)
+    }
 }
 impl Store {
     pub(crate) async fn workspace_active(tx: &mut Tx, tenant: &str) -> Result<bool> {
@@ -69,7 +88,8 @@ impl Store {
         input: WorkspaceAction,
     ) -> Result<Value> {
         identity(&input.id)?;
-        identity(&input.request_key)?;
+        let key = input.request_key.clone().unwrap_or_default();
+        crate::customer_api::request_key(&key)?;
         if !matches!(input.action.as_str(), "suspend" | "resume")
             || input.expected_revision < 1
             || input.reason.trim().is_empty()
@@ -80,8 +100,7 @@ impl Store {
         let request = json!({"kind":"workspace-lifecycle","input":input});
         let mut tx = self.transaction(true, false).await?;
         if let Some(previous) =
-            crate::customer_api::operator_receipt(&mut tx, actor, &input.request_key, &request)
-                .await?
+            crate::customer_api::operator_receipt(&mut tx, actor, &key, &request).await?
         {
             return Ok(previous);
         }
@@ -155,7 +174,7 @@ impl Store {
         }
         Self::reconcile_app_runs(&mut tx).await?;
         let row=one(&mut tx,"SELECT lifecycle_state AS status,lifecycle_revision AS revision FROM tenants WHERE id=$1",args![input.id]).await?;
-        let audit=one(&mut tx,"INSERT INTO audit(tenant_id,actor,action,resource_id,detail,actor_label) VALUES($1,$2,$3,$1,$4,(SELECT label FROM credentials WHERE id=$2)) RETURNING sequence,created",args![input.id,format!("operator:{actor}"),format!("operator.{}",input.action),json!({"reason":input.reason.trim(),"before":before["lifecycle_state"],"after":row["status"],"revision":row["revision"],"request_key":input.request_key})]).await?;
+        let audit=one(&mut tx,"INSERT INTO audit(tenant_id,actor,action,resource_id,detail,actor_label) VALUES($1,$2,$3,$1,$4,(SELECT label FROM credentials WHERE id=$2)) RETURNING sequence,created",args![input.id,format!("operator:{actor}"),format!("operator.{}",input.action),json!({"reason":input.reason.trim(),"before":before["lifecycle_state"],"after":row["status"],"revision":row["revision"],"request_key":key})]).await?;
         Self::reconcile_workspace_suspensions(&mut tx).await?;
         let row=one(&mut tx,"SELECT lifecycle_state AS status,lifecycle_revision AS revision FROM tenants WHERE id=$1",args![input.id]).await?;
         let result =
@@ -163,7 +182,7 @@ impl Store {
         crate::customer_api::save_operator_receipt(
             &mut tx,
             actor,
-            &input.request_key,
+            &key,
             Some(&input.id),
             &request,
             &result,

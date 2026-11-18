@@ -283,7 +283,8 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         // Suspend a workspace, or resume it: the operator's, with a reason.
         ("POST", ["v1", "tenants", tenant, "lifecycle"]) => {
             p.operator()?;
-            let mut action: crate::workspace_lifecycle::WorkspaceAction = parse(&bytes)?;
+            let mut action =
+                parse::<crate::workspace_lifecycle::WorkspaceAction>(&bytes)?.keyed(key)?;
             action.id = (*tenant).to_owned();
             store.operator_workspace_action(&p.id, action).await?
         }

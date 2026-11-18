@@ -119,9 +119,10 @@ POST /v1/tenants/TENANT/api-keys
 GET    /v1/tenants/TENANT/api-keys          # the tenant's keys, without their tokens
 DELETE /v1/tenants/TENANT/api-keys/KEY      # it stops working at once
 
-# Suspend a workspace, or resume it.
+# Suspend a workspace, or resume it. expected_revision is the tenant's
+# lifecycle_revision, as GET /v1/tenants gives it to the operator.
 POST /v1/tenants/TENANT/lifecycle
-{"request_key": "…", "expected_revision": 1, "action": "suspend", "reason": "…"}
+{"expected_revision": 1, "action": "suspend", "reason": "…"}
 ```
 
 Permissions: `read`, `apps:write`, `runs:write`, `projects:write`,
