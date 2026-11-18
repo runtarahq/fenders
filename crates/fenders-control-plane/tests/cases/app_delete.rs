@@ -79,7 +79,9 @@ async fn deletion_is_authorized_atomic_idempotent_and_keeps_a_tombstone() {
         request(&l, s(&editor["token"]), app, &key, revision),
         request(&l, s(&editor["token"]), app, &key, revision)
     );
-    assert_eq!(first.0, StatusCode::ACCEPTED);
+    // Nothing of the app was running, so the deletion is made at once:
+    // 200, where 202 would say it was still to be.
+    assert_eq!(first.0, StatusCode::OK);
     assert_eq!(first, retry);
     assert_eq!(first.1["state"], "succeeded");
     assert_eq!(

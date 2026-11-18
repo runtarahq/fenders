@@ -320,7 +320,7 @@ async fn overlap(l: Lab) {
     .unwrap();
     let response = std::str::from_utf8(&response).unwrap();
     assert!(
-        response.starts_with("HTTP/1.1 202 Accepted\r\n"),
+        response.starts_with("HTTP/1.1 201 Created\r\n"),
         "{response}"
     );
     let (_, payload) = response.split_once("\r\n\r\n").unwrap();
@@ -342,7 +342,7 @@ async fn overlap(l: Lab) {
         .send()
         .await
         .unwrap();
-    assert_eq!(retry.status(), StatusCode::ACCEPTED);
+    assert_eq!(retry.status(), StatusCode::CREATED);
     let replay: Value = serde_json::from_slice(&retry.bytes().await.unwrap()).unwrap();
     assert_eq!(receipt, replay);
     let effects: i64 = sqlx::query_scalar(
@@ -370,7 +370,7 @@ async fn overlap(l: Lab) {
         .send()
         .await
         .unwrap();
-    assert_eq!(recovered.status(), StatusCode::ACCEPTED);
+    assert_eq!(recovered.status(), StatusCode::CREATED);
     let recovered: Value = serde_json::from_slice(&recovered.bytes().await.unwrap()).unwrap();
     assert_eq!(recovered, receipt);
     terminate(&mut restarted).await;

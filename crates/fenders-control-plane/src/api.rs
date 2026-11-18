@@ -494,7 +494,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "connections",
             ],
         ) => {
-            status = StatusCode::ACCEPTED;
             store
                 .update_app_connections(&p, tenant, project, app, parse(&bytes)?, key)
                 .await?
@@ -626,7 +625,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .await?
         }
         ("DELETE", ["v1", "tenants", tenant, "projects", project, "apps", app]) => {
-            status = StatusCode::ACCEPTED;
             store
                 .delete_app(&p, tenant, project, app, parse(&bytes)?, key)
                 .await?
@@ -676,7 +674,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "runs",
             ],
         ) => {
-            status = StatusCode::ACCEPTED;
             let invocation = if bytes.is_empty() {
                 crate::app_runtime::RunInvocation::default()
             } else {
@@ -726,7 +723,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "cancel",
             ],
         ) => {
-            status = StatusCode::ACCEPTED;
             store
                 .cancel_app_run(&p, tenant, project, app, run, key)
                 .await?
@@ -921,7 +917,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "external-endpoints",
             ],
         ) => {
-            status = StatusCode::ACCEPTED;
+            status = StatusCode::CREATED;
             store
                 .create_endpoint(&p, tenant, project, parse(&bytes)?, key)
                 .await?
@@ -987,10 +983,13 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         ) => store.resources(&p, tenant, project, kind, Some(id)).await?,
         _ => return Err(Error::missing()),
     };
+    // 202 says one thing: the change was taken and is not yet made. It is
+    // decided here and nowhere else, for every route that answers with an
+    // operation, from the operation itself.
     if method != "GET"
-        && segments.get(5) == Some(&"apps")
         && value["state"] == "pending"
         && value.get("kind").is_some()
+        && value.get("resource_id").is_some()
     {
         status = StatusCode::ACCEPTED;
     }

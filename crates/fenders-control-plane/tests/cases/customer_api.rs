@@ -553,7 +553,9 @@ async fn a_run_is_cancelled_through_its_app_by_a_key_that_may_run() {
         &request,
     )
     .await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{stopped}");
+    // The run had not been given to a node, so it is stopped already.
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    assert_eq!(stopped["state"], "succeeded");
     // The same request again is the same answer, not a second stop.
     assert_eq!(
         call(
@@ -1489,7 +1491,7 @@ async fn what_became_of_a_request_is_found_by_whatever_key_it_was_made_with() {
         "connect 1",
     )
     .await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{connection}");
+    assert_eq!(status, StatusCode::CREATED, "{connection}");
     let (status, submission) = found("/endpoint-submissions/connect%201".into()).await;
     assert_eq!(status, StatusCode::OK, "{submission}");
     assert_eq!(submission["id"], connection["id"]);
@@ -1989,5 +1991,140 @@ async fn an_id_that_could_be_none_is_malformed_in_a_body_and_missing_in_a_path()
         .0,
         StatusCode::NOT_FOUND
     );
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn accepted_means_still_pending_and_nothing_else() {
+    let l = Lab::new().await;
+    l.validated().await;
+    let k = key(
+        &l,
+        Some(&l.project),
+        &["read", "apps:write", "runs:write", "connections:write"],
+    )
+    .await;
+    let token = s(&k["token"]);
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
+    // Every change that answers with an operation, as it is first made and
+    // as it is retried: 202 exactly when the operation is pending.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut change = async |method: &str, path: String, body: Value, made: StatusCode| {
+        let key = uid();
+        for attempt in ["first", "retry"] {
+            let (status, op) = call(&l, token, method, &path, body.clone(), &key).await;
+            let expected = if op["state"] == "pending" {
+                StatusCode::ACCEPTED
+            } else {
+                made
+            };
+            assert_eq!(status, expected, "{attempt} {method} {path}: {op}");
+            seen.insert((s(&op["kind"]).to_owned(), s(&op["state"]).to_owned()));
+        }
+        call(&l, token, method, &path, body, &key).await.1
+    };
+    let deploy = |name: &str, http: bool| json!({"name":name,"artifact_id":l.artifact,"triggers":{"manual":true,"http":http}});
+    // With no node, an HTTP app waits for one; a command app needs none.
+    let web = change(
+        "POST",
+        format!("{base}/apps/deploy"),
+        deploy("web", true),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(web["state"], "pending");
+    let app = change(
+        "POST",
+        format!("{base}/apps/deploy"),
+        deploy("job", false),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(app["state"], "succeeded");
+    let app = s(&app["resource_id"]).to_owned();
+    let revision = async || {
+        l.store
+            .app(&l.operator, &l.tenant, &l.project, &app)
+            .await
+            .unwrap()["revision"]
+            .clone()
+    };
+    let connection = change(
+        "POST",
+        format!("{base}/connections"),
+        json!({"type":"https","name":"example","origin":"https://example.com"}),
+        StatusCode::CREATED,
+    )
+    .await;
+    let run = change(
+        "POST",
+        format!("{base}/apps/{app}/runs"),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(run["state"], "pending");
+    change(
+        "POST",
+        format!("{base}/apps/{app}/runs/{}/cancel", s(&run["resource_id"])),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        "PUT",
+        format!("{base}/apps/{app}/triggers"),
+        json!({"manual":false,"expected_revision":1}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        "PATCH",
+        format!("{base}/apps/{app}"),
+        json!({"desired":"stopped","expected_revision":revision().await}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        "DELETE",
+        format!("{base}/apps/{app}"),
+        json!({"expected_revision":revision().await}),
+        StatusCode::OK,
+    )
+    .await;
+    // Revoking a connection takes no body.
+    let revoke = format!("{base}/connections/{}", s(&connection["resource_id"]));
+    let revoked = uid();
+    for attempt in ["first", "retry"] {
+        let response = api::router(l.store.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&revoke)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Idempotency-Key", &revoked)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let op: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        let expected = if op["state"] == "pending" {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(status, expected, "{attempt} DELETE {revoke}: {op}");
+        seen.insert((s(&op["kind"]).to_owned(), s(&op["state"]).to_owned()));
+    }
+    // Both were met: an operation pending, and operations made.
+    assert!(seen.iter().any(|(_, state)| state == "pending"), "{seen:?}");
+    assert!(
+        seen.iter().any(|(_, state)| state == "succeeded"),
+        "{seen:?}"
+    );
+    assert!(seen.len() >= 8, "{seen:?}");
     l.finish().await;
 }

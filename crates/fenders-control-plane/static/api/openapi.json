@@ -3,7 +3,7 @@
   "info": {
     "title": "Fenders management API",
     "version": "0.1.0",
-    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/tenants/{tenant}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records."
+    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/tenants/{tenant}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records. A change that answers with an operation is 202 while the operation is pending and 200 or 201 once it is not; nothing else is ever 202."
   },
   "servers": [
     {
@@ -882,7 +882,7 @@
         ],
         "responses": {
           "201": {
-            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "description": "The change is made: the operation has succeeded or failed, and what it made exists.",
             "headers": {
               "X-Request-Id": {
                 "schema": {
@@ -981,7 +981,7 @@
         ],
         "responses": {
           "201": {
-            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "description": "The change is made: the operation has succeeded or failed, and what it made exists.",
             "headers": {
               "X-Request-Id": {
                 "schema": {
@@ -1156,7 +1156,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "description": "The change is made: the operation has succeeded or failed.",
             "headers": {
               "X-Request-Id": {
                 "schema": {
@@ -1261,6 +1261,24 @@
           }
         ],
         "responses": {
+          "200": {
+            "description": "The change is made: the operation has succeeded or failed.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
           "202": {
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
@@ -1427,7 +1445,7 @@
         ],
         "responses": {
           "201": {
-            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "description": "The change is made: the operation has succeeded or failed, and what it made exists.",
             "headers": {
               "X-Request-Id": {
                 "schema": {
@@ -1696,7 +1714,7 @@
         ],
         "responses": {
           "201": {
-            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "description": "The change is made: the operation has succeeded or failed, and what it made exists.",
             "headers": {
               "X-Request-Id": {
                 "schema": {
@@ -1977,6 +1995,24 @@
           }
         ],
         "responses": {
+          "200": {
+            "description": "A retry of a run that has ended: its operation.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
           "202": {
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
@@ -2154,6 +2190,24 @@
           }
         ],
         "responses": {
+          "200": {
+            "description": "The change is made: the operation has succeeded or failed.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
           "202": {
             "description": "Operation is still pending; poll it and the resource.",
             "headers": {
@@ -2302,7 +2356,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "description": "The change is made: the operation has succeeded or failed.",
             "headers": {
               "X-Request-Id": {
                 "schema": {
@@ -2477,7 +2531,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "description": "The change is made: the operation has succeeded or failed.",
             "headers": {
               "X-Request-Id": {
                 "schema": {
@@ -3228,8 +3282,26 @@
           }
         ],
         "responses": {
+          "201": {
+            "description": "The change is made: the operation has succeeded or failed, and what it made exists.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
           "202": {
-            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "description": "Operation is still pending; poll it and the resource.",
             "headers": {
               "X-Request-Id": {
                 "schema": {
@@ -3386,7 +3458,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "description": "The change is made: the operation has succeeded or failed.",
             "headers": {
               "X-Request-Id": {
                 "schema": {
