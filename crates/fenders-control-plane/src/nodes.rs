@@ -318,7 +318,8 @@ impl Store {
                     "memory_bytes",
                 ],
             )?;
-            id(&report["id"])?;
+            // A node's report, not a request's body: answered as it was.
+            fenders_node_protocol::value::id(&report["id"])?;
             integer(&report["generation"], 1, i64::MAX)?;
             let Some(e) = optional(
                 &mut tx,

@@ -526,7 +526,7 @@ impl Store {
         key: Option<&str>,
     ) -> Result<Value> {
         p.operator()?;
-        id(&json!(tenant))?;
+        crate::model::identity(tenant)?;
         let names = ["concurrent_requests", "requests_per_minute"];
         fields(&value, &names, &names)?;
         let concurrent =

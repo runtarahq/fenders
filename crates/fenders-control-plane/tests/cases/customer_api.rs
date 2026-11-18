@@ -1900,3 +1900,94 @@ async fn a_body_is_what_it_says_it_is_or_is_not_read() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
     l.finish().await;
 }
+
+#[tokio::test]
+async fn an_id_that_could_be_none_is_malformed_in_a_body_and_missing_in_a_path() {
+    let l = Lab::new().await;
+    let app = l.command_app().await;
+    let k = key(&l, None, &["read", "apps:write"]).await;
+    let token = s(&k["token"]);
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
+    let triggers = json!({"manual":true,"http":false});
+    let revision = l
+        .store
+        .app(&l.operator, &l.tenant, &l.project, &app)
+        .await
+        .unwrap()["revision"]
+        .clone();
+    let cases = [
+        (
+            "POST",
+            format!("{base}/apps/deploy"),
+            json!({"name":"malformed","artifact_id":"@","triggers":triggers}),
+        ),
+        (
+            "POST",
+            format!("{base}/apps"),
+            json!({"name":"malformed","artifact_id":"@"}),
+        ),
+        (
+            "POST",
+            format!("{base}/apps/{app}/versions"),
+            json!({"artifact_id":"@","expected_revision":revision}),
+        ),
+        (
+            "POST",
+            format!("{base}/apps/{app}/releases"),
+            json!({"version_id":"@","expected_revision":revision}),
+        ),
+        (
+            "PUT",
+            format!("{base}/apps/{app}/connections"),
+            json!({"connections":[{"connection_id":"@"}],"expected_revision":revision}),
+        ),
+    ];
+    for (method, path, body) in &cases {
+        // No id at all: too short, not hexadecimal, upper case, not a string.
+        for malformed in [
+            json!("abc"),
+            json!("z".repeat(32)),
+            json!("A".repeat(32)),
+            json!(7),
+        ] {
+            let body = serde_json::from_str::<Value>(
+                &body.to_string().replace("\"@\"", &malformed.to_string()),
+            )
+            .unwrap();
+            let (status, answer) = call(&l, token, method, path, body, &uid()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {answer}");
+            assert_eq!(answer["code"], "invalid_request");
+        }
+        // One that could be an id, and names nothing.
+        let body = serde_json::from_str::<Value>(&body.to_string().replace('@', &uid())).unwrap();
+        let (status, answer) = call(&l, token, method, path, body, &uid()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {answer}");
+    }
+    // What a path names is missing either way: a path names a thing.
+    for path in [
+        format!("{base}/apps/abc"),
+        format!("{base}/artifacts/{}", "Z".repeat(32)),
+        format!("/v1/workspaces/{}/projects/abc/apps", l.tenant),
+    ] {
+        assert_eq!(
+            call(&l, token, "GET", &path, json!({}), "").await.0,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let limits = json!({"concurrent_requests":8,"requests_per_minute":120});
+    assert_eq!(
+        call(
+            &l,
+            &l.token,
+            "PATCH",
+            "/v1/tenants/abc/http-limits",
+            limits,
+            ""
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    l.finish().await;
+}

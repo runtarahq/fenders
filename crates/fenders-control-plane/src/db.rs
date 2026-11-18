@@ -73,6 +73,13 @@ pub async fn exec(tx: &mut Tx, sql: &str, args: &[Value]) -> Result<u64> {
         .await?
         .rows_affected())
 }
+/// An id that a request's body names. One that could be no id is a
+/// malformed request and is said to be: `404` is for an id that could be
+/// one and names nothing, and for anything a path names.
+pub fn id(value: &Value) -> Result<&str> {
+    fenders_node_protocol::value::id(value)
+        .map_err(|_| Error::invalid("expected an id: 32 lowercase hexadecimal characters"))
+}
 // Control-plane errors carry the database classification, so these constructors
 // shadow the protocol versions for code that also returns database errors.
 pub fn conflict(message: &'static str) -> Error {
