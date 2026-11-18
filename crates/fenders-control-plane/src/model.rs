@@ -111,7 +111,11 @@ pub struct CreateTenant {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateAllowance {
-    pub allowance: Allowance,
+    #[serde(default)]
+    pub allowance: Option<Allowance>,
+    /// The size an app of this tenant takes when it names none.
+    #[serde(default)]
+    pub default_app_size: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

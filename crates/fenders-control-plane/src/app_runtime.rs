@@ -789,6 +789,27 @@ impl Store {
         Ok(value)
     }
 
+    /// Stops a run of an app that has not ended.
+    pub async fn cancel_app_run(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        app: &str,
+        run: &str,
+        key: &str,
+    ) -> Result<Value> {
+        let run = self.app_run(p, tenant, project, app, run).await?;
+        let Some(execution) = run["execution_id"].as_str() else {
+            return Err(Error::new(
+                axum::http::StatusCode::CONFLICT,
+                "run has nothing started to stop",
+            ));
+        };
+        self.action(p, tenant, project, execution, "stop", key)
+            .await
+    }
+
     pub async fn app_release(
         &self,
         p: &Principal,

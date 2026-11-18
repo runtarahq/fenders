@@ -109,6 +109,7 @@ POST /v1/tenants
 GET  /v1/tenants/TENANT/projects            # -> [{"id": "PROJECT", …}]
 POST /v1/tenants/TENANT/projects            {"name": "staging"}
 PATCH /v1/tenants/TENANT                    {"allowance": {…}}
+PATCH /v1/tenants/TENANT                    {"default_app_size": "medium"}   # for apps that name no size
 
 # A key for that tenant, optionally for one project.
 POST /v1/tenants/TENANT/api-keys
@@ -148,6 +149,7 @@ GET  $S/apps/APP             # "state": "ready"
 
 POST $S/apps/APP/runs        {}                 # deploying never runs anything; this does
 GET  $S/apps/APP/runs/RUN    # "state": "succeeded" | "failed" | "cancelled", "exit_code"
+POST $S/apps/APP/runs/RUN/cancel               # stop one that has not ended (runs:write)
 GET  $S/apps/APP/logs        # its output, secrets masked
 ```
 
@@ -169,6 +171,24 @@ the contract.
 
 Each run is a VM of its own with its own cgroup and uid on the node, and
 reaches only the destinations its app was given.
+
+## The operator's routes, all of them
+
+What no tenant's key is ever given, whatever it holds:
+
+| | |
+|---|---|
+| Tenants | `POST /v1/tenants` (`GET /v1/tenants` lists them all to the operator, and a key its own) |
+| What a tenant is allowed | `PATCH /v1/tenants/T` (allowance, default app size), `PATCH /v1/tenants/T/http-limits` |
+| Suspending one | `POST /v1/tenants/T/lifecycle` |
+| Its keys | `GET`, `POST /v1/tenants/T/api-keys`, `DELETE /v1/tenants/T/api-keys/KEY` |
+| Nodes | `GET`, `POST /v1/nodes`, `PATCH /v1/nodes/NODE` |
+| Public egress policy | `GET`, `PUT /v1/public-egress-policy` |
+| This control plane's loops | `GET /v1/control-plane/status` |
+
+Everything else is the tenant API of section 5, which the operator
+credential may also call. There is no third set: a path in neither is
+answered `404` to everyone.
 
 ## Building a console on it
 

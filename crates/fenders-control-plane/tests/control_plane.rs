@@ -776,41 +776,6 @@ async fn customer_projects_settings_and_authorization() {
             StatusCode::BAD_REQUEST
         );
     }
-    let settings = || {
-        serde_json::from_value(json!({"display_name":" Acme Studio ","default_app_size":"medium","expected_revision":1})).unwrap()
-    };
-    assert_eq!(
-        l.store
-            .update_workspace_settings(&editor, &l.tenant, settings())
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        l.store
-            .update_workspace_settings(&viewer, &l.tenant, settings())
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        l.store
-            .workspace_settings(&scoped, &l.tenant)
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        l.store
-            .workspace_settings(&owner, &uid())
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::NOT_FOUND
-    );
     assert_eq!(
         l.store
             .create_project(&scoped, &l.tenant, input())
@@ -819,27 +784,72 @@ async fn customer_projects_settings_and_authorization() {
             .status,
         StatusCode::NOT_FOUND
     );
-    let response=api::router(l.store.clone()).oneshot(Request::builder().method("PATCH").uri(format!("/v1/tenants/{}/settings",l.tenant))
-        .header("Authorization",format!("Bearer {}",l.token)).header("content-type","application/json")
-        .body(Body::from(json!({"display_name":" Acme Studio ","default_app_size":"medium","expected_revision":1}).to_string())).unwrap()).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    // The size a tenant's apps take by default is the operator's to set,
+    // beside the allowance; a key reads it and sets nothing of the kind.
+    let size = |size: &str| -> fenders_control_plane::model::UpdateAllowance {
+        serde_json::from_value(json!({"default_app_size":size})).unwrap()
+    };
+    for key in [&owner, &editor, &viewer] {
+        assert_eq!(
+            l.store
+                .update_allowance(key, &l.tenant, size("medium"))
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let patch = |token: String, body: Value| {
+        api::router(l.store.clone()).oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/v1/tenants/{}", l.tenant))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+    };
+    for (body, expected) in [
+        (json!({"default_app_size":"medium"}), StatusCode::OK),
+        (json!({"default_app_size":"huge"}), StatusCode::BAD_REQUEST),
+        (json!({}), StatusCode::BAD_REQUEST),
+    ] {
+        let response = patch(l.token.clone(), body.clone()).await.unwrap();
+        assert_eq!(response.status(), expected, "{body}");
+    }
     assert_eq!(
         l.store
-            .update_workspace_settings(&l.operator, &l.tenant, settings())
+            .app_sizes(&viewer, &l.tenant, &l.project)
             .await
-            .unwrap_err()
-            .status,
-        StatusCode::CONFLICT
+            .unwrap()["default_size"],
+        "medium"
     );
-    // Reopen the store against the same database and encrypted state, not browser state.
+    // There are no workspace settings to read or write, for anyone.
+    for method in ["GET", "PATCH"] {
+        let response = api::router(l.store.clone())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(format!("/v1/tenants/{}/settings", l.tenant))
+                    .header("Authorization", format!("Bearer {}", l.token))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method}");
+    }
+    // Reopen the store against the same database and encrypted state.
     let reopened = Store::from_pool(l.store.pool.clone(), l.root.path()).unwrap();
     reopened.migrate().await.unwrap();
     assert_eq!(
         reopened
-            .workspace_settings(&viewer, &l.tenant)
+            .app_sizes(&viewer, &l.tenant, &l.project)
             .await
-            .unwrap(),
-        json!({"display_name":"Acme Studio","default_app_size":"medium","revision":2})
+            .unwrap()["default_size"],
+        "medium"
     );
     assert_eq!(
         reopened
@@ -875,7 +885,7 @@ async fn customer_projects_settings_and_authorization() {
     );
     assert_eq!(
         l.store
-            .update_workspace_settings(&l.operator, &l.tenant, settings())
+            .update_allowance(&l.operator, &l.tenant, size("large"))
             .await
             .unwrap_err()
             .status,

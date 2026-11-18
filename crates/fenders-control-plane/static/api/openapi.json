@@ -1923,6 +1923,92 @@
         }
       }
     },
+    "/workspaces/{workspace}/projects/{project}/apps/{app}/runs/{run}/cancel": {
+      "post": {
+        "operationId": "post__workspaces_workspace_projects_project_apps_app_runs_run_cancel",
+        "summary": "Cancel run",
+        "description": "Required permission: runs:write. Stops a run that has not ended; one that has is answered 409.",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "app",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "run",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Operation is still pending; poll it and the resource.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/triggers": {
       "get": {
         "operationId": "get__workspaces_workspace_projects_project_apps_app_triggers",

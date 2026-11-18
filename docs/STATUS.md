@@ -98,8 +98,10 @@ as both control plane and node.
   records with every change the key makes.
 - Only the operator's credential issues, lists and revokes a tenant's keys,
   and suspends or resumes a workspace (`POST /v1/tenants/TENANT/lifecycle`).
-  The lower-level workload routes and a workspace's settings are the
-  operator's too; a key reaches what the permission table lists.
+  Its routes are listed in [EMBEDDING-API.md](EMBEDDING-API.md); every
+  other route is one a key may be given. The routes that started a workload
+  without an app, granted network access or made an ingress route directly,
+  and a workspace's settings, are gone.
 
 ### Run output
 
@@ -116,7 +118,9 @@ as both control plane and node.
 - Following lags by about 200 ms and polls; nothing is pushed.
 - The output of a run that was stopped is not closed by its shim, so it reads
   as still being collected.
-- Identical workload executions can reuse a warm shim; app runs never do.
+- App runs never reuse a warm shim. The node's `--warm-runs` served
+  workloads started without an app, which the API no longer starts, so
+  nothing reaches it at present.
 
 ### Connections
 

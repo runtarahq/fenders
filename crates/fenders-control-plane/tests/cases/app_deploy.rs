@@ -399,12 +399,6 @@ async fn deployment_receipt_recovery_is_scoped_and_catalog_exposes_draft_default
             .unwrap()["default_size"],
         "medium"
     );
-    assert!(
-        l.store
-            .workspace_settings(&editor, &l.tenant)
-            .await
-            .is_err()
-    );
     let key = uid();
     assert_eq!(
         l.store

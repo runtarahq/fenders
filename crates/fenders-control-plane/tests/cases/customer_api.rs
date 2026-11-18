@@ -484,6 +484,186 @@ async fn customer_api_connections_resolve_both_protocols_atomically_without_gran
     l.finish().await;
 }
 
+/// A run that has not ended is stopped by a key that may run, through the
+/// app it is a run of.
+#[tokio::test]
+async fn a_run_is_cancelled_through_its_app_by_a_key_that_may_run() {
+    let l = Lab::new().await;
+    let node = l.node("compiler").await;
+    approve_component(&l, &node, false, true).await;
+    let deployer = key(&l, Some(&l.project), &["read", "apps:write"]).await;
+    let runner = key(&l, Some(&l.project), &["read", "runs:write"]).await;
+    let observer = key(&l, Some(&l.project), &["read"]).await;
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
+    let mut apps = Vec::new();
+    for name in ["cancel-one", "cancel-two"] {
+        let (status, op) = call(
+            &l,
+            s(&deployer["token"]),
+            "POST",
+            &(base.clone() + "/apps/deploy"),
+            json!({"name":name,"artifact_id":l.artifact,"triggers":{"manual":true,"http":false}}),
+            &uid(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{op}");
+        apps.push(s(&op["resource_id"]).to_owned());
+    }
+    let runs = format!("{base}/apps/{}/runs", apps[0]);
+    let (status, started) = call(&l, s(&runner["token"]), "POST", &runs, json!({}), &uid()).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let run: String = sqlx::query_scalar("SELECT id FROM customer_app_runs WHERE app_id=$1")
+        .bind(&apps[0])
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    let cancel = format!("{runs}/{run}/cancel");
+    // Not by a key that only reads or only deploys, and not through another app.
+    for k in [&observer, &deployer] {
+        assert_eq!(
+            call(&l, s(&k["token"]), "POST", &cancel, json!({}), &uid())
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let other = format!("{base}/apps/{}/runs/{run}/cancel", apps[1]);
+    assert_eq!(
+        call(&l, s(&runner["token"]), "POST", &other, json!({}), &uid())
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let request = uid();
+    let (status, stopped) = call(
+        &l,
+        s(&runner["token"]),
+        "POST",
+        &cancel,
+        json!({}),
+        &request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{stopped}");
+    // The same request again is the same answer, not a second stop.
+    assert_eq!(
+        call(
+            &l,
+            s(&runner["token"]),
+            "POST",
+            &cancel,
+            json!({}),
+            &request
+        )
+        .await
+        .1,
+        stopped
+    );
+    let (status, after) = call(
+        &l,
+        s(&observer["token"]),
+        "GET",
+        &format!("{runs}/{run}"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        matches!(s(&after["state"]), "cancelled" | "stopped"),
+        "{after}"
+    );
+    // A run that ended has nothing left to stop.
+    assert_eq!(
+        call(&l, s(&runner["token"]), "POST", &cancel, json!({}), &uid())
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    l.finish().await;
+}
+
+/// Every route is one a tenant's key may be given, or one of the operator's
+/// own: tenants and their keys, what a tenant is allowed, suspending one,
+/// the nodes, the public egress policy and this control plane's own status.
+/// What lay beneath the app API answers nobody, the operator included.
+#[tokio::test]
+async fn the_operator_has_its_own_routes_and_no_others() {
+    let l = Lab::new().await;
+    let t = format!("/v1/tenants/{}", l.tenant);
+    let p = format!("{t}/projects/{}", l.project);
+    let id = uid();
+    for (method, path) in [
+        ("POST", format!("{p}/executions")),
+        ("POST", format!("{p}/deployments")),
+        ("PATCH", format!("{p}/deployments/{id}")),
+        ("POST", format!("{p}/executions/{id}/stop")),
+        ("POST", format!("{p}/executions/{id}/pause")),
+        ("POST", format!("{p}/grants")),
+        ("POST", format!("{p}/grants/{id}/revoke")),
+        ("POST", format!("{p}/routes")),
+        ("GET", format!("{p}/executions")),
+        ("GET", format!("{p}/executions/{id}")),
+        ("GET", format!("{p}/deployments")),
+        ("GET", format!("{p}/grants")),
+        ("GET", format!("{p}/routes")),
+        ("GET", format!("{p}/networks")),
+        ("GET", format!("{t}/settings")),
+        ("PATCH", format!("{t}/settings")),
+        ("GET", format!("{t}/credentials")),
+        ("POST", format!("{t}/credentials")),
+        ("GET", "/v1/anything-else".to_owned()),
+    ] {
+        let (status, body) = call(&l, &l.token, method, &path, json!({}), &uid()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+    }
+    // Its own answer to the operator, and to no key whatever the key holds.
+    let every = [
+        "read",
+        "apps:write",
+        "runs:write",
+        "projects:write",
+        "connections:write",
+        "secrets:write",
+    ];
+    let holder = key(&l, None, &every).await;
+    for (method, path) in [
+        ("POST", "/v1/tenants".to_owned()),
+        ("PATCH", t.clone()),
+        ("PATCH", format!("{t}/http-limits")),
+        ("POST", format!("{t}/lifecycle")),
+        ("GET", format!("{t}/api-keys")),
+        ("POST", format!("{t}/api-keys")),
+        ("DELETE", format!("{t}/api-keys/{id}")),
+        ("GET", "/v1/nodes".to_owned()),
+        ("POST", "/v1/nodes".to_owned()),
+        ("PATCH", format!("/v1/nodes/{id}")),
+        ("GET", "/v1/public-egress-policy".to_owned()),
+        ("PUT", "/v1/public-egress-policy".to_owned()),
+        ("GET", "/v1/control-plane/status".to_owned()),
+    ] {
+        let segments: Vec<_> = path.trim_matches('/').split('/').collect();
+        assert!(
+            fenders_control_plane::customer_api::operators(method, &segments),
+            "{method} {path}"
+        );
+        assert!(
+            fenders_control_plane::customer_api::permission(method, &segments).is_none(),
+            "{method} {path}"
+        );
+        let (status, _) = call(&l, s(&holder["token"]), method, &path, json!({}), &uid()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "a key: {method} {path}");
+        let (status, _) = call(&l, &l.token, method, &path, json!({}), &uid()).await;
+        assert!(
+            !matches!(status, StatusCode::NOT_FOUND if !path.contains(&id))
+                && status != StatusCode::FORBIDDEN
+                && status != StatusCode::UNAUTHORIZED,
+            "the operator: {method} {path}: {status}"
+        );
+    }
+    l.finish().await;
+}
+
 /// A tenant's keys are the operator's to issue, list and revoke. A key does
 /// what its permissions say and cannot make another, whatever it holds.
 #[tokio::test]

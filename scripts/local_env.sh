@@ -164,7 +164,7 @@ status() {
     || echo "postgresql     stopped"
   if running "$state/control.pid"; then
     echo "management api $manage/v1   token: $state/control/operator.token   CA: $state/pki/ca.pem"
-    echo "api reference  $manage/api"
+    echo "api contract   $manage/api/openapi.json"
     api GET /nodes | jq -r '.[] | "node \(.name): confinement=\(.observed_confinement) last_seen=\(.last_seen)"'
     jq -r '"workspace \(.tenant)  project \(.project)"' "$state/scope.json"
   fi
@@ -180,14 +180,19 @@ run() {
     [[ $(api GET "$scope/artifacts/$artifact/inspection" | jq -r .state) == valid ]] && break
     sleep 1
   done
-  execution=$(api POST "$scope/executions" "$(jq -n --arg a "$artifact" '{spec:{artifact_id:$a,mode:"command"}}')" | jq -er .resource_id)
+  app=$(api POST "$scope/apps/deploy" "$(jq -n --arg a "$artifact" --arg n "example-$RANDOM" \
+    '{name:$n,artifact_id:$a,triggers:{http:false,manual:true}}')" | jq -er '.app.id // .app_id // .resource_id // .id')
   for _ in $(seq 60); do
-    result=$(api GET "$scope/executions/$execution")
-    case $(jq -r .state <<<"$result") in exited|failed|stopped|lost) break ;; esac
+    [[ $(api GET "$scope/apps/$app" | jq -r .state) == ready ]] && break
     sleep 1
   done
-  jq '{execution: .id, state, exit_code: .observation.exit_code, cpu_usec: .observation.cpu_usec,
-    memory_bytes: .observation.memory_bytes}' <<<"$result"
+  run=$(api POST "$scope/apps/$app/runs" '{}' | jq -er '.run.id // .run_id // .resource_id // .id')
+  for _ in $(seq 60); do
+    result=$(api GET "$scope/apps/$app/runs/$run")
+    case $(jq -r .state <<<"$result") in succeeded|failed|cancelled) break ;; esac
+    sleep 1
+  done
+  jq --arg app "$app" '{app: $app, run: .id, state, exit_code}' <<<"$result"
 }
 
 case ${1:-} in

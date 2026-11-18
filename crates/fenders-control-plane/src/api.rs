@@ -134,6 +134,13 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         .ok_or_else(Error::unauthorized)?;
     let p = store.authenticate(token).await?;
     crate::customer_api::authorize(&p, method, &segments)?;
+    // Every route is one a tenant's key may be given, or one of the
+    // operator's own. There is no third kind.
+    if crate::customer_api::permission(method, &segments).is_none()
+        && !crate::customer_api::operators(method, &segments)
+    {
+        return Err(Error::missing());
+    }
     // Every mutation leaves an audit record, and most a receipt, for good. A
     // workspace's credentials make so many a minute between them; an
     // operator's are its own to pace.
@@ -256,6 +263,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             status = StatusCode::CREATED;
             store.create_tenant(&p, parse(&bytes)?).await?
         }
+        // A tenant's allowance, and the size its apps take when they name none.
         ("PATCH", ["v1", "tenants", tenant]) => {
             store.update_allowance(&p, tenant, parse(&bytes)?).await?
         }
@@ -270,14 +278,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             store.update_http_limits(&p, tenant, parse(&bytes)?).await?
         }
         ("GET", ["v1", "tenants", tenant, "projects"]) => store.projects(&p, tenant).await?,
-        ("GET", ["v1", "tenants", tenant, "settings"]) => {
-            store.workspace_settings(&p, tenant).await?
-        }
-        ("PATCH", ["v1", "tenants", tenant, "settings"]) => {
-            store
-                .update_workspace_settings(&p, tenant, parse(&bytes)?)
-                .await?
-        }
         ("POST", ["v1", "tenants", tenant, "projects"]) => {
             status = StatusCode::CREATED;
             store
@@ -586,6 +586,27 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 run,
             ],
         ) => store.app_run(&p, tenant, project, app, run).await?,
+        // Stop a run that has not ended.
+        (
+            "POST",
+            [
+                "v1",
+                "tenants",
+                tenant,
+                "projects",
+                project,
+                "apps",
+                app,
+                "runs",
+                run,
+                "cancel",
+            ],
+        ) => {
+            status = StatusCode::ACCEPTED;
+            store
+                .cancel_app_run(&p, tenant, project, app, run, key)
+                .await?
+        }
         (
             "POST",
             [
@@ -765,63 +786,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 )
                 .await?
         }
-        ("POST", ["v1", "tenants", tenant, "projects", project, "routes"]) => {
-            status = StatusCode::CREATED;
-            store
-                .create_route(&p, tenant, project, parse(&bytes)?, &state.domain)
-                .await?
-        }
-        ("POST", ["v1", "tenants", tenant, "projects", project, kind])
-            if matches!(*kind, "executions" | "deployments") =>
-        {
-            status = StatusCode::ACCEPTED;
-            store
-                .create_workload(
-                    &p,
-                    tenant,
-                    project,
-                    parse(&bytes)?,
-                    key,
-                    *kind == "deployments",
-                )
-                .await?
-        }
-        (
-            "PATCH",
-            [
-                "v1",
-                "tenants",
-                tenant,
-                "projects",
-                project,
-                "deployments",
-                id,
-            ],
-        ) => {
-            status = StatusCode::ACCEPTED;
-            store
-                .update_deployment(&p, tenant, project, id, parse(&bytes)?, key)
-                .await?
-        }
-        (
-            "POST",
-            [
-                "v1",
-                "tenants",
-                tenant,
-                "projects",
-                project,
-                "executions",
-                id,
-                action,
-            ],
-        ) => {
-            status = StatusCode::ACCEPTED;
-            if !bytes.is_empty() {
-                return Err(Error::invalid("expected empty body"));
-            }
-            store.action(&p, tenant, project, id, action, key).await?
-        }
         (
             "POST",
             [
@@ -869,37 +833,30 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .remove_endpoint(&p, tenant, project, endpoint, key)
                 .await?
         }
-        ("POST", ["v1", "tenants", tenant, "projects", project, "grants"]) => {
-            status = StatusCode::ACCEPTED;
-            store
-                .create_grant(&p, tenant, project, parse(&bytes)?, key)
-                .await?
-        }
+        // What a project holds beside its apps, by kind.
         (
-            "POST",
+            "GET",
             [
                 "v1",
                 "tenants",
                 tenant,
                 "projects",
                 project,
-                "grants",
-                id,
-                "revoke",
+                kind @ ("artifacts" | "external-endpoints" | "secrets" | "operations"),
             ],
-        ) => {
-            status = StatusCode::ACCEPTED;
-            if !bytes.is_empty() {
-                return Err(Error::invalid("expected empty body"));
-            }
-            store.revoke_grant(&p, tenant, project, id, key).await?
-        }
-        ("GET", ["v1", "tenants", tenant, "projects", project, kind]) => {
-            store.resources(&p, tenant, project, kind, None).await?
-        }
-        ("GET", ["v1", "tenants", tenant, "projects", project, kind, id]) => {
-            store.resources(&p, tenant, project, kind, Some(id)).await?
-        }
+        ) => store.resources(&p, tenant, project, kind, None).await?,
+        (
+            "GET",
+            [
+                "v1",
+                "tenants",
+                tenant,
+                "projects",
+                project,
+                kind @ ("artifacts" | "external-endpoints" | "secrets" | "operations"),
+                id,
+            ],
+        ) => store.resources(&p, tenant, project, kind, Some(id)).await?,
         _ => return Err(Error::missing()),
     };
     if method != "GET"

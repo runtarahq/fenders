@@ -432,19 +432,59 @@ impl Store {
     ) -> Result<Value> {
         p.operator()?;
         identity(tenant)?;
-        value.allowance.validate()?;
+        if value.allowance.is_none() && value.default_app_size.is_none() {
+            return Err(Error::invalid("nothing to change"));
+        }
+        if let Some(allowance) = &value.allowance {
+            allowance.validate()?;
+        }
+        if let Some(size) = &value.default_app_size
+            && !matches!(size.as_str(), "small" | "medium" | "large")
+        {
+            return Err(Error::invalid("default app size is small, medium or large"));
+        }
         let mut tx = self.transaction(true, false).await?;
         Self::live_principal(&mut tx, p).await?;
-        let row = Self::set_allowance(&mut tx, tenant, &value.allowance).await?;
-        Self::audit(
-            &mut tx,
-            p,
-            "tenant.allowance",
-            tenant,
-            tenant,
-            json!(value.allowance),
-        )
-        .await?;
+        if let Some(size) = &value.default_app_size {
+            let changed = sqlx::query("UPDATE tenants SET default_app_size=$2 WHERE id=$1")
+                .bind(tenant)
+                .bind(size)
+                .execute(&mut *tx)
+                .await?;
+            if changed.rows_affected() == 0 {
+                return Err(Error::missing());
+            }
+            Self::audit(
+                &mut tx,
+                p,
+                "tenant.default_app_size",
+                tenant,
+                tenant,
+                json!({"default_app_size":size}),
+            )
+            .await?;
+        }
+        let row = match &value.allowance {
+            Some(allowance) => {
+                let row = Self::set_allowance(&mut tx, tenant, allowance).await?;
+                Self::audit(
+                    &mut tx,
+                    p,
+                    "tenant.allowance",
+                    tenant,
+                    tenant,
+                    json!(allowance),
+                )
+                .await?;
+                row
+            }
+            None => {
+                sqlx::query_scalar::<_, Value>("SELECT to_jsonb(t) FROM tenants t WHERE id=$1")
+                    .bind(tenant)
+                    .fetch_one(&mut *tx)
+                    .await?
+            }
+        };
         tx.commit().await?;
         Ok(row)
     }

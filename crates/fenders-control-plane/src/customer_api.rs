@@ -65,7 +65,8 @@ pub fn permission(method: &str, path: &[&str]) -> Option<&'static str> {
             | ("PATCH" | "DELETE", ["apps", _])
             | ("PUT", ["apps", _, "triggers" | "connections"]) => Some("apps:write"),
             // A sample request is one made of the app, as a run is.
-            ("POST", ["apps", _, "runs" | "http-sample"]) => Some("runs:write"),
+            ("POST", ["apps", _, "runs" | "http-sample"])
+            | ("POST", ["apps", _, "runs", _, "cancel"]) => Some("runs:write"),
             // What became of a request a key made: its own to read.
             ("GET", ["app-submissions" | "endpoint-submissions", _])
             | ("GET", ["apps", _, "submissions", _]) => Some("read"),
@@ -80,6 +81,24 @@ pub fn permission(method: &str, path: &[&str]) -> Option<&'static str> {
     }
 }
 
+/// The operator's own routes: what no tenant's key is ever given. Tenants
+/// and their keys, what a tenant is allowed, suspending one, the nodes, the
+/// public egress policy, and how this control plane's own loops are doing.
+pub fn operators(method: &str, path: &[&str]) -> bool {
+    matches!(
+        (method, path),
+        ("POST", ["v1", "tenants"])
+            | ("PATCH", ["v1", "tenants", _])
+            | ("PATCH", ["v1", "tenants", _, "http-limits"])
+            | ("POST", ["v1", "tenants", _, "lifecycle"])
+            | ("GET" | "POST", ["v1", "tenants", _, "api-keys"])
+            | ("DELETE", ["v1", "tenants", _, "api-keys", _])
+            | ("GET" | "POST", ["v1", "nodes"])
+            | ("PATCH", ["v1", "nodes", _])
+            | ("GET" | "PUT", ["v1", "public-egress-policy"])
+            | ("GET", ["v1", "control-plane", "status"])
+    )
+}
 pub fn authorize(p: &Principal, method: &str, path: &[&str]) -> Result<()> {
     if let Some(permissions) = &p.api_permissions {
         let required = permission(method, path).ok_or_else(|| {
