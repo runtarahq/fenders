@@ -284,7 +284,7 @@ async fn customer_api_deploy_requires_explicit_run_and_reuses_original_operation
 }
 
 #[tokio::test]
-async fn customer_api_secret_retries_compare_encrypted_value_and_expired_keys_fail() {
+async fn customer_api_secret_retries_do_not_tell_a_guess_and_expired_keys_fail() {
     let l = Lab::new().await;
     let k = key(&l, Some(&l.project), &["read", "secrets:write"]).await;
     let token = s(&k["token"]);
@@ -296,13 +296,50 @@ async fn customer_api_secret_retries_compare_encrypted_value_and_expired_keys_fa
         call(&l, token, "POST", &route, body, "secret").await.1,
         created
     );
+    // A value of a few bytes would mask those bytes wherever they appear in
+    // a run's output: refused.
+    for short in ["", "1", "yes"] {
+        assert_eq!(
+            call(
+                &l,
+                token,
+                "POST",
+                &route,
+                json!({"name":"short","value":short}),
+                &uid()
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST,
+            "{short:?}"
+        );
+    }
+    // A retry with another value is answered as the first was: whether it
+    // matched the stored value is not something a caller is told. The
+    // secret keeps the value it was created with.
+    let guessed = call(
+        &l,
+        token,
+        "POST",
+        &route,
+        json!({"name":"password","value":"different"}),
+        "secret",
+    )
+    .await;
+    assert_eq!(guessed, (StatusCode::CREATED, created.clone()));
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM secrets WHERE name='password'")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 1);
+    // The key with another name is still a different request.
     assert_eq!(
         call(
             &l,
             token,
             "POST",
             &route,
-            json!({"name":"password","value":"different"}),
+            json!({"name":"other","value":"private-low-entropy-example"}),
             "secret"
         )
         .await
@@ -444,5 +481,492 @@ async fn customer_api_connections_resolve_both_protocols_atomically_without_gran
         .await
         .unwrap();
     assert_eq!(count, 0);
+    l.finish().await;
+}
+
+/// A credential lives no longer than the one that issued it, and ends when
+/// that one is revoked, or when the member who issued it is removed or their
+/// account disabled.
+#[tokio::test]
+async fn credentials_end_with_whoever_issued_them() {
+    let l = Lab::new().await;
+    let issue = |by: Principal, ttl: i64| {
+        let store = l.store.clone();
+        let tenant = l.tenant.clone();
+        async move {
+            let v = store
+                .issue_credential(
+                    &by,
+                    &tenant,
+                    serde_json::from_value(
+                        json!({"name":"line","role":"owner","project_id":null,"ttl_seconds":ttl}),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            (store.authenticate(s(&v["token"])).await.unwrap(), v)
+        }
+    };
+    let expires = |id: &str| {
+        let (pool, id) = (l.store.pool.clone(), id.to_owned());
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT extract(epoch FROM expires)::float8 FROM credentials WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // Two minutes from the operator; thirty days asked of it, and of that.
+    let (parent, parent_row) = issue(l.operator.clone(), 120).await;
+    let (child, child_row) = issue(parent.clone(), 2_592_000).await;
+    let (_, grandchild_row) = issue(child.clone(), 2_592_000).await;
+    let limit = expires(s(&parent_row["id"])).await;
+    assert_eq!(expires(s(&child_row["id"])).await, limit);
+    assert_eq!(expires(s(&grandchild_row["id"])).await, limit);
+    // An API key issued with a credential ends with it too.
+    let (status, key) = call(
+        &l,
+        s(&child_row["token"]),
+        "POST",
+        &format!("/v1/workspaces/{}/api-keys", l.tenant),
+        json!({"name":"automation","project_id":null,"permissions":["read"],"ttl_seconds":2592000}),
+        &uid(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{key}");
+    assert_eq!(expires(s(&key["id"])).await, limit);
+    // The operator's own are as long as asked.
+    let (_, long) = issue(l.operator.clone(), 2_592_000).await;
+    assert!(expires(s(&long["id"])).await > limit + 29.0 * 86400.0);
+
+    // Revoking the parent ends the whole line, and nothing beside it.
+    l.store
+        .revoke_credential(&l.operator, &l.tenant, s(&parent_row["id"]))
+        .await
+        .unwrap();
+    for token in [&parent_row, &child_row, &grandchild_row, &key] {
+        assert_eq!(
+            l.store
+                .authenticate(s(&token["token"]))
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert!(l.store.authenticate(s(&long["token"])).await.is_ok());
+
+    // A member who issued credentials while an owner: removed, or disabled.
+    let member_with_key = |name: &'static str| {
+        let l = &l;
+        let issue = &issue;
+        async move {
+            let (user, membership) = (uid(), uid());
+            sqlx::query("INSERT INTO customer_users(id,issuer,subject) VALUES($1,'https://identity.test',$2)")
+                .bind(&user).bind(name).execute(&l.store.pool).await.unwrap();
+            sqlx::query("INSERT INTO workspace_memberships(id,tenant_id,user_id,role) VALUES($1,$2,$3,'owner')")
+                .bind(&membership).bind(&l.tenant).bind(&user).execute(&l.store.pool).await.unwrap();
+            // As `create_api_key` and `issue_credential` record it for a
+            // browser session of theirs.
+            let (issued, row) = issue(l.operator.clone(), 3600).await;
+            sqlx::query("UPDATE credentials SET created_by=$1 WHERE id=$2")
+                .bind(&user)
+                .bind(s(&row["id"]))
+                .execute(&l.store.pool)
+                .await
+                .unwrap();
+            // And one issued with that in turn.
+            let (_, second) = issue(issued, 3600).await;
+            (user, membership, row, second)
+        }
+    };
+    // Another owner stays, so the last-owner rule allows the changes.
+    let _staying = member_with_key("staying").await;
+    let (_, membership, first, second) = member_with_key("removed").await;
+    l.store
+        .update_member(
+            &l.operator,
+            &l.tenant,
+            &membership,
+            json!({"revoked":true,"expected_revision":1}),
+        )
+        .await
+        .unwrap();
+    let (user, _, third, fourth) = member_with_key("disabled").await;
+    l.store
+        .update_customer_user(
+            &l.operator,
+            &user,
+            json!({"disabled":true,"expected_revision":1}),
+        )
+        .await
+        .unwrap();
+    for token in [&first, &second, &third, &fourth] {
+        assert_eq!(
+            l.store
+                .authenticate(s(&token["token"]))
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // The owner who stayed keeps theirs.
+    assert!(l.store.authenticate(s(&_staying.2["token"])).await.is_ok());
+    assert!(l.store.authenticate(s(&long["token"])).await.is_ok());
+    l.finish().await;
+}
+
+/// An upload's body may be 16 MiB and is held whole. None of it is read for
+/// a credential that may not upload there, or when it says it is too large.
+#[tokio::test]
+async fn an_uploads_body_is_not_read_for_a_credential_that_may_not_upload_there() {
+    let l = Lab::new().await;
+    let (_, viewer) = l.credential("viewer", None).await;
+    let (_, editor) = l.credential("editor", None).await;
+    let upload = |token: String, tenant: String, declared: Option<usize>| {
+        let router = api::router(l.store.clone());
+        let project = l.project.clone();
+        async move {
+            // A body that records being asked for its first piece.
+            let read = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let asked = read.clone();
+            let body = Body::new(Asked(Some(move || {
+                asked.store(true, std::sync::atomic::Ordering::SeqCst);
+            })));
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(format!("/v1/tenants/{tenant}/projects/{project}/artifacts"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/wasm");
+            if let Some(declared) = declared {
+                request = request.header("Content-Length", declared);
+            }
+            let status = router
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap()
+                .status();
+            (status, read.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    };
+    // Another workspace, a read-only credential, a body that says it is too
+    // large: refused with nothing read.
+    assert_eq!(
+        upload(s(&editor["token"]).to_owned(), uid(), None).await,
+        (StatusCode::NOT_FOUND, false)
+    );
+    assert_eq!(
+        upload(s(&viewer["token"]).to_owned(), l.tenant.clone(), None).await,
+        (StatusCode::FORBIDDEN, false)
+    );
+    assert_eq!(
+        upload(
+            s(&editor["token"]).to_owned(),
+            l.tenant.clone(),
+            Some(17 << 20)
+        )
+        .await,
+        (StatusCode::PAYLOAD_TOO_LARGE, false)
+    );
+    // One that may upload there is read (and refused for what it holds).
+    assert_eq!(
+        upload(s(&editor["token"]).to_owned(), l.tenant.clone(), None).await,
+        (StatusCode::BAD_REQUEST, true)
+    );
+    l.finish().await;
+}
+
+/// A body of one small piece, calling `asked` when it is first polled.
+struct Asked<F>(Option<F>);
+impl<F: FnOnce() + Unpin> http_body::Body for Asked<F> {
+    type Data = axum::body::Bytes;
+    type Error = std::convert::Infallible;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        std::task::Poll::Ready(self.0.take().map(|asked| {
+            asked();
+            Ok(http_body::Frame::data(axum::body::Bytes::from_static(
+                b"not wasm",
+            )))
+        }))
+    }
+}
+
+/// What a workspace can make without being charged for it is bounded: rows
+/// of each kind, and changes in a minute.
+#[tokio::test]
+async fn a_workspaces_rows_and_changes_are_bounded() {
+    let l = Lab::new().await;
+    // Up to the limits, as a busy workspace would have got there.
+    sqlx::query("INSERT INTO projects(id,tenant_id,name,display_name,slug) SELECT md5('p'||n),$1,'p'||n,'P'||n,'p'||n FROM generate_series(1,255) n")
+        .bind(&l.tenant).execute(&l.store.pool).await.unwrap();
+    sqlx::query("INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext) SELECT md5('s'||n),$1,$2,'s'||n,'\\x00' FROM generate_series(1,4096) n")
+        .bind(&l.tenant).bind(&l.project).execute(&l.store.pool).await.unwrap();
+    sqlx::query("INSERT INTO credentials(id,token_hash,tenant_id,name,role,expires) SELECT md5('c'||n),md5('h'||n),$1,'c','viewer',now()+interval '1 hour' FROM generate_series(1,1024) n")
+        .bind(&l.tenant).execute(&l.store.pool).await.unwrap();
+    let quota = StatusCode::TOO_MANY_REQUESTS;
+    let project = |name: &'static str| {
+        l.store.create_project(
+            &l.operator,
+            &l.tenant,
+            serde_json::from_value(json!({"name":name})).unwrap(),
+        )
+    };
+    assert_eq!(project("one-more").await.unwrap_err().status, quota);
+    assert_eq!(
+        l.store
+            .create_secret(
+                &l.operator,
+                &l.tenant,
+                &l.project,
+                json!({"name":"more","value":"value"})
+            )
+            .await
+            .unwrap_err()
+            .status,
+        quota
+    );
+    let issue = || {
+        l.store.issue_credential(
+            &l.operator,
+            &l.tenant,
+            serde_json::from_value(json!({"name":"more","role":"viewer","project_id":null}))
+                .unwrap(),
+        )
+    };
+    assert_eq!(issue().await.unwrap_err().status, quota);
+    // Credentials that open nothing any more do not count.
+    sqlx::query("UPDATE credentials SET revoked=true WHERE id=md5('c1')")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE credentials SET expires=now()-interval '1 second' WHERE id=md5('c2')")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let (_, editor) = l.credential("editor", None).await;
+    issue().await.unwrap();
+    assert_eq!(issue().await.unwrap_err().status, quota);
+
+    // Changes in a minute: refused or not, each one counts, and reads do not.
+    let path = format!("/v1/tenants/{}/projects/{}/secrets", l.tenant, l.project);
+    let token = s(&editor["token"]);
+    let mut last = StatusCode::OK;
+    for _ in 0..600 {
+        last = call(
+            &l,
+            token,
+            "POST",
+            &path,
+            json!({"name":"x","value":"value"}),
+            "",
+        )
+        .await
+        .0;
+    }
+    assert_eq!(last, quota, "the row limit, not yet the rate");
+    let (status, body) = call(
+        &l,
+        token,
+        "POST",
+        &path,
+        json!({"name":"x","value":"value"}),
+        "",
+    )
+    .await;
+    assert_eq!(status, quota);
+    assert_eq!(body["error"], "too many changes in a minute", "{body}");
+    assert_eq!(
+        call(&l, token, "GET", &path, json!({}), "").await.0,
+        StatusCode::OK
+    );
+    // The operator's own changes are not counted against the workspace.
+    assert_eq!(
+        call(
+            &l,
+            &l.token,
+            "POST",
+            &path,
+            json!({"name":"x","value":"value"}),
+            ""
+        )
+        .await
+        .1["error"],
+        "workspace metadata limit exhausted"
+    );
+    l.finish().await;
+}
+
+/// A workspace's credentials see its plan and state, not the operator's own
+/// notes on it.
+#[tokio::test]
+async fn a_workspaces_credentials_do_not_see_the_operators_notes_on_it() {
+    let l = Lab::new().await;
+    sqlx::query("UPDATE tenants SET lifecycle_reason='chargeback under review' WHERE id=$1")
+        .bind(&l.tenant)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let (viewer, _) = l.credential("viewer", None).await;
+    let seen = l.store.tenants(&viewer).await.unwrap();
+    assert_eq!(seen.as_array().unwrap().len(), 1);
+    let seen = &seen[0];
+    assert_eq!(seen["id"], l.tenant.as_str());
+    assert!(seen["cpu_percent"].is_number() && seen["lifecycle_state"].is_string());
+    for hidden in [
+        "lifecycle_reason",
+        "lifecycle_revision",
+        "allowance_revision",
+    ] {
+        assert!(seen.get(hidden).is_none(), "{hidden}");
+    }
+    assert!(!seen.to_string().contains("chargeback"));
+    // The operator sees all of it.
+    let all = l.store.tenants(&l.operator).await.unwrap();
+    assert_eq!(all[0]["lifecycle_reason"], "chargeback under review");
+    assert!(all[0]["allowance_revision"].is_number());
+    l.finish().await;
+}
+
+/// Every answer of the management listener, refusals included, carries the
+/// headers a browser needs to keep a console's session on TLS and unframed.
+#[tokio::test]
+async fn management_answers_carry_browser_security_headers() {
+    let l = Lab::new().await;
+    for (path, token) in [
+        ("/v1/tenants", Some(l.token.as_str())),
+        ("/v1/tenants", None),
+        ("/api/openapi.json", None),
+        ("/no/such/path", Some(l.token.as_str())),
+    ] {
+        let mut request = Request::builder().uri(path);
+        if let Some(token) = token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        let response = api::router(l.store.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let headers = response.headers();
+        assert_eq!(
+            headers["strict-transport-security"], "max-age=31536000",
+            "{path}"
+        );
+        assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
+        assert_eq!(headers["x-frame-options"], "DENY", "{path}");
+        assert_eq!(headers["referrer-policy"], "no-referrer", "{path}");
+    }
+    l.finish().await;
+}
+
+/// A stored secret is its row's alone: its ciphertext moved to another row
+/// opens for no run, and secrets stored before that was so are bound once.
+#[tokio::test]
+async fn a_secrets_ciphertext_opens_only_for_its_own_row() {
+    let l = Lab::new().await;
+    let node = l.node("worker").await;
+    let secret = |name: &'static str, value: &'static str| {
+        let l = &l;
+        async move {
+            let row = l
+                .store
+                .create_secret(
+                    &l.operator,
+                    &l.tenant,
+                    &l.project,
+                    json!({"name":name,"value":value}),
+                )
+                .await
+                .unwrap();
+            s(&row["id"]).to_owned()
+        }
+    };
+    let launch = |key: &'static str, id: String| {
+        let l = &l;
+        async move {
+            l.store
+                .create_workload(
+                    &l.operator,
+                    &l.tenant,
+                    &l.project,
+                    json!({"spec":{"artifact_id":l.artifact,"secret_env":{"TOKEN":id}}}),
+                    key,
+                    false,
+                )
+                .await
+        }
+    };
+    let (own, other) = (
+        secret("own", "own-value").await,
+        secret("other", "other-value").await,
+    );
+    // One secret's ciphertext written over another's, as someone who could
+    // write the database might: the row it now sits in opens for no run.
+    sqlx::query(
+        "UPDATE secrets SET ciphertext=(SELECT ciphertext FROM secrets WHERE id=$1) WHERE id=$2",
+    )
+    .bind(&other)
+    .bind(&own)
+    .execute(&l.store.pool)
+    .await
+    .unwrap();
+    let refused = launch("moved", own.clone()).await.unwrap_err();
+    assert_eq!(refused.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!refused.message.contains("value"));
+    // The one it was taken from is as it was.
+    let op = launch("untouched", other.clone()).await.unwrap();
+    l.store.schedule().await.unwrap();
+    let e = l.run(&op).await;
+    let spec = l
+        .store
+        .assignment(s(&node["id"]), s(&e["id"]), n(&e["generation"]))
+        .await
+        .unwrap()["spec"]
+        .clone();
+    assert_eq!(spec["env"]["TOKEN"], "other-value");
+
+    // A secret stored before ciphertexts named their rows: the value alone,
+    // encrypted. The next start binds it, once.
+    let cipher = fernet::Fernet::new(
+        std::fs::read_to_string(l.root.path().join("encryption.key"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let stored = |id: &'static str, value: &'static str| {
+        let (l, token) = (&l, cipher.encrypt(value.as_bytes()));
+        async move {
+            sqlx::query("INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext) VALUES($1,$2,$3,$1,convert_to($4,'UTF8'))")
+                .bind(id).bind(&l.tenant).bind(&l.project).bind(token)
+                .execute(&l.store.pool).await.unwrap();
+        }
+    };
+    let before = "0123456789abcdef0123456789abcde1";
+    stored(before, "stored-before").await;
+    sqlx::query("UPDATE secret_binding SET completed=NULL")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    l.store.migrate().await.unwrap();
+    assert!(launch("bound-at-start", before.to_owned()).await.is_ok());
+    // A row that turns up unbound after that was not written by the control
+    // plane: later starts do not bind it, and it opens for no run.
+    let after = "0123456789abcdef0123456789abcde2";
+    stored(after, "stored-after").await;
+    l.store.migrate().await.unwrap();
+    let bound: bool = sqlx::query_scalar("SELECT bound FROM secrets WHERE id=$1")
+        .bind(after)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert!(!bound);
+    assert!(launch("never-bound", after.to_owned()).await.is_err());
     l.finish().await;
 }

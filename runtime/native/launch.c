@@ -1,10 +1,14 @@
 // Kernel-free native ABI platform for upstream Wasmtime/Tokio. Linux host only.
 #define _GNU_SOURCE
 #include <linux/kvm.h>
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <stddef.h>
 #include <sys/prctl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/random.h>
@@ -62,6 +66,20 @@ static _Thread_local struct virtual_thread *current_thread;
 static long clone_virtual_thread(int,struct kvm_regs *,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
 static void exit_virtual_thread(void);
 static void *run_virtual_thread(void *);
+// One thread ends the process. A guest's threads, the control thread and any
+// failed check may all decide to at once; `exit` run by two of them at a time
+// flushes streams and runs the meter's last line under each other. The first
+// goes on to exit; the rest wait to be ended with it.
+static _Atomic int exiting;
+__attribute__((noreturn)) static void exit_once(int code) {
+    if(atomic_exchange(&exiting,1))for(;;)poll(NULL,0,-1);
+    (exit)(code);
+}
+#define exit(code) exit_once(code)
+// The launcher's exit status when a guest steps outside what it is given (a
+// pointer beyond its memory, an exit from the VM that is not its one way
+// out): apart from 1, a guest that failed, and 2, a refused configuration.
+#define GUEST_VIOLATION 3
 #include "diagnostics.inc"
 static void fail(const char *msg) {fprintf(DIAGNOSTICS,"%s: %s\n",msg,strerror(errno));exit(1);}
 #define CHECK(x) do {if((x)<0) fail(#x);} while(0)
@@ -127,7 +145,7 @@ static void calibrate_clock(int cpu) {
     __atomic_store_n(&page->valid,valid,__ATOMIC_RELEASE);
 }
 static void *ptr(uint64_t address,size_t size) {
-    if(address>ram || size>ram-address) {fprintf(DIAGNOSTICS,"invalid guest pointer\n");exit(1);}
+    if(address>ram || size>ram-address) {fprintf(DIAGNOSTICS,"invalid guest pointer\n");exit(GUEST_VIOLATION);}
     return mem+address;
 }
 static void reserve_pages(uint64_t address,size_t size) {
@@ -183,14 +201,13 @@ static uint64_t allocate_unlocked(size_t size,int prot) {
     }
     return 0;
 }
-static uint64_t allocate(size_t size,int prot) {
-    pthread_mutex_lock(&allocator_lock);uint64_t address=allocate_unlocked(size,prot);pthread_mutex_unlock(&allocator_lock);return address;
-}
 // mremap over the anonymous area: shrink in place, grow in place when the
 // following pages are free, else move (MREMAP_MAYMOVE) by copying. Growing in
 // place keeps a growing allocation from holding its old and new copies at once.
 static long remap_unlocked(uint64_t old,uint64_t old_size,uint64_t new_size,uint64_t flags) {
-    if(old%PAGE || !old_size || !new_size || (flags&~(uint64_t)MREMAP_MAYMOVE))return -EINVAL;
+    // Sizes over the guest's memory are refused before they are rounded up
+    // to pages, where one near 2^64 would wrap to none.
+    if(old%PAGE || !old_size || !new_size || old_size>ram || new_size>ram || (flags&~(uint64_t)MREMAP_MAYMOVE))return -EINVAL;
     uint64_t first=old/PAGE,old_pages=(old_size+PAGE-1)/PAGE,new_pages=(new_size+PAGE-1)/PAGE,limit=page_tables/PAGE;
     if(old<image_end || first>=limit || old_pages>limit-first || new_pages>ram/PAGE)return -EINVAL;
     for(uint64_t p=first;p<first+old_pages;p++)if(!used[p])return -EFAULT;
@@ -230,19 +247,24 @@ static void hold_start(void) {
     if(errno || !*text || *end || fd<3 || fd>INT_MAX || fstat((int)fd,&info) || !S_ISFIFO(info.st_mode)) {
         fprintf(DIAGNOSTICS,"invalid inherited hold pipe\n");exit(2);
     }
-    hold_fd=(int)fd;
+    hold_fd=(int)fd;fcntl(hold_fd,F_SETFD,FD_CLOEXEC);
 }
+// One opener takes the pipe: two guest threads opening it at once would
+// otherwise both read it and both close its descriptor, the second closing
+// whatever another thread had been given that number since.
+static pthread_mutex_t hold_lock=PTHREAD_MUTEX_INITIALIZER;
 static int held_go(void) {
-    if(hold_fd<0)return -ENOENT;
+    pthread_mutex_lock(&hold_lock);int held=hold_fd;hold_fd=-1;pthread_mutex_unlock(&hold_lock);
+    if(held<0)return -ENOENT;
     char data[4096];size_t len=0;
     for(;;) {
-        ssize_t n=read(hold_fd,data+len,sizeof(data)-len);
+        ssize_t n=read(held,data+len,sizeof(data)-len);
         if(n<0 && errno==EINTR)continue;
-        if(n<0){int error=errno;close(hold_fd);hold_fd=-1;return -error;}
+        if(n<0){int error=errno;close(held);return -error;}
         if(n==0)break;
-        len+=(size_t)n;if(len==sizeof(data)){close(hold_fd);hold_fd=-1;return -E2BIG;}
+        len+=(size_t)n;if(len==sizeof(data)){close(held);return -E2BIG;}
     }
-    close(hold_fd);hold_fd=-1;
+    close(held);
     int fd=memfd_create("fenders-go",MFD_CLOEXEC);if(fd<0)return -errno;
     if(len && write(fd,data,len)!=(ssize_t)len){close(fd);return -EIO;}
     char path[64];snprintf(path,sizeof(path),"/proc/self/fd/%d",fd);
@@ -263,6 +285,7 @@ static int virtual_config_file(const char *name) {
 }
 #include "filesystem.inc"
 #include "network.inc"
+#include "guest_args.inc"
 static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     uint64_t n=r->rax,a=r->rdi,b=r->rsi,c=*(uint64_t *)ptr(r->rsp,8),d=r->r10;
     ++syscall_count;
@@ -305,14 +328,25 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     }
     case 5: {
         struct stat st={0};st.st_mode=S_IFCHR|0600;st.st_blksize=4096;
-        if(a>2 && fstat(host_fd(a),&st)) return -errno;
+        if(a>2) {
+            struct descriptor *desc=lease_descriptor(a);if(!desc)return -EBADF;
+            if(fstat(desc->fd,&st))return -errno;
+            // Outside a mount, what a file is on the host is not the guest's
+            // to learn: its kind, size and blocks, and nothing that names it.
+            if(desc->mount<0) {
+                struct stat plain={.st_mode=st.st_mode,.st_nlink=1,.st_size=st.st_size,.st_blksize=st.st_blksize,.st_blocks=st.st_blocks};
+                st=plain;
+            }
+        }
         memcpy(ptr(b,sizeof(st)),&st,sizeof(st));return 0;
     }
     case 7: {
         if(b>64)return -EINVAL;
         struct pollfd *guest=ptr(a,b*sizeof(struct pollfd)),fds[64];
         memcpy(fds,guest,b*sizeof(*fds));
-        for(unsigned i=0;i<b;i++) fds[i].fd=guest[i].fd>=0 && guest[i].fd<=2?guest[i].fd:host_fd((uint64_t)guest[i].fd);
+        // From the copy alone: the guest's own array can change under
+        // another of its threads between a check and a use.
+        for(unsigned i=0;i<b;i++){int wanted=fds[i].fd;fds[i].fd=wanted>=0 && wanted<=2?wanted:host_fd((uint64_t)wanted);}
         int rc=poll(fds,b,(int)c);
         if(rc<0)return -errno;
         for(unsigned i=0;i<b;i++)guest[i].revents=fds[i].revents;
@@ -322,17 +356,22 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 9: {
         if((d&MAP_FIXED) || a)return -ENOTSUP;
         if((c&(PROT_WRITE|PROT_EXEC))==(PROT_WRITE|PROT_EXEC))return -EACCES;
-        if(!(d&MAP_ANONYMOUS) && host_fd(r->r8)<0)return -EBADF;
-        uint64_t address=allocate(b,c);if(!address)return -ENOMEM;
-        if(!(d&MAP_ANONYMOUS)) {
-            int fd=host_fd(r->r8);
-            pthread_mutex_lock(&allocator_lock);int mapped=map_component(address,b,fd,r->r9);pthread_mutex_unlock(&allocator_lock);
-            if(!mapped) {
-                ssize_t size=pread(fd,ptr(address,b),b,r->r9);
-                if(size<0)return -errno;
-            }
+        // The descriptor is looked up once, and the allocation and its file
+        // contents are made in one hold of the allocator: no other thread
+        // frees or reuses the range between the two.
+        int fd=(d&MAP_ANONYMOUS)?-1:host_fd(r->r8);
+        if(!(d&MAP_ANONYMOUS) && fd<0)return -EBADF;
+        pthread_mutex_lock(&allocator_lock);
+        uint64_t address=allocate_unlocked(b,c);long failed=address?0:-ENOMEM;
+        if(address && fd>=0 && !map_component(address,b,fd,r->r9) && pread(fd,mem+address,b,r->r9)<0) {
+            // Nothing is left allocated for a mapping that was refused.
+            failed=-errno;uint64_t length=(b+PAGE-1)/PAGE*PAGE;
+            zero_pages(address,length);
+            for(uint64_t p=address/PAGE;p<(address+length)/PAGE;p++){used[p]=0;freed(p);}
+            permissions(address,length,NX);
         }
-        return address;
+        pthread_mutex_unlock(&allocator_lock);
+        return failed?failed:(long)address;
     }
     case 17: return result(pread(host_fd(a),ptr(b,c),c,d));
     case 18: return result(pwrite(host_fd(a),ptr(b,c),c,d));
@@ -348,7 +387,12 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 75: return result(fdatasync(host_fd(a)));
     case 77: {int fd=fs_writable_fd(a);if(fd<0)return fd;return result(ftruncate(fd,b));}
     case 217: {struct descriptor *desc=lease_descriptor(a);if(!desc || desc->mount<0)return -EBADF;return result(syscall(SYS_getdents64,desc->fd,ptr(b,c),c));}
-    case 221: return result(syscall(SYS_fadvise64,host_fd(a),b,c,d));
+    case 221:
+        // Access-pattern hints only. The rest act on the host's page cache,
+        // which a file shared between runs shares: asked for, they are
+        // answered as done and nothing happens.
+        if(d!=POSIX_FADV_NORMAL && d!=POSIX_FADV_RANDOM && d!=POSIX_FADV_SEQUENTIAL)return host_fd(a)<0?-EBADF:0;
+        return result(syscall(SYS_fadvise64,host_fd(a),b,c,d));
     case 258: case 262: case 263: case 264: case 265: case 266: case 267: case 280: case 316: case 332: case 437:
         return fs_syscall(n,a,b,c,d,r->r8,r->r9);
     case 10:
@@ -398,6 +442,7 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 41:
         if(a!=AF_INET || (b&~(SOCK_CLOEXEC|SOCK_NONBLOCK|0xf)))return -EAFNOSUPPORT;
         if(!(((b&0xf)==SOCK_STREAM && (!c || c==IPPROTO_TCP)) || ((b&0xf)==SOCK_DGRAM && (!c || c==IPPROTO_UDP))))return -EAFNOSUPPORT;
+        if(!network_open_admitted())return -EAGAIN;
         return guest_network_fd(socket(a,b,c),b&0xf);
     case 42: {
         if(c!=sizeof(struct sockaddr_in))return -EINVAL;
@@ -405,12 +450,14 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
         return network_connect(a,&addr);
     }
     case 44: {
+        if(!message_flags_permitted(d))return -EINVAL;
         if(!r->r8 && !r->r9)return network_send(a,ptr(b,c),c,d);
         if(r->r9!=sizeof(struct sockaddr_in))return -EINVAL;
         struct sockaddr_in addr;memcpy(&addr,ptr(r->r8,sizeof(addr)),sizeof(addr));
         return network_sendto(a,ptr(b,c),c,d,&addr);
     }
     case 45: {
+        if(!message_flags_permitted(d))return -EINVAL;
         if(!r->r8 && !r->r9)return result(recv(host_fd(a),ptr(b,c),c,d));
         if(!r->r8 || !r->r9)return -EINVAL;
         socklen_t size=*(uint32_t *)ptr(r->r9,4);if(size>128)return -EINVAL;
@@ -421,7 +468,8 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
         struct sockaddr_in addr;memcpy(&addr,ptr(b,c),c);int type;socklen_t size=sizeof(type);
         if(getsockopt(host_fd(a),SOL_SOCKET,SO_TYPE,&type,&size))return -errno;
         if(type!=SOCK_DGRAM || addr.sin_family!=AF_INET || addr.sin_addr.s_addr!=INADDR_ANY || addr.sin_port)return -EACCES;
-        return result(bind(host_fd(a),(void *)&addr,sizeof(addr)));
+        if(bind(host_fd(a),(void *)&addr,sizeof(addr)))return -errno;
+        return network_resolver_only(a);
     }
     case 48: return result(shutdown(host_fd(a),b));
     case 288: {
@@ -445,6 +493,7 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
         return result(setsockopt(host_fd(a),b,c,ptr(d,sizeof(int)),sizeof(int)));
     }
     case 55: {
+        if(!socket_option_readable(b,c))return -ENOPROTOOPT;
         socklen_t size=*(uint32_t *)ptr(r->r8,4);if(size>256)return -EINVAL;
         int rc=getsockopt(host_fd(a),b,c,ptr(d,size),&size);*(uint32_t *)ptr(r->r8,4)=size;return result(rc);
     }
@@ -460,8 +509,14 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 72: {
         int fd=a<=2?(int)a:host_fd(a);
         if(b==F_DUPFD || b==F_DUPFD_CLOEXEC)return guest_duplicate(a,b);
-        if(b==F_GETFD || b==F_GETFL)return result(fcntl(fd,b));
-        if(b==F_SETFD && !(c&~FD_CLOEXEC))return result(fcntl(fd,b,c));
+        // Close-on-exec is the launcher's to keep set (descriptors.inc): a
+        // guest that clears it is told so and nothing changes.
+        if(b==F_GETFD)return fd<0?-EBADF:(a<=2?0:FD_CLOEXEC);
+        if(b==F_GETFL)return result(fcntl(fd,b));
+        if(b==F_SETFD && !(c&~FD_CLOEXEC))return fd<0?-EBADF:0;
+        // Standard output and error are the launcher's own too: a guest
+        // does not change how they block or append.
+        if(b==F_SETFL && a<=2)return 0;
         if(b==F_SETFL && !(c&~(O_NONBLOCK|O_APPEND|O_ACCMODE|O_DIRECTORY|O_NOFOLLOW|O_SYNC|O_DSYNC|0x8000)))return result(fcntl(fd,b,c));
         return -EINVAL;
     }
@@ -473,14 +528,14 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 200: fprintf(DIAGNOSTICS,"guest fatal signal %llu\n",(unsigned long long)b);exit(1);
     case 204: if(b<8)return -EINVAL;memset(ptr(c,b),0,b);*(uint64_t *)ptr(c,8)=1;return 8;
     case 202: {
+        // Always private (guest_args.inc).
+        long asked=futex_operation(b);if(asked<0)return asked;
         unsigned op=b&FUTEX_CMD_MASK;
-        if(op!=FUTEX_WAIT && op!=FUTEX_WAKE && op!=FUTEX_WAIT_BITSET && op!=FUTEX_WAKE_BITSET)return -ENOSYS;
-        if(b&~(FUTEX_CMD_MASK|FUTEX_PRIVATE_FLAG|FUTEX_CLOCK_REALTIME))return -EINVAL;
         struct timespec *timeout=(op==FUTEX_WAIT || op==FUTEX_WAIT_BITSET) && d?ptr(d,sizeof(struct timespec)):NULL;
-        return result(syscall(SYS_futex,ptr(a,4),b,c,timeout,NULL,r->r9));
+        return result(syscall(SYS_futex,ptr(a,4),asked,c,timeout,NULL,r->r9));
     }
     case 157: if(a==15){ptr(b,16);return 0;}return -ENOSYS;
-    case 228: return result(clock_gettime(a,ptr(b,sizeof(struct timespec))));
+    case 228: if(!clock_permitted(a))return -EINVAL;return result(clock_gettime(a,ptr(b,sizeof(struct timespec))));
     case 281: case 232: if(b>ram || !c || c>1024)return -EINVAL;return result(epoll_wait(host_fd(a),ptr(b,c*sizeof(struct epoll_event)),c,(int)d));
     case 233: return result(epoll_ctl(host_fd(a),b,host_fd(c),d?ptr(d,sizeof(struct epoll_event)):NULL));
     case 273: return 0;
@@ -488,7 +543,14 @@ static long syscall_guest_inner(int cpu,struct kvm_regs *r) {
     case 291: return guest_fd(epoll_create1(a));
     case 318: if(b>4096)return -EINVAL;return result(getrandom(ptr(a,b),b,c));
     case 334: return -ENOSYS;
-    default: fprintf(DIAGNOSTICS,"unsupported syscall %llu\n",(unsigned long long)n);return -ENOSYS;
+    default: {
+        // Said once for each call number, and once for all past the table:
+        // a guest cannot fill its launcher's messages by repeating one.
+        static _Atomic uint64_t said[8];
+        uint64_t slot=n<448?n:448+(n&63),bit=1ull<<(slot&63);
+        if(!(atomic_fetch_or(&said[slot>>6],bit)&bit))fprintf(DIAGNOSTICS,"unsupported syscall %llu\n",(unsigned long long)n);
+        return -ENOSYS;
+    }
     }
 }
 static long syscall_guest(int cpu,struct kvm_regs *r) {
@@ -497,7 +559,11 @@ static long syscall_guest(int cpu,struct kvm_regs *r) {
     for(unsigned i=0;i<lease_count;i++)release_descriptor(leases[i]);
     lease_count=0;pthread_mutex_unlock(&fd_lock);return rc;
 }
+#include "cpuid.inc"
+#include "msr_filter.inc"
+#include "vcpu_features.inc"
 #include "threads.inc"
+#include "running_filter.inc"
 int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"--capabilities")) {
         puts("{\"network_clock\":\"boottime\",\"network_egress_accounting\":\"socket-payload-v1\",\"network_meter\":\"pipe-cumulative-v1\",\"network_egress_budget\":\"socket-payload-ceiling-v2\",\"inherited_files\":true}");return 0;
@@ -517,7 +583,13 @@ int main(int argc,char **argv) {
     filesystem_policy();
     signal(SIGALRM,timeout_handler);
     const char *lifetime=getenv("FENDERS_LIFETIME_SECONDS");
-    if(lifetime){char *end;unsigned long seconds=strtoul(lifetime,&end,10);if(!*lifetime || *end || seconds>86400)return 2;alarm(seconds);}else alarm(20);
+    // A deadline that cannot be set is not one the launcher goes on without:
+    // where its confinement refuses the timer, a lifetime must be 0 and kept
+    // by whoever started it, as its shim does.
+    unsigned long seconds=20;
+    if(lifetime){char *end;seconds=strtoul(lifetime,&end,10);if(!*lifetime || *end || seconds>86400)return 2;}
+    struct itimerval deadline={.it_value={.tv_sec=(time_t)seconds}};
+    if(seconds && setitimer(ITIMER_REAL,&deadline,NULL)){fprintf(DIAGNOSTICS,"lifetime of %lu s cannot be set: %s\n",seconds,strerror(errno));return 2;}
     // All virtual CPUs share one host CPU allowance; resolver threads do not add CPU capacity.
     cpu_set_t allowed,pinned;CPU_ZERO(&allowed);CPU_ZERO(&pinned);CHECK(sched_getaffinity(0,sizeof(allowed),&allowed));
     for(unsigned i=0;i<CPU_SETSIZE;i++)if(CPU_ISSET(i,&allowed)){CPU_SET(i,&pinned);break;}
@@ -557,7 +629,10 @@ int main(int argc,char **argv) {
     if(vdso_loaded)calibrate_clock(cpu);
     set_syscall_msrs(cpu);
     virtual_threads[0]=(struct virtual_thread){.cpu=cpu,.run=run,.tid=1};
+    prepare_virtual_threads();
     lifecycle_start();
     if(network_budget_enabled && control_fd<0){fprintf(DIAGNOSTICS,"egress budget requires control socket\n");return 2;}
+    // Set up: from here the launcher only runs its guest.
+    running_filter();
     run_virtual_thread(&virtual_threads[0]);return 0;
 }

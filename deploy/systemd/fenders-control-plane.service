@@ -37,6 +37,8 @@ KillSignal=SIGTERM
 SendSIGKILL=yes
 UMask=0077
 LimitCORE=0
+# Four listeners; the gateway and the run channel serve 8192 connections each.
+LimitNOFILE=65536
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=

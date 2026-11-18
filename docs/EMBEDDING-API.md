@@ -37,13 +37,20 @@ Keep the CA key off the hosts that serve.
 ## 2. The control plane
 
 ```sh
-FENDERS_DATABASE_URL=postgresql://USER:PASSWORD@HOST/fenders \
+FENDERS_DATABASE_URL='postgresql://USER:PASSWORD@HOST/fenders?sslmode=verify-full&sslrootcert=/etc/fenders/db-ca.pem' \
 target/release/fenders-control-plane --state /var/lib/fenders/control \
   --host 0.0.0.0 --port 9090 --internal-port 9091 --gateway-port 9092 \
   --run-channel-port 9093 --run-channel-endpoint https://control.internal:9093 \
   --domain apps.example.com \
   --ca pki/ca.pem --cert pki/control.pem --key pki/control.key
 ```
+
+A database on another host must say in its URL how the connection is secured:
+`sslmode=verify-full` with the CA that signed the server's certificate, or a
+weaker `sslmode` chosen knowingly. Without one the control plane and its
+tools refuse to start, because a PostgreSQL client left to itself tries TLS,
+verifies nothing and falls back to none. A database on this host (loopback or
+a socket directory) needs no `sslmode`.
 
 - `--run-channel-endpoint` is the address **nodes** use to reach the run
   channel. Without it no run starts.

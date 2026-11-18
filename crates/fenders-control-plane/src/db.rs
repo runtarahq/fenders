@@ -83,3 +83,75 @@ pub fn quota(message: &'static str) -> Error {
 }
 #[macro_export]
 macro_rules! args { ($($value:expr),* $(,)?) => { &[$(serde_json::json!($value)),*] }; }
+
+/// Refuses a database URL that names a server on another host and does not
+/// say how its connection is secured.
+///
+/// Left unsaid, a PostgreSQL client tries TLS, checks no certificate and
+/// falls back to none: whoever is on the path reads and changes everything
+/// the control plane stores. For a server that is not this host the URL must
+/// carry `sslmode`: `verify-full` (or `verify-ca`) to require a verified
+/// connection, or one of the weaker modes to accept one knowingly.
+pub fn database_url(dsn: &str) -> crate::error::Result<()> {
+    use crate::error::Error;
+    let url = url::Url::parse(dsn).map_err(|_| Error::invalid("PostgreSQL URL required"))?;
+    let options: std::collections::BTreeMap<_, _> = url.query_pairs().collect();
+    // A Unix socket directory, as `?host=/run/postgresql`, is this host.
+    let host = options
+        .get("host")
+        .map(|host| host.to_string())
+        .or_else(|| url.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let local = host.is_empty()
+        || host.starts_with('/')
+        || host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if local || options.contains_key("sslmode") {
+        return Ok(());
+    }
+    Err(Error::invalid(
+        "the database is on another host: add sslmode=verify-full (with sslrootcert) to its URL, or another sslmode to accept a connection that is not verified",
+    ))
+}
+
+#[cfg(test)]
+mod database_url_tests {
+    use super::database_url;
+
+    #[test]
+    fn a_database_on_another_host_must_say_how_it_is_secured() {
+        for local in [
+            "postgresql://u:p@localhost/db",
+            "postgresql://u:p@127.0.0.1:5432/db",
+            "postgresql://u:p@[::1]/db",
+            "postgresql:///db?host=/run/postgresql",
+            "postgresql://u@localhost/db?host=%2Fvar%2Frun%2Fpostgresql",
+            "postgres:///db",
+        ] {
+            assert!(database_url(local).is_ok(), "{local}");
+        }
+        for remote in [
+            "postgresql://u:p@db.internal/db",
+            "postgresql://u:p@10.0.0.5:5432/db",
+            "postgresql://u:p@db.internal/db?application_name=x",
+            // A socket directory is local; a host given as an option is not.
+            "postgresql://u:p@localhost/db?host=db.internal",
+        ] {
+            let refused = database_url(remote).unwrap_err();
+            assert!(refused.message.contains("sslmode"), "{remote}");
+            // The URL, which holds a password, is never repeated.
+            assert!(!refused.message.contains("db.internal") && !refused.message.contains("u:p"));
+        }
+        for stated in [
+            "postgresql://u:p@db.internal/db?sslmode=verify-full&sslrootcert=/etc/ca.pem",
+            "postgresql://u:p@db.internal/db?sslmode=require",
+            "postgresql://u:p@db.internal/db?sslmode=disable",
+        ] {
+            assert!(database_url(stated).is_ok(), "{stated}");
+        }
+        assert!(database_url("not a url").is_err());
+    }
+}

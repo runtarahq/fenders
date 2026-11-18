@@ -59,6 +59,11 @@ pub trait Backend: Send + Sync {
         let _ = id;
         None
     }
+    /// The host memory of shims that wait for a run, and their discarding.
+    fn warm_memory_mib(&self) -> i64 {
+        0
+    }
+    fn discard_warm(&self) {}
     fn lookup_key(&self, key: &str) -> Result<Option<String>>;
     fn upload(&self, data: &[u8]) -> Result<Value>;
     /// [`upload`](Self::upload) for a compile in `scope`, the isolation unit
@@ -110,6 +115,12 @@ impl Backend for Node {
     }
     fn shape(&self, id: &str) -> Option<(i64, i64)> {
         Node::shape(self, id)
+    }
+    fn warm_memory_mib(&self) -> i64 {
+        Node::warm_memory_mib(self)
+    }
+    fn discard_warm(&self) {
+        Node::discard_warm(self)
     }
     fn endings(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
         Some(Node::endings(self))
@@ -843,6 +854,12 @@ impl Agent {
                 }
                 drop(shapes);
                 (cpu, memory) = usage;
+                // Shims that wait for a run hold a VM's memory each. A run
+                // that fits only without them has them discarded: they are
+                // there to start runs sooner, not to keep runs out.
+                if memory + need.1 + self.node.warm_memory_mib() > self.memory_mib {
+                    self.node.discard_warm();
+                }
                 if cpu + need.0 > self.cpu_percent || memory + need.1 > self.memory_mib {
                     drop(admitting);
                     self.refuse(durable, execution, tenant, "local-capacity")?;

@@ -48,6 +48,7 @@ pub mod public_egress;
 pub mod run_channel;
 pub mod schedule;
 mod schema_migrations;
+mod secret_binding;
 pub mod server;
 pub mod store;
 pub mod stream_listener;

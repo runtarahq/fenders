@@ -447,11 +447,17 @@ impl Store {
             spec["log_redact_env"] = json!(secrets.keys().collect::<Vec<_>>());
         }
         for (variable, secret) in secrets {
-            let row=one(&mut tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3",args![e["tenant_id"],e["project_id"],secret]).await?;
-            let plain = self
-                .cipher
-                .decrypt(s(&row["token"]))
-                .map_err(|_| Error::internal())?;
+            let row=one(&mut tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3 AND bound",args![e["tenant_id"],e["project_id"],secret]).await?;
+            // Opened only as the secret of this execution's own workspace
+            // and project that it names: a ciphertext moved here from
+            // another row does not open.
+            let plain = crate::secret_binding::open(
+                &self.cipher,
+                s(&e["tenant_id"]),
+                s(&e["project_id"]),
+                s(&secret),
+                s(&row["token"]),
+            )?;
             spec["env"][variable] = json!(String::from_utf8(plain).map_err(|_| Error::internal())?);
         }
         for field in [
@@ -585,4 +591,104 @@ fn validate_runtime_digest(value: &Value) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Whose turn it is to send a heartbeat: one of each node at a time.
+#[derive(Default)]
+pub struct NodeTurns {
+    nodes: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Turn>>>,
+}
+
+struct Turn {
+    /// Held by the heartbeat being handled.
+    handling: tokio::sync::Semaphore,
+    /// Heartbeats being handled or waiting to be.
+    present: std::sync::atomic::AtomicUsize,
+}
+
+/// A node's turn, given back when dropped.
+pub struct NodeTurn {
+    turn: std::sync::Arc<Turn>,
+    handling: bool,
+}
+
+impl NodeTurns {
+    /// `node`'s turn, once the heartbeat before this one is done. `None`
+    /// when one is already waiting behind it: a third is refused.
+    pub async fn take(&self, node: &str) -> Option<NodeTurn> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let turn = self
+            .nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(node.to_owned())
+            .or_insert_with(|| {
+                std::sync::Arc::new(Turn {
+                    handling: tokio::sync::Semaphore::new(1),
+                    present: Default::default(),
+                })
+            })
+            .clone();
+        if turn.present.fetch_add(1, SeqCst) >= 2 {
+            turn.present.fetch_sub(1, SeqCst);
+            return None;
+        }
+        // Counted from here: given back if this call is dropped while it waits.
+        let mut taken = NodeTurn {
+            turn: turn.clone(),
+            handling: false,
+        };
+        turn.handling.acquire().await.ok()?.forget();
+        taken.handling = true;
+        Some(taken)
+    }
+}
+
+impl Drop for NodeTurn {
+    fn drop(&mut self) {
+        if self.handling {
+            self.turn.handling.add_permits(1);
+        }
+        self.turn
+            .present
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::NodeTurns;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_node_has_one_heartbeat_handled_and_one_waiting() {
+        let turns = Arc::new(NodeTurns::default());
+        let first = turns.take("a").await.unwrap();
+        // Another node is not held up by it.
+        let other = turns.take("b").await.unwrap();
+        // A second of the same node waits; a third is refused.
+        let waiting = tokio::spawn({
+            let turns = turns.clone();
+            async move { turns.take("a").await.is_some() }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        assert!(turns.take("a").await.is_none());
+        // The first done, the second has its turn; then there is room again.
+        drop(first);
+        assert!(waiting.await.unwrap());
+        let next = turns.take("a").await.unwrap();
+        drop((next, other));
+        // One that stops waiting gives its place back.
+        let held = turns.take("a").await.unwrap();
+        let abandoned = tokio::spawn({
+            let turns = turns.clone();
+            async move { turns.take("a").await.is_some() }
+        });
+        tokio::task::yield_now().await;
+        abandoned.abort();
+        let _ = abandoned.await;
+        drop(held);
+        assert!(turns.take("a").await.is_some());
+    }
 }

@@ -45,6 +45,32 @@ static void control_framing(void) {
     memset(buffer,'a',sizeof(buffer));assert(write(pair[0],buffer,sizeof(buffer))==sizeof(buffer));
     assert(!control_read_command(pair[1],buffer,sizeof(buffer)));
     close(pair[0]);close(pair[1]);puts("PASS fragmented management commands, embedded NUL and size limits");
+    // A connection that carries every command: two that arrive together are
+    // two, a line that is no command is passed by, and the next is read.
+    assert(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
+    static struct control_input input;
+    const char together[]="egress 1 0 5\nstatus\n";
+    assert(write(pair[0],together,sizeof(together)-1)==sizeof(together)-1);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==1 && !strcmp(buffer,"egress 1 0 5\n"));
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==1 && !strcmp(buffer,"status\n"));
+    const char nul[]="sta\0tus\nstatus\n";
+    assert(write(pair[0],nul,sizeof(nul)-1)==sizeof(nul)-1);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==-1);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==1 && !strcmp(buffer,"status\n"));
+    // Longer than any command, and longer than the reader holds: dropped as
+    // it comes, and the command after it is read.
+    static char flood[5000];memset(flood,'x',sizeof(flood)-1);flood[sizeof(flood)-1]='\n';
+    assert(write(pair[0],flood,sizeof(flood))==sizeof(flood));
+    assert(write(pair[0],"status\n",7)==7);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==-1);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==1 && !strcmp(buffer,"status\n"));
+    // A line that fits the reader and not a command.
+    memset(flood,'y',100);flood[100]='\n';
+    assert(write(pair[0],flood,101)==101);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==-1);
+    close(pair[0]);
+    assert(control_next_command(pair[1],&input,buffer,sizeof(buffer))==0);
+    close(pair[1]);puts("PASS commands that arrive together are each read, and a line that is none is passed by");
 }
 
 static void release_calls(void) {
@@ -99,7 +125,126 @@ static void meter_pipe(void) {
     assert(fcntl(pipefd[1],F_GETFD)&FD_CLOEXEC);
     puts("PASS meter pipe: initial and cumulative totals, final line on exit, close-on-exec");
 }
+// The last line against threads still sending: nothing is admitted after it,
+// and a line with nothing in flight is exactly what the peer received.
+static _Atomic int final_guest;
+static void *final_sender(void *unused) {
+    (void)unused;
+    for(;;) {
+        long sent=network_send((uint64_t)atomic_load(&final_guest),"z",1,0);release_calls();
+        if(sent!=1){assert(sent==-EBADF);return NULL;}
+    }
+}
+static void *final_sink(void *arg) {
+    int fd=*(int *)arg;char drain[4096];ssize_t n;uint64_t *total=calloc(1,sizeof(*total));
+    while((n=read(fd,drain,sizeof(drain)))>0)*total+=(uint64_t)n;
+    return total;
+}
+static void *final_unlocked(void *unused) {(void)unused;meter_final();return NULL;}
+static void meter_final_closes(void) {
+    int pipefd[2];assert(!pipe(pipefd));
+    char text[16];snprintf(text,sizeof(text),"%d",pipefd[1]);setenv("FENDERS_METER_FD",text,1);
+    network_meter_start();fcntl(pipefd[0],F_SETFL,O_NONBLOCK);
+    unsigned complete=0;
+    for(unsigned round=0;round<200;round++) {
+        int pair[2];assert(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
+        uint64_t before;int measured;network_usage(&before,&measured);
+        atomic_store(&final_guest,guest_network_fd(pair[0],SOCK_STREAM));
+        pthread_t sink,senders[4];assert(!pthread_create(&sink,NULL,final_sink,&pair[1]));
+        // Every fourth round one sender, which is caught between writes
+        // often enough for lines with nothing in flight to be seen too.
+        unsigned count=round%4?4:1;
+        for(unsigned i=0;i<count;i++)assert(!pthread_create(&senders[i],NULL,final_sender,NULL));
+        usleep(200+round*7%900);
+        meter_final();
+        char lines[65536];ssize_t total=0,n;
+        while((n=read(pipefd[0],lines+total,sizeof(lines)-1-(size_t)total))>0)total+=n;
+        lines[total]=0;assert(total>0 && lines[total-1]=='\n');lines[total-1]=0;
+        char *last=strrchr(lines,'\n');last=last?last+1:lines;
+        unsigned long long bytes,inflight,refusals;
+        assert(sscanf(last,"final %llu %llu %d %llu",&bytes,&inflight,&measured,&refusals)==4);
+        for(unsigned i=0;i<count;i++)assert(!pthread_join(senders[i],NULL));
+        // Admission stays closed.
+        assert(network_send((uint64_t)atomic_load(&final_guest),"z",1,0)==-EBADF);release_calls();
+        guest_close((uint64_t)atomic_load(&final_guest));
+        uint64_t *received;assert(!pthread_join(sink,(void **)&received));
+        assert(*received>=bytes-before && *received<=bytes-before+inflight);
+        if(!inflight){assert(*received==bytes-before);++complete;}
+        free(received);close(pair[1]);
+        pthread_mutex_lock(&fd_lock);network_closed=0;pthread_mutex_unlock(&fd_lock);
+    }
+    // Without the lock, the line never reads as complete.
+    pthread_mutex_lock(&fd_lock);
+    pthread_t waiter;assert(!pthread_create(&waiter,NULL,final_unlocked,NULL));
+    assert(!pthread_join(waiter,NULL));
+    pthread_mutex_unlock(&fd_lock);
+    char lines[4096];ssize_t n=read(pipefd[0],lines,sizeof(lines)-1);assert(n>0);lines[n-1]=0;
+    char *last=strrchr(lines,'\n');last=last?last+1:lines;
+    unsigned long long bytes,inflight;assert(sscanf(last,"final %llu %llu",&bytes,&inflight)==2 && inflight==1);
+    printf("PASS meter final: admission closed with the totals, every line within what was received, %u of 200 with nothing in flight and exact, unlocked line incomplete\n",complete);
+}
+// A datagram socket hears the resolver and no other source.
+static void resolver_only(void) {
+    int resolver=socket(AF_INET,SOCK_DGRAM,0),other=socket(AF_INET,SOCK_DGRAM,0);assert(resolver>=0 && other>=0);
+    struct sockaddr_in address={.sin_family=AF_INET,.sin_addr={.s_addr=htonl(INADDR_LOOPBACK)}},any={.sin_family=AF_INET};
+    assert(!bind(resolver,(void *)&address,sizeof(address)));socklen_t size=sizeof(address);
+    assert(!getsockname(resolver,(void *)&address,&size));dns_server=address;
+    for(int bound=0;bound<2;bound++) {
+        int guest=guest_network_fd(socket(AF_INET,SOCK_DGRAM,0),SOCK_DGRAM);assert(guest>=3);
+        int host=host_fd((uint64_t)guest);release_calls();
+        if(bound) {
+            // As the launcher does for a guest's bind: bound, then the resolver's.
+            assert(!bind(host,(void *)&any,sizeof(any)));assert(!network_resolver_only((uint64_t)guest));release_calls();
+        } else {
+            assert(network_sendto((uint64_t)guest,"ask",3,0,&address)==3);release_calls();
+        }
+        struct sockaddr_in local;size=sizeof(local);assert(!getsockname(host,(void *)&local,&size));
+        local.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        char got[16];
+        assert(sendto(other,"stray",5,0,(void *)&local,sizeof(local))==5);usleep(20000);
+        assert(recv(host,got,sizeof(got),MSG_DONTWAIT)==-1 && errno==EAGAIN);
+        assert(sendto(resolver,"answer",6,0,(void *)&local,sizeof(local))==6);usleep(20000);
+        assert(recv(host,got,sizeof(got),MSG_DONTWAIT)==6 && !memcmp(got,"answer",6));
+        // And it still sends there, and nowhere else.
+        assert(network_sendto((uint64_t)guest,"ask",3,0,&address)==3);release_calls();
+        struct sockaddr_in elsewhere=local;size=sizeof(elsewhere);assert(!getsockname(other,(void *)&elsewhere,&size));
+        elsewhere.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        assert(network_sendto((uint64_t)guest,"bad",3,0,&elsewhere)==-EACCES);release_calls();
+        guest_close((uint64_t)guest);
+    }
+    close(resolver);close(other);memset(&dns_server,0,sizeof(dns_server));
+    puts("PASS a datagram socket, bound or sending, hears only the resolver");
+}
+// Sockets and connections are made no faster than the run's rate.
+static void open_rate(void) {
+    int server=socket(AF_INET,SOCK_STREAM,0);assert(server>=0);
+    struct sockaddr_in address={.sin_family=AF_INET,.sin_addr={.s_addr=htonl(INADDR_LOOPBACK)}};
+    assert(!bind(server,(void *)&address,sizeof(address)) && !listen(server,4096));
+    socklen_t size=sizeof(address);assert(!getsockname(server,(void *)&address,&size));
+    tcp_allow[0]=address;tcp_allow_count=1;
+    uint64_t started=network_now();unsigned made=0,refused=0;
+    // As a guest does it: a socket, a connection, a close, over and over.
+    while(network_now()-started<1000000000ull) {
+        if(!network_open_admitted()){++refused;usleep(100);continue;}
+        int guest=guest_network_fd(socket(AF_INET,SOCK_STREAM,0),SOCK_STREAM);assert(guest>=3);
+        long connected=network_connect((uint64_t)guest,&address);release_calls();
+        if(connected==0) {
+            ++made;int peer=accept(server,NULL,NULL);assert(peer>=0);close(peer);
+        } else {assert(connected==-EAGAIN);++refused;}
+        guest_close((uint64_t)guest);
+    }
+    // Two calls a connection: the burst and one second of the rate, no more.
+    assert(refused>0 && made>=NETWORK_OPENS_BURST/2 && made<=(NETWORK_OPENS_BURST+NETWORK_OPENS_PER_SECOND)/2+1);
+    // And a refused connect is retried once there is room, to the same peer.
+    usleep(2*NETWORK_OPEN_NS/1000+1000);
+    assert(network_open_admitted());
+    close(server);tcp_allow_count=0;
+    printf("PASS sockets and connections: %u made in a second, the rest refused with EAGAIN\n",made);
+}
 int main(int argc,char **argv) {
+    if(argc==2 && !strcmp(argv[1],"--open-rate")){open_rate();return 0;}
+    if(argc==2 && !strcmp(argv[1],"--resolver")){resolver_only();return 0;}
+    if(argc==2 && !strcmp(argv[1],"--meter-final")){meter_final_closes();return 0;}
     if(argc==2 && !strcmp(argv[1],"--budget")){budget_tests();return 0;}
     if(argc==2 && !strcmp(argv[1],"--budget-wait")){budget_wait_tests();return 0;}
     if(argc==2 && !strcmp(argv[1],"--meter")){meter_pipe();return 0;}
@@ -109,6 +254,17 @@ int main(int argc,char **argv) {
     }
     control_framing();
     traffic_accounting();
+    {
+        // Whatever a guest asked for, the host's descriptor closes on exec.
+        int pipes[2];assert(!pipe(pipes));
+        assert(!(fcntl(pipes[0],F_GETFD)&FD_CLOEXEC));
+        int file=guest_fd(pipes[0]),socket_fd=guest_network_fd(socket(AF_INET,SOCK_STREAM,0),SOCK_STREAM);
+        assert(file>=3 && socket_fd>=3);
+        assert(fcntl(host_fd(file),F_GETFD)&FD_CLOEXEC);
+        assert(fcntl(host_fd(socket_fd),F_GETFD)&FD_CLOEXEC);
+        release_calls();close(pipes[1]);
+        puts("PASS a guest's host descriptors are closed on exec");
+    }
     struct sockaddr_in first,second,foreign;
     int a=listener(&first),b=listener(&second),c=listener(&foreign);
     char allow[128];

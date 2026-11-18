@@ -118,11 +118,15 @@ fn cgroup_leaves(cgroup: &Path, guest: &Value) -> Result<PathBuf> {
         .filter(|c| available.split_whitespace().any(|a| a == **c))
         .map(|c| format!("+{c}"))
         .collect();
-    if !wanted.is_empty() {
-        fs::write(cgroup.join("cgroup.subtree_control"), wanted.join(" ")).map_err(os(
-            "enabling controllers (is the shim alone in its run's cgroup?)",
-        ))?;
+    if wanted.len() != 3 {
+        return Err(format!(
+            "the run's cgroup has controllers `{}`: cpu, memory and pids are all required",
+            available.trim()
+        ));
     }
+    fs::write(cgroup.join("cgroup.subtree_control"), wanted.join(" ")).map_err(os(
+        "enabling controllers (is the shim alone in its run's cgroup?)",
+    ))?;
     fs::create_dir(&vm).map_err(os("creating the vm cgroup"))?;
     let mib = |field: &str| guest[field].as_i64().unwrap_or(0) * 1024 * 1024;
     for (name, value) in [
@@ -138,10 +142,11 @@ fn cgroup_leaves(cgroup: &Path, guest: &Value) -> Result<PathBuf> {
         ("memory.oom.group", "1".to_owned()),
         ("pids.max", "16".to_owned()),
     ] {
-        let file = vm.join(name);
-        if file.exists() {
-            fs::write(&file, value).map_err(os(name))?;
-        }
+        // A limit that cannot be set is not skipped: a VM would otherwise
+        // start with none, and nothing would say so.
+        fs::write(vm.join(name), value).map_err(|error| {
+            format!("limiting the vm cgroup ({name}): {error}; its cpu, memory and pids controllers must be enabled")
+        })?;
     }
     Ok(vm)
 }
@@ -259,6 +264,11 @@ fn vmm() -> Result<()> {
             .collect();
         drop_to(uid, gid, &kvm)?;
     }
+    // The VM shares no core with another run's at the same moment, unless
+    // its node was started to let runs share.
+    if std::env::var_os("FENDERS_SHIM_SHARE_CORE").is_none() {
+        fenders_node::confinement::core_alone().map_err(os("a core-scheduling cookie"))?;
+    }
     undumpable()?;
     // Set after the uid change, which clears it: the VMM dies with its shim.
     check(
@@ -290,6 +300,24 @@ fn vmm() -> Result<()> {
     .iter()
     .map(|name| env_number::<RawFd>(name).map(|fd| format!("fd:{fd}")))
     .collect::<Result<_>>()?;
+    // The launcher starts with the descriptors it is told of and no other.
+    // Each of the shim's is opened to close on exec, which is what kept the
+    // rest out; this is the same thing, said once more where it matters.
+    let mut kept: Vec<RawFd> = vec![0, 1, 2];
+    for name in [
+        "FENDERS_SHIM_RUNTIME_FD",
+        "FENDERS_SHIM_COMPONENT_FD",
+        "FENDERS_SHIM_ENV_FD",
+        "FENDERS_HOST_ORIGIN_FD",
+        "FENDERS_METER_FD",
+        "FENDERS_DIAGNOSTICS_FD",
+        "FENDERS_CONTROL_FD",
+        "FENDERS_INGRESS_FD",
+        "FENDERS_HOLD_FD",
+    ] {
+        kept.extend(env_number::<RawFd>(name).ok());
+    }
+    close_others(&kept)?;
     fenders_node::confinement::apply("vmm", &launch, &[], &[], &ports, dns, true)
         .map_err(|e| format!("confinement: {}", e.message))?;
     let mut command = Command::new(&launch);
@@ -302,14 +330,77 @@ fn vmm() -> Result<()> {
     Err(format!("exec launch: {}", command.exec()))
 }
 
+/// Sets close-on-exec on every open descriptor not in `kept`: the next
+/// program starts without it. Not closed here, since what the standard
+/// library holds to start that program is among them.
+fn close_others(kept: &[RawFd]) -> Result<()> {
+    let open: Vec<RawFd> = fs::read_dir("/proc/self/fd")
+        .map_err(os("listing descriptors"))?
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .collect();
+    for fd in open {
+        if !kept.contains(&fd) {
+            // One that is gone already (the listing's own) is nothing to keep out.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+    }
+    Ok(())
+}
+
 /// The gid owning /dev/kvm, which the run needs as a supplementary group.
 fn kvm_gid() -> Option<u32> {
-    fs::metadata("/dev/kvm").ok().map(|m| m.gid())
+    // Never the root group: where /dev/kvm is root's own, a VMM is given no
+    // group for it, and opens it only if everyone may.
+    fs::metadata("/dev/kvm")
+        .ok()
+        .and_then(|m| vmm_group(m.gid()))
+}
+
+/// The group a VMM is given for a `/dev/kvm` owned by group `gid`: never root's.
+fn vmm_group(gid: u32) -> Option<u32> {
+    (gid != 0).then_some(gid)
+}
+
+/// What an endpoint's status for a batch of output means for the batch.
+/// Asked to wait (408) or to slow down (429) is not a refusal; any other
+/// client error, or 501, is one for good; no answer or a server's failure
+/// is tried again.
+fn output_answer(status: Option<u16>) -> output::Sent {
+    match status {
+        Some(200..=299) => output::Sent::Accepted,
+        Some(408 | 429) => output::Sent::Retry,
+        Some(code @ (400..=499 | 501)) => output::Sent::Refused(code),
+        _ => output::Sent::Retry,
+    }
+}
+
+/// Kills the VMM through `vmm`, the descriptor that names that process and
+/// no other. Without one (a kernel that has none), by number, and only
+/// while it has not been reaped: its number may be another process's after.
+/// Says whether a signal was sent.
+fn kill_vmm(vmm: Option<&OwnedFd>, pid: libc::pid_t, reaped: bool) -> bool {
+    match vmm {
+        Some(vmm) => unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                vmm.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            ) == 0
+        },
+        None if !reaped => unsafe { libc::kill(pid, libc::SIGKILL) == 0 },
+        None => false,
+    }
 }
 
 /// The shim's ends of a capturing VM's output pipes ([`output`]), taken by
 /// [`finish`]: set only for a launch that asked for its output.
 static OUTPUT: std::sync::Mutex<Option<output::Pipes>> = std::sync::Mutex::new(None);
+
+/// The shim's end of the launcher's messages pipe, for a launch that keeps
+/// no output (one that does has it among [`OUTPUT`]'s).
+static DIAGNOSTICS: std::sync::Mutex<Option<OwnedFd>> = std::sync::Mutex::new(None);
 
 /// The read end of the VMM's meter pipe (cumulative outbound totals), taken
 /// by [`finish`] once the shim is unprivileged.
@@ -373,11 +464,14 @@ fn read_meter(
 ) -> Option<std::thread::JoinHandle<String>> {
     let read = METER.lock().ok()?.take()?;
     Some(std::thread::spawn(move || {
-        use std::io::BufRead;
         let mut last = String::new();
-        for line in std::io::BufReader::new(fs::File::from(read)).lines() {
-            match line {
-                Ok(line) => {
+        let mut meter = std::io::BufReader::new(fs::File::from(read));
+        loop {
+            match launcher_line(&mut meter) {
+                // One longer than a meter line is: passed by, not kept.
+                Ok(Some(None)) => continue,
+                Ok(None) => break,
+                Ok(Some(Some(line))) => {
                     if let (Some(limit), Some(meter)) = (&limit, budget_meter(&line)) {
                         let _ = limit.send(meter);
                     }
@@ -397,6 +491,44 @@ fn read_meter(
         }
         last
     }))
+}
+
+/// The longest line read from the VMM: a meter line, or a control answer.
+const MAX_LAUNCHER_LINE: usize = 4096;
+
+/// The next line of what the VMM writes, without its newline. The VMM runs
+/// the guest and is trusted with less than the shim: a line is read up to
+/// [`MAX_LAUNCHER_LINE`], and one over it, or not UTF-8, is read past and
+/// not kept (`Some(None)`). `None` at the end.
+fn launcher_line(input: &mut impl std::io::BufRead) -> std::io::Result<Option<Option<String>>> {
+    use std::io::{BufRead as _, Read as _};
+    let mut line = Vec::new();
+    let read = input
+        .by_ref()
+        .take(MAX_LAUNCHER_LINE as u64 + 1)
+        .read_until(b'\n', &mut line)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if line.last() == Some(&b'\n') {
+        line.pop();
+        return Ok(Some(String::from_utf8(line).ok()));
+    }
+    if line.len() <= MAX_LAUNCHER_LINE {
+        // The end, without a newline.
+        return Ok(Some(String::from_utf8(line).ok()));
+    }
+    // Over the bound: pass by the rest of it, a piece at a time.
+    loop {
+        line.clear();
+        let read = input
+            .by_ref()
+            .take(MAX_LAUNCHER_LINE as u64)
+            .read_until(b'\n', &mut line)?;
+        if read == 0 || line.last() == Some(&b'\n') {
+            return Ok(Some(None));
+        }
+    }
 }
 
 /// One line to the launcher on stdout (a pipe to it, when it has one):
@@ -423,6 +555,16 @@ struct End {
     category: &'static str,
     exit_code: Option<i32>,
     signal: Option<i32>,
+}
+
+/// Confines the shim for the rest of its life
+/// ([`fenders_node::confinement::apply_shim`]): it may connect to its run
+/// channel's port, and to a resolver's.
+fn confine(spec: &Spec) -> Result<()> {
+    let channel = spec.channel.endpoint.port_or_known_default().unwrap_or(443);
+    fenders_node::confinement::apply_shim(&[channel, 53])
+        .map(|_| ())
+        .map_err(|error| format!("confining the shim: {}", error.message))
 }
 
 /// Drops the shim to the run's uid (when started as root) and makes it
@@ -531,7 +673,19 @@ fn bind_link(
     let Some(launcher) = &spec.launcher else {
         return Ok(None);
     };
-    match link::bind(&launcher.id) {
+    // A launcher that bound the run's name itself passes the socket on; one
+    // that did not leaves the shim to bind it.
+    let bound = match std::env::var(link::INHERITED) {
+        Ok(fd) => {
+            // Not for the VMM, which inherits this environment.
+            unsafe { std::env::remove_var(link::INHERITED) };
+            fd.parse()
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+                .and_then(|fd| link::inherited(&launcher.id, fd))
+        }
+        Err(_) => link::bind(&launcher.id),
+    };
+    match bound {
         Ok(listener) => Ok(Some((
             listener,
             link::Link::new(
@@ -712,14 +866,13 @@ fn start(
             .unwrap_or_default()
     };
     let tcp = list("tcp_allow");
-    let mut ports: Vec<String> = tcp
+    let ports: Vec<String> = tcp
         .iter()
         .filter_map(|a| a.rsplit_once(':').map(|(_, p)| p.to_owned()))
         .collect();
+    // Name lookups are datagrams, which the launcher sends to the resolver
+    // alone: no TCP port is opened for them.
     let dns = guest["dns_server"].is_string();
-    if dns {
-        ports.push("53".into());
-    }
     let mut command = Command::new("/proc/self/exe");
     command
         .arg("vmm")
@@ -747,7 +900,10 @@ fn start(
         .env("FENDERS_LIFETIME_SECONDS", "0")
         .stdin(Stdio::null());
     // The guest's output goes nowhere unless the launch asked for it: then to
-    // two pipes, with a third for the launcher's own messages.
+    // two pipes. The launcher's own messages have a pipe either way: what it
+    // says when it ends a guest (an exit it did not expect, a pointer outside
+    // the guest) is in the shim's log for every run.
+    let mut diagnostics_only = None;
     let captured = if output::wanted(guest) {
         let (pipes, vm_ends) = output::pipes()?;
         inheritable(vm_ends.diagnostics.as_raw_fd())?;
@@ -760,7 +916,13 @@ fn start(
             .stderr(Stdio::from(vm_ends.stderr));
         Some((pipes, vm_ends.diagnostics))
     } else {
-        command.stdout(Stdio::null()).stderr(Stdio::null());
+        let (shim_end, vm_end) = output::diagnostics_pipe()?;
+        inheritable(vm_end.as_raw_fd())?;
+        command
+            .env("FENDERS_DIAGNOSTICS_FD", vm_end.as_raw_fd().to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        diagnostics_only = Some((shim_end, vm_end));
         None
     };
     // Under the outbound byte limit the VMM admits only granted bytes, and
@@ -793,6 +955,9 @@ fn start(
     if let Some(cpu) = spec.cpu {
         command.env("FENDERS_VMM_CPU", cpu.to_string());
     }
+    if spec.share_core {
+        command.env("FENDERS_SHIM_SHARE_CORE", "1");
+    }
     if let Some(hold) = hold {
         inheritable(hold.as_raw_fd())?;
         command.env("FENDERS_HOLD_FD", hold.as_raw_fd().to_string());
@@ -814,6 +979,26 @@ fn start(
     ] {
         inheritable(fd)?;
     }
+    // The kernel holds the VM's cgroup to the run's own destinations, which
+    // Landlock (port numbers, and nothing of datagrams) cannot: whatever
+    // became of the launcher, it reaches no other. Loading that takes root;
+    // a shim without it has the launcher's check and Landlock's ports.
+    if root {
+        let addresses = tcp
+            .iter()
+            .map(|a| a.parse())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| "tcp_allow is not IPv4 addresses and ports")?;
+        let resolver = match guest["dns_server"].as_str() {
+            Some(ip) => Some(
+                ip.parse()
+                    .map_err(|_| "dns_server is not an IPv4 address")?,
+            ),
+            None => None,
+        };
+        fenders_node::destinations::limit(&vm, &addresses, resolver)
+            .map_err(os("limiting the VM's destinations"))?;
+    }
     let mut child = command.spawn().map_err(os("starting the VMM"))?;
     // Only the VMM keeps the meter's write end, so the pipe ends with it.
     drop((runtime, component, env, guest_end, meter_write));
@@ -822,6 +1007,12 @@ fn start(
         drop(vm_diagnostics);
         if let Ok(mut slot) = OUTPUT.lock() {
             *slot = Some(pipes);
+        }
+    }
+    if let Some((shim_end, vm_end)) = diagnostics_only {
+        drop(vm_end);
+        if let Ok(mut slot) = DIAGNOSTICS.lock() {
+            *slot = Some(shim_end);
         }
     }
     if let Ok(mut slot) = METER.lock() {
@@ -859,6 +1050,17 @@ fn finish(
     link: Option<(std::os::unix::net::UnixListener, Arc<link::Link>)>,
     hold: Option<OwnedFd>,
 ) -> i32 {
+    // From here the shim relays for the guest and reports for the run: it
+    // is confined to that before it starts a thread or reads anything the
+    // guest sent.
+    if let Err(error) = confine(spec) {
+        tracing::error!("{error}");
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        return 1;
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -877,6 +1079,7 @@ fn finish(
         let relay = match upstream::Upstream::new(&spec.channel) {
             Ok(upstream) => Arc::new(relay::Relay {
                 upstream,
+                guest: spec.machine.guest["host_origin"].is_string(),
                 trace_id: spec
                     .run
                     .trace_id
@@ -910,6 +1113,11 @@ fn finish(
                 };
                 let meter = read_meter(link.clone(), limit_meter);
                 let captured = capture_output(spec, &relay);
+                let launcher_says = DIAGNOSTICS
+                    .lock()
+                    .ok()
+                    .and_then(|mut slot| slot.take())
+                    .map(|pipe| tokio::spawn(output::diagnostics(pipe)));
                 let requests = serve_requests(spec, &relay);
                 if let Some(link) = &link {
                     link.update(|status| {
@@ -935,6 +1143,9 @@ fn finish(
                 .await;
                 if let Some(captured) = captured {
                     close_output(captured).await;
+                }
+                if let Some(launcher_says) = launcher_says {
+                    let _ = tokio::time::timeout(Duration::from_secs(1), launcher_says).await;
                 }
                 if let Some(meter) = meter {
                     egress = tokio::task::spawn_blocking(move || meter.join().unwrap_or_default())
@@ -1050,9 +1261,13 @@ async fn supervise(
     let pid = child.id() as libc::pid_t;
     // The VMM's exit, collected on a blocking thread: waitid needs no SIGCHLD
     // handling and the std child is not tokio's.
+    let reaped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reaping = reaped.clone();
     let mut waited = tokio::task::spawn_blocking(move || {
         let mut child = child;
-        child.wait()
+        let status = child.wait();
+        reaping.store(true, Ordering::SeqCst);
+        status
     });
     let lifetime = Duration::from_secs(
         spec.machine.guest["lifetime_seconds"]
@@ -1063,8 +1278,17 @@ async fn supervise(
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
     let mut interrupt =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
-    let kill = || unsafe {
-        libc::kill(pid, libc::SIGKILL);
+    // The VMM is signalled through a descriptor that names this process of
+    // it and no other: its pid may be given to another process once the
+    // waiter above has reaped it, and a signal by number would then go to
+    // that one.
+    let vmm = unsafe {
+        use std::os::fd::FromRawFd;
+        let fd = libc::syscall(libc::SYS_pidfd_open, pid, 0);
+        (fd >= 0).then(|| OwnedFd::from_raw_fd(fd as RawFd))
+    };
+    let kill = || {
+        kill_vmm(vmm.as_ref(), pid, reaped.load(Ordering::SeqCst));
     };
     let mut stopped = None;
     let mut limit = limit;
@@ -1129,6 +1353,26 @@ async fn supervise(
     if let Some(requests) = requests {
         requests.abort();
     }
+    // The run is over; what is left is to report it and to hold its end for
+    // the launcher, for up to an hour. A request to stop meant the run until
+    // now: from here it means the shim, which ends at once rather than
+    // ignoring it until it is killed.
+    tokio::spawn(async move {
+        let asked = |signal: Option<tokio::signal::unix::Signal>| async move {
+            match signal {
+                Some(mut signal) => {
+                    signal.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = asked(terminate) => {}
+            _ = asked(interrupt) => {}
+        }
+        tracing::warn!("stopped while holding the run's end: not reported further");
+        std::process::exit(1);
+    });
     let status = status.ok().and_then(|s| s.ok());
     let exit_code = status.and_then(|s| s.code());
     let signal = status.and_then(|s| s.signal());
@@ -1172,6 +1416,15 @@ async fn supervise(
             "NO_OUTCOME",
             "permanent",
             "the guest exited without posting an outcome".to_owned(),
+        )
+    } else if exit_code == Some(3) {
+        // Not a guest that failed: one that stepped outside what the
+        // launcher gives a guest, and was ended for it.
+        (
+            "failed",
+            "GUEST_VIOLATION",
+            "permanent",
+            "the guest broke the launcher's interface and was ended (exit 3)".to_owned(),
         )
     } else if exit_code == Some(2) {
         (
@@ -1227,7 +1480,9 @@ fn serve_requests(
 /// The control socket of a VM under the outbound byte limit: one command at
 /// a time, a line each way.
 struct Control {
-    socket: tokio::sync::Mutex<tokio::net::UnixStream>,
+    /// The socket, and how many answers are still owed to commands that
+    /// stopped waiting for theirs.
+    socket: tokio::sync::Mutex<(tokio::io::BufReader<tokio::net::UnixStream>, usize)>,
     /// Set once the run is ending: no grant is passed on after that.
     closing: std::sync::atomic::AtomicBool,
 }
@@ -1236,23 +1491,45 @@ impl Control {
     /// Sends `command` and gives the launcher's status, unless it names an
     /// error. A grant (`closing` false) is not sent once the run is ending.
     async fn command(&self, command: &str, closing: bool) -> std::result::Result<Value, String> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        let mut socket = self.socket.lock().await;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let mut held = self.socket.lock().await;
         if !closing && self.closing.load(Ordering::SeqCst) {
             return Err("the run is ending".into());
         }
+        let (socket, owed) = &mut *held;
+        // Answers come in the order of their commands. One that arrives
+        // after its command stopped waiting is that command's, not the next
+        // one's: it is read past here, never taken for this command's.
         let exchange = async {
-            socket.write_all(command.as_bytes()).await?;
-            let mut line = Vec::new();
-            tokio::io::BufReader::new(&mut *socket)
-                .read_until(b'\n', &mut line)
-                .await?;
-            Ok::<_, std::io::Error>(line)
+            socket.get_mut().write_all(command.as_bytes()).await?;
+            loop {
+                let mut line = Vec::new();
+                let read = (&mut *socket)
+                    .take(MAX_LAUNCHER_LINE as u64 + 1)
+                    .read_until(b'\n', &mut line)
+                    .await?;
+                if read == 0 {
+                    return Err(std::io::ErrorKind::UnexpectedEof.into());
+                }
+                if line.last() != Some(&b'\n') {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the launcher's answer was too long",
+                    ));
+                }
+                if *owed == 0 {
+                    return Ok::<_, std::io::Error>(line);
+                }
+                *owed -= 1;
+            }
         };
         match tokio::time::timeout(Duration::from_secs(2), exchange).await {
             Ok(Ok(line)) => budget::applied(&line),
             Ok(Err(error)) => Err(error.to_string()),
-            Err(_) => Err("the launcher did not answer".into()),
+            Err(_) => {
+                *owed += 1;
+                Err("the launcher did not answer".into())
+            }
         }
     }
 
@@ -1272,6 +1549,18 @@ struct Limit {
     control: Arc<Control>,
 }
 
+/// Whether the VMM behind `control` says it enforces the outbound byte limit
+/// it was started under. Asked a few times: it answers once it has started.
+async fn launcher_enforces(control: &Control) -> bool {
+    for _ in 0..5 {
+        match control.command("status\n", false).await {
+            Ok(status) => return status["egress_budget_enabled"] == true,
+            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+    }
+    false
+}
+
 /// For a launch under the outbound byte limit: its [`Limit`]
 /// ([`budget::enforce`]) and where that reads the VM's meter. `None` for any
 /// other launch, whose `hold` (there is none) is dropped.
@@ -1282,7 +1571,10 @@ fn limit_outbound(
     let (control, launcher) = CONTROL.lock().ok()?.take()?;
     control.set_nonblocking(true).ok()?;
     let control = Arc::new(Control {
-        socket: tokio::sync::Mutex::new(tokio::net::UnixStream::from_std(control).ok()?),
+        socket: tokio::sync::Mutex::new((
+            tokio::io::BufReader::new(tokio::net::UnixStream::from_std(control).ok()?),
+            0,
+        )),
         closing: Default::default(),
     });
     let (meter, seen) = tokio::sync::watch::channel(budget::Meter::default());
@@ -1325,7 +1617,16 @@ fn limit_outbound(
                 .map(|_| ())
         }
     };
+    let checking = control.clone();
     let task = tokio::spawn(async move {
+        // A launcher that does not say it enforces the limit would let the
+        // guest send unmetered while this shim went on asking for grants:
+        // the run ends instead, and its guest is never released.
+        if !launcher_enforces(&checking).await {
+            tracing::error!("the launcher does not enforce the outbound byte limit");
+            std::mem::forget(hold);
+            return budget::Stop::Unmeasured;
+        }
         let stop = budget::enforce(&id, seen, ask, apply, move || drop(hold)).await;
         tracing::warn!(
             code = stop.code(),
@@ -1353,15 +1654,13 @@ fn capture_output(
         async move {
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            match relay.send(&Method::POST, output::PATH, headers, body).await {
-                Ok((code, _, _)) if code.is_success() => output::Sent::Accepted,
-                // It does not serve output, or this launch may send none:
-                // asking again would change nothing.
-                Ok((code, _, _)) if code.is_client_error() || code.as_u16() == 501 => {
-                    output::Sent::Refused(code.as_u16())
-                }
-                _ => output::Sent::Retry,
-            }
+            output_answer(
+                relay
+                    .send(&Method::POST, output::PATH, headers, body)
+                    .await
+                    .ok()
+                    .map(|(code, _, _)| code.as_u16()),
+            )
         }
     };
     Some((
@@ -1464,6 +1763,179 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_vm_is_not_started_without_its_limits() {
+        let guest = json!({"cpu_percent": 150, "host_memory_mib": 96});
+        // A cgroup without the cpu controller: refused, nothing skipped.
+        let partial = tempfile::tempdir().unwrap();
+        fs::write(partial.path().join("cgroup.controllers"), "memory pids\n").unwrap();
+        let refused = cgroup_leaves(partial.path(), &guest).unwrap_err();
+        assert!(
+            refused.contains("cpu, memory and pids are all required"),
+            "{refused}"
+        );
+        assert!(!partial.path().join("vm").exists());
+
+        // With all three, every limit is written to the VM's leaf.
+        let whole = tempfile::tempdir().unwrap();
+        fs::write(
+            whole.path().join("cgroup.controllers"),
+            "cpuset cpu io memory pids\n",
+        )
+        .unwrap();
+        let vm = cgroup_leaves(whole.path(), &guest).unwrap();
+        let read = |name: &str| fs::read_to_string(vm.join(name)).unwrap();
+        assert_eq!(read("cpu.max"), "150000 100000");
+        assert_eq!(read("memory.max"), (96 * 1024 * 1024).to_string());
+        assert_eq!(read("memory.swap.max"), "0");
+        assert_eq!(read("pids.max"), "16");
+        assert_eq!(
+            fs::read_to_string(whole.path().join("cgroup.subtree_control")).unwrap(),
+            "+cpu +memory +pids"
+        );
+
+        // A second shim in the same cgroup is refused.
+        assert!(cgroup_leaves(whole.path(), &guest).is_err());
+    }
+
+    #[test]
+    fn a_line_from_the_vmm_is_read_up_to_a_bound() {
+        let mut input = b"{\"bytes\":1}\n".to_vec();
+        input.extend(std::iter::repeat_n(b'x', 3 * MAX_LAUNCHER_LINE + 7));
+        input.extend_from_slice(b"\nnext\n");
+        input.extend(std::iter::repeat_n(b'y', MAX_LAUNCHER_LINE));
+        input.extend_from_slice(b"\n\xff\nlast");
+        let mut reader = std::io::BufReader::with_capacity(64, &input[..]);
+        let mut lines = Vec::new();
+        while let Some(line) = launcher_line(&mut reader).unwrap() {
+            lines.push(line.map(|line| line.len()));
+        }
+        // The first, the one over the bound (passed by), the next, one of
+        // exactly the bound, one that is not text, and a last without newline.
+        assert_eq!(
+            lines,
+            [
+                Some(11),
+                None,
+                Some(4),
+                Some(MAX_LAUNCHER_LINE),
+                None,
+                Some(4)
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_launcher_that_does_not_enforce_the_byte_limit_is_not_trusted_with_it() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        for (answer, enforces) in [
+            ("{\"error\":null,\"egress_budget_enabled\":true}\n", true),
+            ("{\"error\":null,\"egress_budget_enabled\":false}\n", false),
+            // An older launcher: its status says nothing of a limit.
+            ("{\"error\":null,\"paused\":false}\n", false),
+            // One that does not know the command.
+            ("{\"error\":\"invalid-command\"}\n", false),
+        ] {
+            let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+            let control = Control {
+                socket: tokio::sync::Mutex::new((tokio::io::BufReader::new(ours), 0)),
+                closing: Default::default(),
+            };
+            let launcher = tokio::spawn(async move {
+                let (read, mut write) = theirs.into_split();
+                let mut commands = tokio::io::BufReader::new(read).lines();
+                while let Ok(Some(command)) = commands.next_line().await {
+                    assert_eq!(command, "status");
+                    if write.write_all(answer.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            assert_eq!(launcher_enforces(&control).await, enforces, "{answer}");
+            launcher.abort();
+        }
+        // One that never answers.
+        let (ours, _silent) = tokio::net::UnixStream::pair().unwrap();
+        let control = Control {
+            socket: tokio::sync::Mutex::new((tokio::io::BufReader::new(ours), 0)),
+            closing: Default::default(),
+        };
+        assert!(!launcher_enforces(&control).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_answer_from_the_launcher_is_not_taken_for_the_next_commands() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let control = Control {
+            socket: tokio::sync::Mutex::new((tokio::io::BufReader::new(ours), 0)),
+            closing: Default::default(),
+        };
+        // A launcher that answers its first command after the shim stopped
+        // waiting, and the rest at once, each with the command it answers.
+        let launcher = tokio::spawn(async move {
+            let (read, mut write) = theirs.into_split();
+            let mut commands = tokio::io::BufReader::new(read).lines();
+            let mut first = true;
+            while let Ok(Some(command)) = commands.next_line().await {
+                if std::mem::take(&mut first) {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                let answer = format!("{{\"error\":null,\"answers\":\"{command}\"}}\n");
+                if write.write_all(answer.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        assert_eq!(
+            control.command("one\n", false).await.unwrap_err(),
+            "the launcher did not answer"
+        );
+        // The answer to `one` arrives now. `two` gets its own.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            control.command("two\n", false).await.unwrap()["answers"],
+            "two"
+        );
+        assert_eq!(
+            control.command("three\n", false).await.unwrap()["answers"],
+            "three"
+        );
+        // An answer longer than any is: refused, not held.
+        launcher.abort();
+        let (ours, mut theirs) = tokio::net::UnixStream::pair().unwrap();
+        let control = Control {
+            socket: tokio::sync::Mutex::new((tokio::io::BufReader::new(ours), 0)),
+            closing: Default::default(),
+        };
+        let flood = tokio::spawn(async move {
+            let _ = theirs.write_all(&vec![b'x'; 4 * MAX_LAUNCHER_LINE]).await;
+            theirs
+        });
+        assert_eq!(
+            control.command("status\n", false).await.unwrap_err(),
+            "the launcher's answer was too long"
+        );
+        drop(flood);
+    }
+
+    #[test]
+    fn descriptors_the_launcher_is_not_told_of_close_on_exec() {
+        let pipe = |flags| {
+            let mut ends = [0; 2];
+            assert_eq!(unsafe { libc::pipe2(ends.as_mut_ptr(), flags) }, 0);
+            ends
+        };
+        let (kept, other) = (pipe(0), pipe(0));
+        close_others(&[0, 1, 2, kept[0], kept[1]]).unwrap();
+        let cloexec = |fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC != 0;
+        assert!(!cloexec(kept[0]) && !cloexec(kept[1]));
+        assert!(cloexec(other[0]) && cloexec(other[1]));
+        for fd in kept.into_iter().chain(other) {
+            unsafe { libc::close(fd) };
+        }
+    }
+
+    #[test]
     fn the_meter_report_is_the_last_totals_and_complete_only_when_final() {
         assert_eq!(
             meter_report("final 12 0 1 0"),
@@ -1473,5 +1945,51 @@ mod tests {
         assert_eq!(meter_report("final 12 1 1 0")["complete"], false);
         assert!(meter_report("final 12 0 0 0").is_null());
         assert!(meter_report("").is_null());
+    }
+
+    #[test]
+    fn a_vmm_is_never_given_the_root_group() {
+        assert_eq!(vmm_group(0), None);
+        assert_eq!(vmm_group(993), Some(993));
+    }
+
+    #[test]
+    fn an_endpoint_that_says_wait_has_not_refused_output() {
+        use output::Sent;
+        assert!(matches!(output_answer(Some(204)), Sent::Accepted));
+        for wait in [408, 429] {
+            assert!(matches!(output_answer(Some(wait)), Sent::Retry));
+        }
+        for refusal in [400, 403, 404, 501] {
+            assert!(matches!(output_answer(Some(refusal)), Sent::Refused(code) if code == refusal));
+        }
+        for failure in [None, Some(500), Some(503)] {
+            assert!(matches!(output_answer(failure), Sent::Retry));
+        }
+    }
+
+    #[test]
+    fn the_vmm_is_killed_as_that_process_and_never_by_a_number_gone_stale() {
+        use std::os::fd::FromRawFd;
+        use std::os::unix::process::ExitStatusExt;
+        let spawn = || Command::new("sleep").arg("60").spawn().unwrap();
+        let named = |pid: u32| unsafe {
+            OwnedFd::from_raw_fd(libc::syscall(libc::SYS_pidfd_open, pid, 0) as RawFd)
+        };
+        // Through its descriptor: killed, and once it is reaped nothing is
+        // sent, whoever has its number by then.
+        let mut child = spawn();
+        let pid = child.id() as libc::pid_t;
+        let vmm = named(child.id());
+        assert!(kill_vmm(Some(&vmm), pid, false));
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert!(!kill_vmm(Some(&vmm), pid, true));
+        // By number only while it has not been reaped.
+        let mut other = spawn();
+        let number = other.id() as libc::pid_t;
+        assert!(!kill_vmm(None, number, true));
+        assert!(other.try_wait().unwrap().is_none());
+        assert!(kill_vmm(None, number, false));
+        assert_eq!(other.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 }

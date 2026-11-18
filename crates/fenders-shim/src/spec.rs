@@ -32,6 +32,9 @@ pub struct Machine {
     pub gid: Option<u32>,
     /// The host CPU the VMM is pinned to; the first allowed one by default.
     pub cpu: Option<usize>,
+    /// Whether the VM may share a core with another run's at the same
+    /// moment. Unless told so, it has a core-scheduling cookie of its own.
+    pub share_core: bool,
     /// The guest's configuration, normalized as a node launch spec.
     pub guest: Value,
 }
@@ -124,8 +127,17 @@ impl Spec {
         only(
             &value,
             &[
-                "protocol", "run", "channel", "artifact", "runtime", "uid", "gid", "cpu", "guest",
+                "protocol",
+                "run",
+                "channel",
+                "artifact",
+                "runtime",
+                "uid",
+                "gid",
+                "cpu",
+                "guest",
                 "launcher",
+                "share_core",
             ],
             "spec",
         )?;
@@ -140,7 +152,15 @@ impl Spec {
         only(
             &value,
             &[
-                "protocol", "warm", "artifact", "runtime", "uid", "gid", "cpu", "guest",
+                "protocol",
+                "warm",
+                "artifact",
+                "runtime",
+                "uid",
+                "gid",
+                "cpu",
+                "guest",
+                "share_core",
             ],
             "warm spec",
         )?;
@@ -308,6 +328,12 @@ impl Machine {
                     .ok_or("spec: cpu must be a CPU number")? as usize,
             ),
         };
+        let share_core = match value.get("share_core") {
+            None | Some(Value::Null) => false,
+            Some(v) => v
+                .as_bool()
+                .ok_or("spec: share_core must be true or false")?,
+        };
 
         let guest = fenders_node::core::validate_spec(field(value, "guest")?)
             .map_err(|e| format!("spec: guest: {}", e.message))?;
@@ -332,6 +358,7 @@ impl Machine {
             uid,
             gid,
             cpu,
+            share_core,
             guest,
         })
     }
@@ -365,6 +392,17 @@ mod tests {
                 "env": {}
             }
         })
+    }
+
+    #[test]
+    fn a_vm_has_a_core_of_its_own_unless_told_to_share() {
+        let parse = |value: &Value| Spec::parse(&serde_json::to_vec(value).unwrap());
+        assert!(!parse(&spec()).unwrap().machine.share_core);
+        let mut shared = spec();
+        shared["share_core"] = json!(true);
+        assert!(parse(&shared).unwrap().machine.share_core);
+        shared["share_core"] = json!("yes");
+        assert!(parse(&shared).is_err());
     }
 
     #[test]

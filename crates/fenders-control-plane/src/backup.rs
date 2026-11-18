@@ -41,10 +41,43 @@ fn hex(s: &str, len: usize) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
+/// The backup key at `path`: a regular file, not a link, that only its owner
+/// can read.
 pub fn key(path: &Path) -> Result<[u8; 32]> {
-    fs::read(path)?
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.mode() & 0o077 != 0 {
+        return Err(Error::invalid(
+            "backup key must be a regular file with no group or other access",
+        ));
+    }
+    let mut bytes = Vec::new();
+    (&mut file).take(33).read_to_end(&mut bytes)?;
+    bytes
         .try_into()
         .map_err(|_| Error::invalid("backup key must contain exactly 32 bytes"))
+}
+
+/// A directory for the plaintext of a backup in the making or being
+/// restored: the encryption key and the whole database pass through it. It
+/// is its owner's alone whatever the umask, and removed when dropped.
+fn staging() -> Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(tempfile::Builder::new()
+        .prefix("fenders-backup-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()?)
+}
+
+/// An empty file only its owner can read, for a tool that is told to write
+/// its output there: `pg_dump` and `pg_restore` create theirs with the
+/// umask's mode, and keep the mode of one that exists.
+fn private_output(path: &Path) -> Result<()> {
+    Ok(private_file(path, &[])?)
 }
 pub fn random_key(path: &Path) -> Result<()> {
     let mut bytes = [0; 32];
@@ -101,6 +134,13 @@ pub fn decrypt(source: &Path, destination: &Path, key: &[u8; 32], limit: u64) ->
     reader.finish().map_err(|_| invalid())?;
     out.sync_all()?;
     Ok(())
+}
+
+/// A connection for the backup tools, to a database whose URL says how a
+/// connection to another host is secured ([`crate::db::database_url`]).
+async fn connect(dsn: &str) -> Result<sqlx::PgConnection> {
+    crate::db::database_url(dsn)?;
+    Ok(sqlx::PgConnection::connect(dsn).await?)
 }
 
 fn pg_environment(dsn: &str) -> Result<BTreeMap<String, String>> {
@@ -210,10 +250,10 @@ pub async fn create(
     let key = key(key_path)?;
     let encryption_key = crate::key_rotation::read_key(&state.join("encryption.key"))?;
     let cipher = fernet::Fernet::new(&encryption_key).ok_or_else(invalid)?;
-    let temporary = tempfile::tempdir()?;
+    let temporary = staging()?;
     let payload = temporary.path().join("payload");
     fs::create_dir(&payload)?;
-    let mut connection = sqlx::PgConnection::connect(dsn).await?;
+    let mut connection = connect(dsn).await?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(184923781)")
@@ -287,6 +327,7 @@ pub async fn create(
         }
         copy(source, &payload.join(relative))?;
     }
+    private_output(&payload.join("database.dump"))?;
     pg_command(
         "pg_dump",
         &[
@@ -326,7 +367,8 @@ pub async fn create(
     )?;
     relative.insert(0, "manifest.json".to_owned());
     let archive = temporary.path().join("plain.tar");
-    let mut tar = tar::Builder::new(fs::File::create(&archive)?);
+    private_output(&archive)?;
+    let mut tar = tar::Builder::new(fs::OpenOptions::new().write(true).open(&archive)?);
     for name in &relative {
         let path = payload.join(name);
         let mut header = tar::Header::new_ustar();
@@ -428,7 +470,7 @@ fn unpack(archive: &Path, dest: &Path, limit: u64) -> Result<Value> {
     Ok(manifest)
 }
 async fn empty_database(dsn: &str) -> Result<()> {
-    let mut db = sqlx::PgConnection::connect(dsn).await?;
+    let mut db = connect(dsn).await?;
     for query in [
         "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema'",
         "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace=n.oid WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema'",
@@ -458,7 +500,7 @@ pub async fn restore(
         ));
     }
     empty_database(dsn).await?;
-    let temporary = tempfile::tempdir()?;
+    let temporary = staging()?;
     let archive = temporary.path().join("plain.tar");
     decrypt(
         backup,
@@ -472,6 +514,7 @@ pub async fn restore(
     let schema = manifest["schema"].as_str().unwrap();
     let id = manifest["id"].as_str().unwrap();
     let sql = temporary.path().join("database.sql");
+    private_output(&sql)?;
     pg_command(
         "pg_restore",
         &[
@@ -520,6 +563,14 @@ END $http_runs$;
 DELETE FROM ingress_reservations WHERE app_id IS NOT NULL AND execution_id IS NULL;
 DELETE FROM browser_sessions;
 DELETE FROM browser_logins;
+-- An invitation open at the snapshot may have been withdrawn since, and its
+-- mail may be queued again: none is honoured or sent after a restore.
+DO $invitations$ BEGIN
+ IF to_regclass('workspace_invitations') IS NOT NULL THEN
+  UPDATE workspace_invitations SET status='revoked',revision=revision+1,decided_at=now() WHERE status='pending';
+  UPDATE invitation_outbox SET state='cancelled',lease=NULL WHERE state IN ('queued','sending','failed');
+ END IF;
+END $invitations$;
 UPDATE recovery_barrier SET active=true,backup_id='{id}',restored=now(),activated=NULL WHERE singleton;
 INSERT INTO audit(actor,action,detail) VALUES('restore','control.restore','{{"backup_id":"{id}"}}');
 "#).as_bytes())?;
@@ -581,7 +632,7 @@ pub async fn activate(dsn: &str, fenced: bool) -> Result<Value> {
             "activation requires explicit external-resource fencing confirmation",
         ));
     }
-    let mut db = sqlx::PgConnection::connect(dsn).await?;
+    let mut db = connect(dsn).await?;
     let mut tx = db.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(184923781)")
         .execute(&mut *tx)
@@ -625,6 +676,45 @@ pub async fn activate(dsn: &str, fenced: bool) -> Result<Value> {
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+
+    #[test]
+    fn staging_and_tool_outputs_are_their_owners_alone_and_a_key_is_private() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        // What a backup's plaintext passes through.
+        let staged = staging().unwrap();
+        assert_eq!(mode(staged.path()), 0o700);
+        let dump = staged.path().join("database.dump");
+        private_output(&dump).unwrap();
+        assert_eq!(mode(&dump), 0o600);
+        // A tool that opens it for writing, as pg_dump does, keeps its mode.
+        fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&dump)
+            .unwrap()
+            .write_all(b"dumped")
+            .unwrap();
+        assert_eq!(mode(&dump), 0o600);
+        assert!(
+            private_output(&dump).is_err(),
+            "never over an existing file"
+        );
+
+        // A key others can read, a link to one, or one of the wrong size.
+        let private = staged.path().join("backup.key");
+        random_key(&private).unwrap();
+        assert_eq!(key(&private).unwrap().len(), 32);
+        let link = staged.path().join("link.key");
+        std::os::unix::fs::symlink(&private, &link).unwrap();
+        assert!(key(&link).is_err());
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(key(&private).is_err());
+        let long = staged.path().join("long.key");
+        private_file(&long, &[0; 33]).unwrap();
+        assert!(key(&long).is_err());
+    }
 
     #[test]
     fn unix_socket_query_preserves_database_authority_and_rejects_unknown_options() {

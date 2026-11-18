@@ -3,13 +3,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Advisories are published against what is already locked: look weekly.
+  schedule:
+    - cron: "17 6 * * 1"
 permissions:
   contents: read
 jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: rustup show
       - run: make check
   test:
@@ -27,7 +30,7 @@ jobs:
     env:
       FENDERS_TEST_DATABASE_URL: postgresql://postgres:test@127.0.0.1:5432/fenders_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: rustup show
       # The backup tests run pg_dump and pg_restore, which must match the server.
       - name: PostgreSQL 17 client tools
@@ -39,3 +42,16 @@ jobs:
           echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
       - run: pg_dump --version
       - run: cargo test --workspace --locked -- --test-threads=4
+  advisories:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: rustup show
+      - run: cargo install cargo-audit --locked
+      # Every lockfile that is built from: the workspace's, the guest
+      # runtime's and the vendored fork's. .cargo/audit.toml lists what is
+      # known and cannot be acted on.
+      - run: |
+          for lock in Cargo.lock runtime/guest/Cargo.lock runtime/vendor/wasmtime-wasi-http/Cargo.lock; do
+            cargo audit --file "$lock"
+          done

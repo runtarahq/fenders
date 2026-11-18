@@ -14,6 +14,9 @@ struct Args {
     port: u16,
     #[arg(long, default_value_t = 16)]
     max_instances: usize,
+    /// The first of the uids runs are given; see `fenders-node`.
+    #[arg(long, default_value_t = 600_000)]
+    run_uid_base: u32,
     /// Confined compiler cgroup memory ceiling.
     #[arg(long, default_value_t = 1024)]
     compiler_memory_mib: u64,
@@ -58,6 +61,9 @@ fn entry() -> Result<(), Box<dyn std::error::Error>> {
             &args.cgroup_root,
             args.max_instances,
         )?
+        .with_run_uids(args.run_uid_base)?
+        // A developer's own node, whose runs reach services beside it.
+        .with_local_destinations(true)
         .with_compiler_limits(fenders_node::core::CompilerLimits {
             memory_mib: args.compiler_memory_mib,
             cpu_percent: args.compiler_cpu_percent,
@@ -78,7 +84,9 @@ fn entry() -> Result<(), Box<dyn std::error::Error>> {
             .as_bytes(),
         )?;
     }
-    let token = std::fs::read_to_string(&token_file)?;
+    // The token is whoever's that wrote the file: one this server did not
+    // make, in a directory someone else could write, is not taken.
+    let token = fenders_node::core::private_text(&token_file)?;
     if token.trim().len() < 32 {
         return Err("invalid token file".into());
     }

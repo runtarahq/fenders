@@ -16,7 +16,11 @@ const VERSION: &str = "v1";
 
 /// Prefix of every header name the node reserves on host-bound requests.
 pub fn reserved(name: &str) -> bool {
-    name.len() >= 8 && name[..8].eq_ignore_ascii_case("fenders-")
+    // By bytes: a name whose eighth byte is inside a character is not
+    // reserved, and must not be sliced there.
+    name.as_bytes()
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"fenders-"))
 }
 
 /// `v1.<claims>.<signature>`, both base64url; the signature covers `v1.<claims>`.
@@ -77,6 +81,24 @@ pub fn verify(token: &str, public_key: &[u8], expected_origin: &str, now: u64) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reserved_header_name_is_told_by_its_bytes() {
+        for name in ["fenders-execution-identity", "Fenders-X", "FENDERS-"] {
+            assert!(reserved(name), "{name}");
+        }
+        // Short names, other names, and one whose eighth byte is inside a
+        // character: none reserved, none a panic.
+        for name in [
+            "",
+            "fenders",
+            "x-fenders-y",
+            "fender\u{e9}-x",
+            "\u{1f600}\u{1f600}\u{1f600}",
+        ] {
+            assert!(!reserved(name), "{name}");
+        }
+    }
     use ring::{rand::SystemRandom, signature::KeyPair};
 
     const ORIGIN: &str = "https://runtara.internal:443";

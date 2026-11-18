@@ -15,6 +15,54 @@ pub const TRANSFER_BLOCK: i64 = 1024 * 1024;
 pub const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// Whose a gateway host name is, remembered for a moment.
+///
+/// Every admission is a transaction under the lock all mutations share. A
+/// request for a host name that is nobody's, or of a workspace already past
+/// its requests for the minute, needs none: what a host name is, and its
+/// workspace's limit, are read without the lock and kept here briefly, so
+/// such requests are refused before they can queue anything else behind them.
+#[derive(Default)]
+pub struct Hosts {
+    known: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Whose)>>,
+}
+
+/// Nobody's, or a workspace's with its requests a minute.
+type Whose = Option<(String, i64)>;
+
+impl Hosts {
+    /// How long a host name is remembered as nobody's, and as a workspace's.
+    const UNKNOWN: std::time::Duration = std::time::Duration::from_secs(1);
+    const KNOWN: std::time::Duration = std::time::Duration::from_secs(5);
+    /// Host names remembered at once: a flood of made-up names evicts, it
+    /// does not grow.
+    const MOST: usize = 8192;
+
+    /// `Some(None)`: nobody's. `Some(Some((workspace, requests a minute)))`.
+    /// `None`: not remembered.
+    fn get(&self, hostname: &str) -> Option<Whose> {
+        let known = self.known.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, whose) = known.get(hostname)?;
+        let kept = if whose.is_some() {
+            Self::KNOWN
+        } else {
+            Self::UNKNOWN
+        };
+        (at.elapsed() < kept).then(|| whose.clone())
+    }
+
+    fn remember(&self, hostname: &str, whose: Whose) {
+        let mut known = self.known.lock().unwrap_or_else(|e| e.into_inner());
+        if known.len() >= Self::MOST {
+            known.retain(|_, (at, _)| at.elapsed() < Self::UNKNOWN);
+            if known.len() >= Self::MOST {
+                known.clear();
+            }
+        }
+        known.insert(hostname.to_owned(), (std::time::Instant::now(), whose));
+    }
+}
+
 /// The requests each workspace was admitted in the last minute, counted in
 /// memory: a request is not a row to count. A restart forgets the count, so
 /// a workspace may then be admitted up to a minute's requests again.
@@ -65,6 +113,21 @@ impl Rates {
             _ => seconds.push_back((now, 1)),
         }
         true
+    }
+
+    /// Whether `limit` requests of `tenant` were admitted in the last minute:
+    /// what [`admit`](Self::admit) would answer, without admitting one.
+    pub fn exhausted(&self, tenant: &str, limit: i64) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Self::now(&inner);
+        let recent: i64 = inner.admitted.get(tenant).map_or(0, |seconds| {
+            seconds
+                .iter()
+                .filter(|(second, _)| second + 60 > now)
+                .map(|(_, count)| *count as i64)
+                .sum()
+        });
+        recent >= limit
     }
 
     /// Whether this is the first request admitted to `what` of `tenant` in
@@ -262,6 +325,31 @@ impl Store {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request body too large",
             ));
+        }
+        // Refused without the mutation lock: a host name that is nobody's,
+        // and a workspace past its requests for this minute.
+        let whose = match self.ingress_hosts.get(hostname) {
+            Some(whose) => whose,
+            None => {
+                let mut tx = self.transaction(false, false).await?;
+                let whose = optional(&mut tx,"SELECT t.id,t.http_requests_per_minute FROM tenants t WHERE t.id=COALESCE((SELECT tenant_id FROM routes WHERE hostname=$1 LIMIT 1),(SELECT tenant_id FROM app_http WHERE hostname=$1 LIMIT 1))",args![hostname]).await?
+                    .map(|row| (s(&row["id"]).to_owned(), n(&row["http_requests_per_minute"])));
+                drop(tx);
+                self.ingress_hosts.remember(hostname, whose.clone());
+                whose
+            }
+        };
+        match whose {
+            None => {
+                return Err(Error::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "service unavailable",
+                ));
+            }
+            Some((tenant, limit)) if self.http_rates.exhausted(&tenant, limit) => {
+                return Err(quota("ingress allowance exhausted"));
+            }
+            Some(_) => {}
         }
         let mut tx = self.transaction(true, false).await?;
         let route = Self::ingress_route(&mut tx, hostname).await?;

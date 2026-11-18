@@ -38,6 +38,9 @@ pub struct Store {
     pub pool: PgPool,
     pub(crate) state: PathBuf,
     pub(crate) cipher: fernet::Fernet,
+    /// For run-channel credentials alone, under a key of its own: nothing
+    /// encrypted with `cipher`, a tenant's secret among it, is one.
+    pub(crate) channel_cipher: fernet::Fernet,
     pub(crate) encryption_key_id: String,
     pub(crate) browser_auth: Option<std::sync::Arc<crate::browser_auth::BrowserAuth>>,
     pub(crate) invitation_mailer: Option<std::sync::Arc<crate::invitation_email::InvitationMailer>>,
@@ -55,6 +58,12 @@ pub struct Store {
     pub sockets: std::sync::Arc<crate::websocket::Sockets>,
     /// How many requests each workspace was admitted lately.
     pub http_rates: std::sync::Arc<crate::ingress::Rates>,
+    /// One heartbeat of each node at a time.
+    pub node_turns: std::sync::Arc<crate::nodes::NodeTurns>,
+    /// Mutating management requests admitted for each workspace.
+    pub api_rates: std::sync::Arc<crate::ingress::Rates>,
+    /// Whose each gateway host name is, for refusing without a transaction.
+    pub ingress_hosts: std::sync::Arc<crate::ingress::Hosts>,
     /// Refuse what no shim node can serve; see [`crate::unavailable`].
     pub(crate) refuse_unserved: bool,
     /// Files served beside the API; see [`crate::api::Asset`].
@@ -96,8 +105,38 @@ pub(crate) fn token(prefix: &str) -> Result<String> {
             .collect::<String>()
     ))
 }
+/// The most rows of each kind a workspace may have: projects, secrets, apps,
+/// and credentials (API keys among them) that still open anything.
+pub(crate) const MAX_PROJECTS: i64 = 256;
+pub(crate) const MAX_SECRETS: i64 = 4096;
+pub(crate) const MAX_APPS: i64 = 4096;
+pub(crate) const MAX_CREDENTIALS: i64 = 1024;
+
+/// When a credential issued now expires: after `$7` seconds, and no later
+/// than the tenant credential `$8` that issues it, if it is one (an operator
+/// or a browser session is not).
+pub(crate) const ISSUED_EXPIRY: &str = "LEAST(now()+make_interval(secs=>$7::double precision),COALESCE((SELECT expires FROM credentials WHERE id=$8 AND tenant_id IS NOT NULL),'infinity'::timestamptz))";
+
+/// A cipher for one `purpose`, under a key derived from the encryption key
+/// `key`: what it encrypts is nothing to the encryption key's own cipher or
+/// to another purpose's, and the reverse.
+pub(crate) fn purpose_cipher(key: &str, purpose: &str) -> Result<fernet::Fernet> {
+    use base64::Engine;
+    let invalid = || Error::invalid("invalid encryption key");
+    let engine = base64::engine::general_purpose::URL_SAFE;
+    let secret = engine.decode(key.trim()).map_err(|_| invalid())?;
+    let mut derived = [0u8; 32];
+    hkdf::Hkdf::<sha2::Sha256>::new(Some(b"fenders-purpose-key-v1"), &secret)
+        .expand(purpose.as_bytes(), &mut derived)
+        .map_err(|_| invalid())?;
+    let cipher = fernet::Fernet::new(&engine.encode(derived)).ok_or_else(invalid);
+    derived.fill(0);
+    cipher
+}
+
 impl Store {
     pub async fn connect(dsn: &str, state: &Path) -> Result<Self> {
+        crate::db::database_url(dsn)?;
         let pool = PgPoolOptions::new()
             .max_connections(16)
             .acquire_timeout(Duration::from_secs(5))
@@ -123,6 +162,7 @@ impl Store {
             pool,
             state: state.canonicalize()?,
             cipher,
+            channel_cipher: purpose_cipher(&key, crate::run_channel::PURPOSE)?,
             encryption_key_id: digest(&key),
             browser_auth: None,
             onboarding: None,
@@ -135,6 +175,9 @@ impl Store {
             run_channel: None,
             exchange: Default::default(),
             http_rates: Default::default(),
+            ingress_hosts: Default::default(),
+            api_rates: Default::default(),
+            node_turns: Default::default(),
             sockets: Default::default(),
             refuse_unserved: false,
             assets: &[],
@@ -223,6 +266,8 @@ impl Store {
             sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
         }
         crate::schema_migrations::apply(&mut tx).await?;
+        // Secrets stored before their ciphertexts named their rows.
+        crate::secret_binding::bind_stored(&mut tx, &self.cipher).await?;
         let unbound: bool = sqlx::query_scalar(
             "SELECT encryption_key_id IS NULL FROM recovery_barrier WHERE singleton",
         )
@@ -252,8 +297,16 @@ impl Store {
         if !credential.starts_with("fnd_op_") || credential.len() > 256 {
             return Err(Error::invalid("invalid operator credential file"));
         }
-        sqlx::query("INSERT INTO credentials (id,token_hash,name,role,expires) VALUES ($1,$2,'bootstrap','operator',now()+interval '30 days') ON CONFLICT (token_hash) DO NOTHING")
+        // The file is the operator credential: it is valid for as long as it
+        // is the file's, not for thirty days from the first start (after
+        // which nothing could issue or renew a tenant's credentials). One
+        // that was revoked, as a restore revokes every credential, stays so.
+        sqlx::query("INSERT INTO credentials (id,token_hash,name,role,expires) VALUES ($1,$2,'bootstrap','operator','infinity') ON CONFLICT (token_hash) DO UPDATE SET expires='infinity' WHERE NOT credentials.revoked")
             .bind(uid()).bind(digest(credential)).execute(&mut *tx).await?;
+        // And only it: a credential the file held before is revoked, so that
+        // replacing the file and starting again is how one that leaked ends.
+        sqlx::query("UPDATE credentials SET revoked=true WHERE role='operator' AND name='bootstrap' AND token_hash<>$1 AND NOT revoked")
+            .bind(digest(credential)).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(path)
     }
@@ -318,7 +371,10 @@ impl Store {
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
         let rows = sqlx::query_scalar::<_, Value>(
-            "SELECT to_jsonb(t) FROM tenants t WHERE $1 OR id=$2 ORDER BY created",
+            // A workspace's own credentials see its plan and its state, not
+            // what the operator wrote of it for itself: the reason it gave
+            // for a suspension, and the revisions of its own edits.
+            "SELECT CASE WHEN $1 THEN to_jsonb(t) ELSE to_jsonb(t)-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE $1 OR id=$2 ORDER BY created",
         )
         .bind(p.role == Role::Operator)
         .bind(&p.tenant_id)
@@ -429,6 +485,7 @@ impl Store {
         {
             return Ok(row);
         }
+        Self::metadata_limit(&mut tx, tenant, "projects", MAX_PROJECTS).await?;
         let id = uid();
         let row = sqlx::query_scalar::<_, Value>(
             "INSERT INTO projects AS p (id,tenant_id,name,display_name,slug) VALUES ($1,$2,$3,$4,$3) RETURNING to_jsonb(p)",
@@ -475,10 +532,14 @@ impl Store {
         if let Some(project) = &value.project_id {
             Self::project(&mut tx, p, tenant, project, false).await?;
         }
+        Self::metadata_limit(&mut tx, tenant, "credentials", MAX_CREDENTIALS).await?;
         let id = uid();
         let token = token("fnd_tok_")?;
-        let row = sqlx::query_scalar::<_, Value>("INSERT INTO credentials (id,token_hash,tenant_id,project_id,name,role,expires) VALUES ($1,$2,$3,$4,$5,$6,now()+make_interval(secs=>$7::double precision)) RETURNING jsonb_build_object('id',id,'role',role,'expires',expires)")
-            .bind(&id).bind(digest(&token)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(value.role.as_str()).bind(value.ttl_seconds as f64).fetch_one(&mut *tx).await?;
+        // Who issued it is recorded, so that it ends with its issuer; and one
+        // issued with a tenant credential lives no longer than that does, so a
+        // credential cannot renew itself past the lifetime it was given.
+        let row = sqlx::query_scalar::<_, Value>(&format!("INSERT INTO credentials (id,token_hash,tenant_id,project_id,name,role,expires,created_by) VALUES ($1,$2,$3,$4,$5,$6,{ISSUED_EXPIRY},$8) RETURNING jsonb_build_object('id',id,'role',role,'expires',expires)"))
+            .bind(&id).bind(digest(&token)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(value.role.as_str()).bind(value.ttl_seconds as f64).bind(&p.id).fetch_one(&mut *tx).await?;
         Self::audit(
             &mut tx,
             p,
@@ -523,7 +584,55 @@ impl Store {
     ) -> Result<Value> {
         let row = sqlx::query_scalar::<_, Value>("UPDATE credentials SET revoked=true WHERE tenant_id=$1 AND id=$2 RETURNING jsonb_build_object('id',id)")
             .bind(tenant).bind(credential).fetch_optional(&mut **tx).await?.ok_or_else(Error::missing)?;
+        // And every credential issued with it, or with one of those.
+        Self::revoke_issued_by(tx, Some(tenant), credential).await?;
         Ok(row)
+    }
+    /// Forgets the identity provider's metadata and keys, so that the next
+    /// sign-in fetches them. Public for tests, which change what their
+    /// provider serves between requests.
+    #[doc(hidden)]
+    pub async fn forget_provider_metadata(&self) {
+        if let Some(auth) = &self.browser_auth {
+            auth.forget_provider_metadata().await;
+        }
+    }
+    /// Refuses another row of `table` for `tenant` once it has `limit`.
+    ///
+    /// None of these rows is charged to an allowance, and some are never
+    /// deleted: without a bound, one workspace could fill the database that
+    /// every workspace shares.
+    pub(crate) async fn metadata_limit(
+        tx: &mut Tx,
+        tenant: &str,
+        table: &str,
+        limit: i64,
+    ) -> Result<()> {
+        let counted = match table {
+            "secrets" | "projects" | "apps" => format!("SELECT count(*) FROM {table} WHERE tenant_id=$1"),
+            // Those that still open anything.
+            "credentials" => "SELECT count(*) FROM credentials WHERE tenant_id=$1 AND NOT revoked AND expires>now()".to_owned(),
+            _ => return Err(Error::internal()),
+        };
+        let count: i64 = sqlx::query_scalar(&counted)
+            .bind(tenant)
+            .fetch_one(&mut **tx)
+            .await?;
+        if count >= limit {
+            return Err(crate::db::quota("workspace metadata limit exhausted"));
+        }
+        Ok(())
+    }
+    /// Revokes the credentials `issuer` (a credential, or a customer user)
+    /// issued, and those issued with them in turn: in `tenant`, or in every
+    /// tenant. How many it revoked.
+    pub(crate) async fn revoke_issued_by(
+        tx: &mut Tx,
+        tenant: Option<&str>,
+        issuer: &str,
+    ) -> Result<u64> {
+        Ok(sqlx::query("WITH RECURSIVE issued AS (SELECT id FROM credentials WHERE created_by=$1 AND tenant_id IS NOT NULL AND ($2::text IS NULL OR tenant_id=$2) UNION SELECT c.id FROM credentials c JOIN issued i ON c.created_by=i.id WHERE c.tenant_id IS NOT NULL) UPDATE credentials SET revoked=true WHERE NOT revoked AND id IN (SELECT id FROM issued)")
+            .bind(issuer).bind(tenant).execute(&mut **tx).await?.rows_affected())
     }
     pub async fn upload(
         &self,
@@ -658,6 +767,35 @@ impl Store {
     }
 }
 
+#[cfg(test)]
+mod purpose_cipher_tests {
+    use super::purpose_cipher;
+
+    #[test]
+    fn a_purposes_cipher_opens_nothing_of_anothers_or_of_the_keys_own() {
+        let key = fernet::Fernet::generate_key();
+        let own = fernet::Fernet::new(&key).unwrap();
+        let channel = purpose_cipher(&key, "run-channel").unwrap();
+        let other = purpose_cipher(&key, "something-else").unwrap();
+        let sealed = channel.encrypt(b"credential");
+        assert_eq!(channel.decrypt(&sealed).unwrap(), b"credential");
+        // The same purpose under the same key is the same cipher.
+        assert_eq!(
+            purpose_cipher(&key, "run-channel")
+                .unwrap()
+                .decrypt(&sealed)
+                .unwrap(),
+            b"credential"
+        );
+        assert!(other.decrypt(&sealed).is_err());
+        assert!(own.decrypt(&sealed).is_err());
+        assert!(channel.decrypt(&own.encrypt(b"secret")).is_err());
+        // Another key's cipher for the purpose opens nothing either.
+        let elsewhere = purpose_cipher(&fernet::Fernet::generate_key(), "run-channel").unwrap();
+        assert!(elsewhere.decrypt(&sealed).is_err());
+        assert!(purpose_cipher("not a key", "run-channel").is_err());
+    }
+}
 #[cfg(test)]
 mod guarded_io_tests {
     use super::guarded_blocking;

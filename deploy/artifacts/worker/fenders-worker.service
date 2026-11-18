@@ -32,6 +32,19 @@ KillMode=process
 TimeoutStopSec=100s
 UMask=0077
 LimitCORE=0
+# The agent is root: it makes cgroups, drops runs to uids of their own and
+# opens /dev/kvm for them. What it has no use for is taken away, from it and
+# from everything it starts. Not here, because the agent needs them: writable
+# /sys (its runs' cgroups), devices (/dev/kvm), and its capabilities.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

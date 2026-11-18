@@ -102,6 +102,29 @@ async fn a_launch_names_its_run_channel_and_only_its_credential_is_answered() {
         call(&router, "POST", &outcome, Some("not-a-credential")).await,
         StatusCode::UNAUTHORIZED
     );
+    // What a tenant can have the control plane encrypt is never a credential:
+    // a secret whose value is a launch's claim, read back from the database
+    // as someone with a copy of it could, is refused.
+    let forged = l
+        .store
+        .create_secret(
+            &l.operator,
+            &l.tenant,
+            &l.project,
+            json!({"name":"forged","value":format!("fenders-run-channel-v1\n{id}\n{generation}")}),
+        )
+        .await
+        .unwrap();
+    let ciphertext: String =
+        sqlx::query_scalar("SELECT convert_from(ciphertext,'UTF8') FROM secrets WHERE id=$1")
+            .bind(s(&forged["id"]))
+            .fetch_one(&l.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        call(&router, "POST", &outcome, Some(&ciphertext)).await,
+        StatusCode::UNAUTHORIZED
+    );
     // The credential is for this execution and generation alone.
     for path in [
         format!(
@@ -426,6 +449,65 @@ async fn a_launch_under_the_outbound_byte_limit_is_granted_bytes_over_its_run_ch
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(held().await, (0, 5000));
 
+    // A run holds no more than it has yet to send and one grant, whatever
+    // its workspace's allowance has: here, plenty.
+    sqlx::query("UPDATE tenants SET transfer_bytes=1073741824 WHERE id=$1")
+        .bind(&l.tenant)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    const GRANT: i64 = 16 * 1024 * 1024;
+    const MOST_UNSENT: i64 = GRANT + 256 * 1024;
+    let capped = |revision: i64, id: &'static str, sent: i64| {
+        ask(
+            path.clone(),
+            bearer.clone(),
+            json!({"expected_revision":revision,"request_id":id,"bytes":GRANT,"sent":sent}),
+        )
+    };
+    // It has sent nothing and holds 5000: a grant more is within the most.
+    let (status, granted) = capped(3, "cap-1", 0).await;
+    assert_eq!(status, StatusCode::OK, "{granted}");
+    assert_eq!(
+        (n(&granted["revision"]), n(&granted["ceiling_bytes"])),
+        (4, 5000 + GRANT)
+    );
+    // Still nothing sent: given only what brings it to the most. Asked
+    // again as it was, the same answer.
+    for _ in 0..2 {
+        let (status, granted) = capped(4, "cap-2", 0).await;
+        assert_eq!(status, StatusCode::OK, "{granted}");
+        assert_eq!(
+            (n(&granted["revision"]), n(&granted["ceiling_bytes"])),
+            (5, MOST_UNSENT)
+        );
+    }
+    // And then nothing more, though its grant is renewed.
+    let (status, granted) = capped(5, "cap-3", 0).await;
+    assert_eq!(status, StatusCode::OK, "{granted}");
+    assert_eq!(
+        (n(&granted["revision"]), n(&granted["ceiling_bytes"])),
+        (6, MOST_UNSENT)
+    );
+    // A grant's worth sent: a grant's worth more. More said sent than it
+    // could have: counted as all it had.
+    let (status, granted) = capped(6, "cap-4", GRANT).await;
+    assert_eq!(status, StatusCode::OK, "{granted}");
+    assert_eq!(n(&granted["ceiling_bytes"]), MOST_UNSENT + GRANT);
+    let (status, granted) = capped(7, "cap-5", i64::MAX).await;
+    assert_eq!(status, StatusCode::OK, "{granted}");
+    assert_eq!(n(&granted["ceiling_bytes"]), MOST_UNSENT + 2 * GRANT);
+    assert_eq!(
+        ask(
+            path.clone(),
+            bearer.clone(),
+            json!({"expected_revision":8,"request_id":"cap-6","bytes":1,"sent":-1})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+
     // The run ends having sent 1234 bytes: those are used, the rest released,
     // and its credential is granted nothing more.
     l.store.heartbeat(node, json!({"boot_id":"test-boot","confinement":HOST_CONFINEMENT,"egress_budget_contract":CONTRACT,"launcher_digest":LAUNCHER,"reports":[
@@ -433,6 +515,53 @@ async fn a_launch_under_the_outbound_byte_limit_is_granted_bytes_over_its_run_ch
          "egress":{"contract":"socket-payload-v1","boot_id":"test-boot","bytes":1234,"in_flight":0,"complete":true,"observed":chrono::Utc::now().timestamp_micros() as f64/1e6},
          "egress_authority":{"contract":CONTRACT,"boot_id":"test-boot","launcher_digest":LAUNCHER}}]})).await.unwrap();
     assert_eq!(held().await, (1234, 0));
-    assert_eq!(grant(3, "shim-7", 1).await.0, StatusCode::CONFLICT);
+    assert_eq!(grant(8, "shim-7", 1).await.0, StatusCode::CONFLICT);
+    l.finish().await;
+}
+
+/// A node the operator disabled holds the credentials of the runs it was
+/// given. They are refused while it is disabled.
+#[tokio::test]
+async fn a_disabled_nodes_launches_are_refused_on_the_run_channel() {
+    let mut l = Lab::new().await;
+    l.store = l.store.clone().with_run_channel(
+        RunChannel::new("https://control.test:9093", "fixture ca".into(), None).unwrap(),
+    );
+    let node = l.node("worker").await;
+    let op = l.create("held", json!({"artifact_id":l.artifact})).await;
+    l.store.schedule().await.unwrap();
+    let e = l.run(&op).await;
+    let (id, generation) = (s(&e["id"]), n(&e["generation"]));
+    let spec = l
+        .store
+        .assignment(s(&node["id"]), id, generation)
+        .await
+        .unwrap()["spec"]
+        .clone();
+    let credential = s(&spec["channel"]["credential"]);
+    let router = run_channel::router(l.store.clone());
+    let path = format!("/run/{id}/{generation}/v1/run/http/next");
+    let authorized = || async {
+        l.store
+            .run_channel_authorize(id, generation, credential)
+            .await
+            .map_err(|error| error.status)
+    };
+    assert_eq!(authorized().await, Ok(()));
+    l.store
+        .node_mode(&l.operator, s(&node["id"]), json!({"disabled":true}))
+        .await
+        .unwrap();
+    assert_eq!(authorized().await, Err(StatusCode::FORBIDDEN));
+    assert_eq!(
+        call(&router, "POST", &path, Some(credential)).await,
+        StatusCode::FORBIDDEN
+    );
+    // Enabled again, its runs are its own again: nothing was lost.
+    l.store
+        .node_mode(&l.operator, s(&node["id"]), json!({"disabled":false}))
+        .await
+        .unwrap();
+    assert_eq!(authorized().await, Ok(()));
     l.finish().await;
 }

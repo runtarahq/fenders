@@ -168,9 +168,32 @@ impl BrowserAuth {
         }
         let (signed, signature) = token.rsplit_once('.').ok_or_else(invalid)?;
         let signature = URL_SAFE_NO_PAD.decode(signature).map_err(|_| invalid())?;
-        // Always use fresh metadata from the configured issuer. Header-provided
-        // URLs/keys and critical extensions are refused, never followed.
-        let metadata = self.metadata().await?;
+        // The configured issuer's own keys, as last fetched. Header-provided
+        // URLs/keys and critical extensions are refused, never followed. A
+        // token whose key is not among them has them fetched again, once.
+        let mut metadata = self.metadata().await?;
+        let matching = |metadata: &CoreProviderMetadata| {
+            metadata
+                .jwks()
+                .keys()
+                .iter()
+                .filter(|key| {
+                    head.kid
+                        .as_ref()
+                        .is_none_or(|id| key.key_id().is_some_and(|kid| kid.as_str() == id))
+                        && key.key_use().is_none_or(JsonWebKeyUse::allows_signature)
+                        && head.alg.key_type().as_ref() == Some(key.key_type())
+                        && match key.signing_alg() {
+                            JsonWebKeyAlgorithm::Unspecified => true,
+                            JsonWebKeyAlgorithm::Algorithm(alg) => alg == &head.alg,
+                            JsonWebKeyAlgorithm::Unsupported => false,
+                        }
+                })
+                .count()
+        };
+        if matching(&metadata) != 1 {
+            metadata = self.metadata_refreshed().await?;
+        }
         let keys: Vec<_> = metadata
             .jwks()
             .keys()

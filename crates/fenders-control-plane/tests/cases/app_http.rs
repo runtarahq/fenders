@@ -1086,6 +1086,92 @@ async fn an_app_serves_once_its_shim_asks_and_its_requests_go_through_the_run_ch
             .unwrap();
     assert_eq!(recorded, ("failed".to_owned(), Some(502)));
 
+    // A sample request is audited as what was asked of the app: its method
+    // and its path, without the query.
+    l.store
+        .app_sample_hostname_for(
+            &l.operator,
+            &l.tenant,
+            &l.project,
+            &app,
+            "DELETE",
+            "/orders/7?token=never-kept",
+        )
+        .await
+        .unwrap();
+    let sampled: Value = sqlx::query_scalar(
+        "SELECT detail FROM audit WHERE action='app.http-sample' ORDER BY sequence DESC LIMIT 1",
+    )
+    .fetch_one(&l.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(sampled, json!({"method":"DELETE","path":"/orders/7"}));
+
+    // A target too long to fit a head the shim reads is refused before it is
+    // admitted: no reservation, nothing offered to the app.
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM app_http_runs")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    for (target, expected) in [
+        (format!("/{}", "a".repeat(9000)), StatusCode::URI_TOO_LONG),
+        (
+            format!("/?q={}", "a".repeat(9000)),
+            StatusCode::URI_TOO_LONG,
+        ),
+        (
+            format!("/{}", "a".repeat(8000)),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let fits = expected != StatusCode::URI_TOO_LONG;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(if fits { 1 } else { 30 }),
+            gateway.clone().oneshot(
+                Request::builder()
+                    .uri(target)
+                    .header("Host", host.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await;
+        match response {
+            Ok(response) => assert_eq!(response.unwrap().status(), expected),
+            // One that fits is admitted and waits for the app to take it.
+            Err(_) => assert!(fits),
+        }
+    }
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM app_http_runs")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before + 1, "only the target that fits was admitted");
+    // That one was abandoned by its client while it waited to be taken. It
+    // is settled at once rather than held until its reservation lapses, and
+    // nothing is charged for what never passed.
+    let mut held = 1i64;
+    for _ in 0..200 {
+        held = sqlx::query_scalar("SELECT count(*) FROM ingress_reservations WHERE tenant_id=$1")
+            .bind(&l.tenant)
+            .fetch_one(&l.store.pool)
+            .await
+            .unwrap();
+        if held == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(held, 0, "an abandoned request keeps no reservation");
+    let charged: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(bytes),0)::bigint FROM traffic_usage WHERE tenant_id=$1",
+    )
+    .bind(&l.tenant)
+    .fetch_one(&l.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(charged, counted, "an abandoned request is charged nothing");
+
     // A command's launch takes no requests, and neither does this one once
     // it is stopped: its credential is for a generation that is gone.
     l.lifecycle(&app, "stopped", "stop").await;
@@ -1095,6 +1181,104 @@ async fn an_app_serves_once_its_shim_asks_and_its_requests_go_through_the_run_ch
         matches!(after, StatusCode::CONFLICT | StatusCode::UNAUTHORIZED),
         "{after}"
     );
+}
+
+/// A request whose client goes away before it has an answer is settled at
+/// once: it keeps no reservation of the workspace's allowance or place among
+/// its requests, and nothing is charged for what never passed.
+#[tokio::test]
+async fn a_request_its_client_abandoned_is_settled_at_once_and_charged_nothing() {
+    let l = Lab::new().await;
+    let node = l.node("worker").await;
+    approve_component(&l, &node, true, true).await;
+    let (app, version) = define_app(&l, "abandoned").await;
+    l.http_trigger(&app, true, true, "enable-http").await;
+    l.release(&app, &version, "first").await;
+    l.http_running(&app, &node).await;
+    let host = format!("app-{app}.apps.test");
+    let gateway = api::gateway(api::ApiState {
+        store: l.store.clone(),
+        domain: "apps.test".into(),
+        tls: None,
+    });
+    let reservations = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingress_reservations WHERE tenant_id=$1")
+            .bind(&l.tenant)
+            .fetch_one(&l.store.pool)
+            .await
+            .unwrap()
+    };
+    let charged = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(sum(bytes),0)::bigint FROM traffic_usage WHERE tenant_id=$1",
+        )
+        .bind(&l.tenant)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!((reservations().await, charged().await), (0, 0));
+    let admitted = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM app_http_runs WHERE tenant_id=$1")
+            .bind(&l.tenant)
+            .fetch_one(&l.store.pool)
+            .await
+            .unwrap()
+    };
+    // Three clients ask, one after another. Nothing takes their requests:
+    // each waits until its request has been admitted and holds a
+    // reservation, then goes away, dropping the request where it stands.
+    for n in 0..3 {
+        let mut request = Box::pin(
+            gateway.clone().oneshot(
+                Request::builder()
+                    .uri(format!("/orders/{n}"))
+                    .header("Host", host.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        );
+        let mut waited = 0;
+        while admitted().await <= n {
+            let answered =
+                tokio::time::timeout(std::time::Duration::from_millis(20), &mut request).await;
+            assert!(
+                answered.is_err(),
+                "the request waits for the app to take it"
+            );
+            waited += 1;
+            assert!(waited < 1500, "the request was never admitted");
+        }
+        assert_eq!(
+            reservations().await,
+            1,
+            "an admitted request holds a reservation"
+        );
+        drop(request);
+        // Settled before the next client asks, not when it would have lapsed.
+        let mut held = 1;
+        for _ in 0..500 {
+            held = reservations().await;
+            if held == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(held, 0, "an abandoned request keeps no reservation");
+    }
+    assert_eq!(admitted().await, 3);
+    assert_eq!(
+        charged().await,
+        0,
+        "an abandoned request is charged nothing"
+    );
+    // And the workspace's requests are admitted as before: none of its
+    // places is still taken by one nobody waits for.
+    let (_, lease) = l.store.ingress_start(&host, 0).await.unwrap();
+    l.store
+        .ingress_complete(&lease, Some(0), Some(200))
+        .await
+        .unwrap();
 }
 
 /// A request's bytes are reserved against the transfer allowance a block at
@@ -1656,6 +1840,47 @@ async fn an_apps_executions_send_to_its_websocket_connections_and_no_others() {
                 .status()
         }
     };
+    // A connection that was opened and never served (its client went away
+    // before the upgrade, or recording it failed) gives its place back and
+    // its record is closed: it does not count against the app for ever.
+    let abandoned = "f".repeat(32);
+    let before = l.store.sockets.list(&sockets).len();
+    assert!(
+        l.store
+            .sockets
+            .open(&abandoned, &sockets, &l.tenant, &l.project)
+            .is_some()
+    );
+    l.store
+        .websocket_opened(&abandoned, &sockets, "/abandoned")
+        .await
+        .unwrap();
+    assert_eq!(l.store.sockets.list(&sockets).len(), before + 1);
+    drop(fenders_control_plane::websocket::held(
+        api::ApiState {
+            store: l.store.clone(),
+            domain: "apps.test".into(),
+            tls: None,
+        },
+        &format!("app-{sockets}.apps.test"),
+        &abandoned,
+    ));
+    assert_eq!(l.store.sockets.list(&sockets).len(), before);
+    let mut finished = false;
+    for _ in 0..200 {
+        finished =
+            sqlx::query_scalar("SELECT finished_at IS NOT NULL FROM app_http_runs WHERE id=$1")
+                .bind(&abandoned)
+                .fetch_one(&l.store.pool)
+                .await
+                .unwrap();
+        if finished {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(finished, "an abandoned connection's record is closed");
+
     assert_eq!(
         ask(&sockets, "/_fenders/ws/message", false).await,
         StatusCode::NOT_FOUND

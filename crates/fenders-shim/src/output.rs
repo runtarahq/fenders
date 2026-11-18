@@ -81,6 +81,12 @@ pub struct VmEnds {
     pub diagnostics: OwnedFd,
 }
 
+/// A pipe for the launcher's own messages alone, for a launch that keeps
+/// no output: the shim's end, then the VM's.
+pub fn diagnostics_pipe() -> Result<(OwnedFd, OwnedFd), String> {
+    pipe()
+}
+
 fn pipe() -> Result<(OwnedFd, OwnedFd), String> {
     let mut ends = [0; 2];
     if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
@@ -516,15 +522,69 @@ where
 }
 
 /// The launcher's own messages, one log line each, until its pipe ends.
+///
+/// A guest decides how many there are (each system call the launcher does
+/// not have is one), so they are bounded: the first [`DIAGNOSTICS_FIRST`]
+/// bytes of them are logged as they come, and after that only the last
+/// [`DIAGNOSTICS_LAST`] lines, when the pipe ends. The pipe is read to its
+/// end either way: what the launcher says as it stops (an exit it did not
+/// expect, a pointer outside the guest) is the last of it, and is never the
+/// part that is lost.
 pub async fn diagnostics(fd: OwnedFd) {
-    use tokio::io::AsyncBufReadExt;
     let Ok(pipe) = Receiver::from_owned_fd(fd) else {
         return;
     };
-    let mut lines = tokio::io::BufReader::new(pipe.take(64 * 1024)).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    let (omitted, last) = diagnostics_from(pipe, |line| {
+        tracing::info!(line, "launcher");
+    })
+    .await;
+    if omitted > 0 {
+        tracing::warn!(omitted, "launcher messages left out");
+    }
+    for line in last {
         tracing::info!(line = line.as_str(), "launcher");
     }
+}
+const DIAGNOSTICS_FIRST: usize = 64 * 1024;
+const DIAGNOSTICS_LAST: usize = 16;
+const DIAGNOSTICS_LINE: u64 = 4096;
+
+/// Reads `pipe` to its end, giving `first` each of the first lines; returns
+/// how many later lines were left out and the last ones, in order.
+async fn diagnostics_from(
+    pipe: impl tokio::io::AsyncRead + Unpin,
+    mut first: impl FnMut(&str),
+) -> (u64, Vec<String>) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let mut reader = tokio::io::BufReader::new(pipe);
+    let (mut taken, mut later) = (0usize, 0u64);
+    let mut last = std::collections::VecDeque::with_capacity(DIAGNOSTICS_LAST);
+    loop {
+        // A line is read in pieces of at most DIAGNOSTICS_LINE: one without
+        // an end is many short ones, never one that fills memory.
+        let mut line = Vec::new();
+        match (&mut reader)
+            .take(DIAGNOSTICS_LINE)
+            .read_until(b'\n', &mut line)
+            .await
+        {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let text = String::from_utf8_lossy(&line);
+        let text = text.trim_end_matches('\n');
+        if taken < DIAGNOSTICS_FIRST {
+            taken += line.len();
+            first(text);
+        } else {
+            later += 1;
+            if last.len() == DIAGNOSTICS_LAST {
+                last.pop_front();
+            }
+            last.push_back(text.to_owned());
+        }
+    }
+    (later - last.len() as u64, last.into())
 }
 
 #[cfg(test)]
@@ -877,5 +937,37 @@ mod tests {
         .await;
         assert!(waited.is_err());
         assert_eq!(started.elapsed(), CLOSE_WAIT);
+    }
+
+    #[tokio::test]
+    async fn the_launchers_last_words_are_kept_whatever_came_before() {
+        let (mut write, read) = tokio::io::duplex(1 << 16);
+        let writer = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            for n in 0..100_000 {
+                let line = format!("unsupported syscall {n}\n");
+                write.write_all(line.as_bytes()).await.unwrap();
+            }
+            write
+                .write_all(b"unexpected KVM exit 8 tid=1 rip=80006\n")
+                .await
+                .unwrap();
+        });
+        let mut first = Vec::new();
+        let (omitted, last) = diagnostics_from(read, |line| first.push(line.to_owned())).await;
+        writer.await.unwrap();
+        assert_eq!(first[0], "unsupported syscall 0");
+        assert!(first.iter().map(|l| l.len() + 1).sum::<usize>() < DIAGNOSTICS_FIRST + 64);
+        assert_eq!(last.len(), DIAGNOSTICS_LAST);
+        assert_eq!(
+            last.last().unwrap(),
+            "unexpected KVM exit 8 tid=1 rip=80006"
+        );
+        assert_eq!(first.len() as u64 + omitted + last.len() as u64, 100_001);
+        // A line with no end is taken in bounded pieces.
+        let endless = vec![b'x'; 3 * DIAGNOSTICS_LINE as usize];
+        let mut pieces = Vec::new();
+        diagnostics_from(&endless[..], |line| pieces.push(line.len())).await;
+        assert_eq!(pieces, vec![DIAGNOSTICS_LINE as usize; 3]);
     }
 }

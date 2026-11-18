@@ -52,7 +52,28 @@ pub fn router(store: Store) -> Router {
     })
 }
 pub fn management(state: ApiState) -> Router {
-    Router::new().fallback(dispatch).with_state(state)
+    Router::new()
+        .fallback(dispatch)
+        .with_state(state)
+        .layer(axum::middleware::map_response(management_headers))
+}
+
+/// Headers of every answer from the management listener, an error's among
+/// them: the API and a console's pages are served over TLS only, are never
+/// framed by another site, and their content type is not guessed at.
+async fn management_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (header::STRICT_TRANSPORT_SECURITY, "max-age=31536000"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::X_FRAME_OPTIONS, "DENY"),
+        (header::REFERRER_POLICY, "no-referrer"),
+    ] {
+        if !headers.contains_key(&name) {
+            headers.insert(name, header::HeaderValue::from_static(value));
+        }
+    }
+    response
 }
 pub fn internal(store: Store) -> Router {
     Router::new().fallback(internal_dispatch).with_state(store)
@@ -239,6 +260,18 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         store.authenticate(token).await?
     };
     crate::customer_api::authorize(&p, method, &segments)?;
+    // Every mutation leaves an audit record, and most a receipt, for good. A
+    // workspace's credentials make so many a minute between them; an
+    // operator's are its own to pace.
+    if !matches!(method, "GET" | "HEAD" | "OPTIONS")
+        && let Some(tenant) = &p.tenant_id
+        && !store.api_rates.admit(tenant, MUTATIONS_A_MINUTE)
+    {
+        return Err(Error::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many changes in a minute",
+        ));
+    }
     let key = parts
         .headers
         .get("Idempotency-Key")
@@ -249,8 +282,45 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             segments.as_slice(),
             ["v1", "tenants", _, "projects", _, "artifacts"]
         );
-    let bytes: Bytes = to_bytes(body, if is_upload { MAX_UPLOAD } else { 64 * 1024 })
+    // An upload's body is held whole, up to 16 MiB of it. Before any of it
+    // is read: the credential must be one that may upload there, the body
+    // must say it fits, and its workspace and the control plane must have a
+    // place for one more.
+    let limit = if is_upload { MAX_UPLOAD } else { 64 * 1024 };
+    let _uploading = if let ["v1", "tenants", tenant, "projects", project, "artifacts"] =
+        segments.as_slice()
+        && is_upload
+    {
+        p.scope(tenant, Some(project), true, false)?;
+        Some(UPLOADS.begin(tenant).ok_or_else(|| {
+            Error::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many uploads in progress",
+            )
+        })?)
+    } else {
+        None
+    };
+    if parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some_and(|length| length > limit)
+    {
+        return Err(Error::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body too large",
+        ));
+    }
+    let bytes: Bytes = tokio::time::timeout(BODY_WITHIN, to_bytes(body, limit))
         .await
+        .map_err(|_| {
+            Error::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "request body not received in time",
+            )
+        })?
         .map_err(|_| Error::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"))?;
     if (public_api || p.api_permissions.is_some())
         && matches!(
@@ -290,7 +360,9 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             ],
         ) => {
             let sample = parse::<HttpSample>(&bytes)?;
-            let hostname = store.app_sample_hostname(&p, tenant, project, app).await?;
+            let hostname = store
+                .app_sample_hostname_for(&p, tenant, project, app, &sample.method, &sample.path)
+                .await?;
             http_sample(&state, &hostname, sample).await?
         }
         ("GET", ["v1", "me"]) => serde_json::to_value(&p).map_err(|_| Error::internal())?,
@@ -1046,6 +1118,15 @@ async fn internal_dispatch(State(store): State<Store>, req: Request) -> Result<R
         let data = to_bytes(body, 1024 * 1024)
             .await
             .map_err(|_| Error::new(StatusCode::PAYLOAD_TOO_LARGE, "heartbeat too large"))?;
+        // One heartbeat of a node at a time, and one more waiting: each is
+        // a transaction under the lock every mutation shares, and a node
+        // that sent many at once would hold that lock from everyone.
+        let _turn = store.node_turns.take(node).await.ok_or_else(|| {
+            Error::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "a heartbeat of this node is already waiting",
+            )
+        })?;
         let assignments = store.heartbeat(node, parse(&data)?).await?;
         let (prewarm, prewarm_scopes) = store.prewarm_offer(node).await?;
         return Ok(Json(
@@ -1250,6 +1331,19 @@ async fn gateway_dispatch(State(state): State<ApiState>, req: Request) -> Result
     if req.uri().path().starts_with(crate::websocket::RESERVED) {
         return Err(Error::missing());
     }
+    // A request's head is given to the app's shim in one bounded frame: a
+    // target that could not fit beside its headers is refused here, before
+    // anything is admitted or an execution is woken for it.
+    if req
+        .uri()
+        .path_and_query()
+        .is_some_and(|target| target.as_str().len() > GATEWAY_MAX_TARGET)
+    {
+        return Err(Error::new(
+            StatusCode::URI_TOO_LONG,
+            "request target too long",
+        ));
+    }
     if crate::websocket::wanted(req.headers()) {
         let (parts, body) = req.into_parts();
         let host = gateway_host(&parts, &state.domain)?;
@@ -1345,15 +1439,40 @@ async fn gateway_dispatch_tracked(
     }
     // Admitted before any of the body is read: its bytes are reserved, a
     // block at a time, as they are passed on.
-    let (route, lease) = state
-        .store
-        .ingress_wait_request(
-            host,
-            0,
-            listed.then_some((parts.method.as_str(), parts.uri.path())),
-        )
-        .await?;
-    let meter = std::sync::Arc::new(Meter::new(state.store.clone(), &lease));
+    //
+    // From its admission the request holds a reservation, and a guard that
+    // settles it if this call is dropped (its client went away) before it
+    // reaches an outcome: for what passed, so that it neither counts as in
+    // flight until it lapses nor is charged the whole of what it had
+    // reserved. The two are made in a task of their own, which a client that
+    // goes away does not stop: dropped here between the reservation being
+    // committed and its guard being made, a request would have had the one
+    // and not the other.
+    let admission = {
+        let store = state.store.clone();
+        let host = host.to_owned();
+        let listed = listed.then(|| {
+            (
+                parts.method.as_str().to_owned(),
+                parts.uri.path().to_owned(),
+            )
+        });
+        tokio::spawn(async move {
+            let listed = listed
+                .as_ref()
+                .map(|(method, path)| (method.as_str(), path.as_str()));
+            let (route, lease) = store.ingress_wait_request(&host, 0, listed).await?;
+            let meter = std::sync::Arc::new(Meter::new(store.clone(), &lease));
+            let settle = Settle {
+                store,
+                lease: lease.clone(),
+                meter: meter.clone(),
+                armed: true,
+            };
+            Ok::<_, Error>((route, lease, meter, settle))
+        })
+    };
+    let (route, lease, meter, settle) = admission.await.map_err(|_| Error::internal())??;
     use crate::http_exchange::{Message, Offer, pipe, pump};
     // The app's shim takes the request from the exchange and posts the
     // answer there: no node is called. Neither body is held whole.
@@ -1366,6 +1485,14 @@ async fn gateway_dispatch_tracked(
             headers.insert((*name).to_owned(), json!(value));
         }
         let head = json!({"id":lease,"method":parts.method.as_str(),"path":parts.uri.path_and_query().map(|p|p.as_str()).unwrap_or("/"),"headers":headers});
+        // A head its shim would refuse to read is never offered: nothing ran.
+        if !crate::http_exchange::head_fits(&head) {
+            known = true;
+            return Err(Error::new(
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                "request head too large",
+            ));
+        }
         let timeout = std::time::Duration::from_millis(
             s(&route["request_timeout_ms"]).parse().unwrap_or(10_000),
         );
@@ -1375,10 +1502,10 @@ async fn gateway_dispatch_tracked(
         *dispatched = true;
         let (tx, request_body) = pipe();
         let admit = meter.clone();
-        upload = Some(tokio::spawn(pump(body, tx, Some(GATEWAY_UPLOAD_IDLE), move |bytes| {
+        upload = Some(AbortOnDrop(tokio::spawn(pump(body, tx, Some(GATEWAY_UPLOAD_IDLE), move |bytes| {
             let admit = admit.clone();
             async move { admit.admit(Way::In, bytes).await }
-        })));
+        }))));
         let offered = state
             .store
             .exchange
@@ -1456,9 +1583,7 @@ async fn gateway_dispatch_tracked(
                 };
                 // A request body the app did not read to its end is not
                 // waited for.
-                if let Some(upload) = upload {
-                    upload.abort();
-                }
+                drop(upload);
                 // A response cut short was not what the app sent: recorded
                 // without a status, as an outcome that is not known.
                 let recorded = whole.then_some(status);
@@ -1468,33 +1593,127 @@ async fn gateway_dispatch_tracked(
                 {
                     eprintln!("gateway request {lease} was not settled: {}", error.message);
                 }
+                // Settled here: this task is not dropped with the client's
+                // connection, and held the guard until now.
+                settle.done();
             });
             Ok(response)
         }
         Err(error) => {
-            if let Some(upload) = upload {
-                upload.abort();
-            }
+            drop(upload);
+            settle.done();
+            // What an app never took was not transferred to it; what it took
+            // and did not answer is charged what passed, not what was held.
+            let used = if *dispatched { meter.passed().await } else { 0 };
             // Never given to the app (nothing ran), or failed by it: the
             // outcome is known. Otherwise it may have run.
             if known {
-                // What an app never took was not transferred to it.
-                let used = if *dispatched { meter.passed().await } else { 0 };
                 state
                     .store
                     .ingress_complete(&lease, Some(used), Some(error.status.as_u16()))
                     .await?;
             } else {
-                state
-                    .store
-                    .ingress_finish(&lease, (!*dispatched).then_some(0))
-                    .await?;
+                state.store.ingress_finish(&lease, Some(used)).await?;
             }
             Err(error)
         }
     }
 }
 
+/// Mutating management requests a workspace's credentials may make in a
+/// minute, counted in memory as the gateway's are.
+const MUTATIONS_A_MINUTE: i64 = 600;
+
+/// How long a management request's body may take to arrive.
+const BODY_WITHIN: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Uploads whose bodies are being received: each may hold 16 MiB.
+static UPLOADS: Uploads = Uploads {
+    receiving: std::sync::Mutex::new(None),
+};
+
+struct Uploads {
+    /// For each workspace with any, how many.
+    receiving: std::sync::Mutex<Option<std::collections::HashMap<String, usize>>>,
+}
+
+/// One upload being received; no longer counted when dropped.
+struct Uploading(String);
+
+impl Uploads {
+    /// Uploads received at once, and for one workspace.
+    const MOST: usize = 16;
+    const MOST_OF_ONE: usize = 4;
+
+    fn begin(&'static self, tenant: &str) -> Option<Uploading> {
+        let mut receiving = self.receiving.lock().unwrap_or_else(|e| e.into_inner());
+        let receiving = receiving.get_or_insert_with(Default::default);
+        if receiving.values().sum::<usize>() >= Self::MOST
+            || receiving.get(tenant).copied().unwrap_or(0) >= Self::MOST_OF_ONE
+        {
+            return None;
+        }
+        *receiving.entry(tenant.to_owned()).or_default() += 1;
+        Some(Uploading(tenant.to_owned()))
+    }
+}
+
+impl Drop for Uploading {
+    fn drop(&mut self) {
+        let mut receiving = UPLOADS.receiving.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(receiving) = receiving.as_mut()
+            && let Some(count) = receiving.get_mut(&self.0)
+        {
+            *count -= 1;
+            if *count == 0 {
+                receiving.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// Settles an admitted request whose handling was dropped before it reached
+/// an outcome.
+struct Settle {
+    store: Store,
+    lease: String,
+    meter: std::sync::Arc<crate::ingress::Meter>,
+    armed: bool,
+}
+impl Settle {
+    /// The request was settled by the code that held this.
+    fn done(mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for Settle {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let (store, lease, meter) = (self.store.clone(), self.lease.clone(), self.meter.clone());
+        tokio::spawn(async move {
+            let used = meter.passed().await;
+            if let Err(error) = store.ingress_finish(&lease, Some(used)).await {
+                eprintln!(
+                    "abandoned gateway request {lease} was not settled: {}",
+                    error.message
+                );
+            }
+        });
+    }
+}
+
+/// A task that ends with whoever held it.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The longest path and query the gateway passes to an app.
+const GATEWAY_MAX_TARGET: usize = 8 * 1024;
 /// How long the gateway waits for the next piece of a request's body.
 const GATEWAY_UPLOAD_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long a response may send nothing, and how long it may last in all.

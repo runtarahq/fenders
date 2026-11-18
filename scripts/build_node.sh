@@ -8,7 +8,9 @@ cargo +1.97.0 rustc --locked --release --target x86_64-unknown-linux-musl -- -C 
 cp target/x86_64-unknown-linux-musl/release/fenders-http-runtime "$task_root/build/node/runtime.elf"
 cd "$task_root/runtime/native"
 bash build_vdso.sh "$task_root/build/vdso"
-cc -pthread -O2 -Wall -Wextra -Werror -Wa,-I"$task_root/build/vdso" launch.c -o "$task_root/build/node/launch"
+# Hardening named here, not left to the distribution compiler's defaults.
+cc -pthread -O2 -Wall -Wextra -Werror -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fPIE -pie \
+  -Wl,-z,relro,-z,now,-z,noexecstack -Wa,-I"$task_root/build/vdso" launch.c -o "$task_root/build/node/launch"
 cd "$task_root/examples/runtime-fixtures"
 cargo +1.97.0 build --locked --release --target wasm32-wasip2
 cp target/wasm32-wasip2/release/fenders-command.wasm "$task_root/build/node/example-command.wasm"

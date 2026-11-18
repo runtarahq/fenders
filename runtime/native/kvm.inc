@@ -4,14 +4,12 @@
         fprintf(DIAGNOSTICS,"KVM immediate-exit support is required\n");exit(2);
     }
     int vm = ioctl(kvm, KVM_CREATE_VM, 0); CHECK(vm);
+    vm_msr_filter(vm);
     CHECK(ioctl(vm, KVM_SET_TSS_ADDR, 0xfffbd000));
     struct kvm_userspace_memory_region region = {.slot=0,.guest_phys_addr=0,.memory_size=ram,.userspace_addr=(uintptr_t)mem};
     CHECK(ioctl(vm, KVM_SET_USER_MEMORY_REGION, &region));
     int cpu = ioctl(vm, KVM_CREATE_VCPU, 0); CHECK(cpu);
-    struct kvm_cpuid2 *cpuid = calloc(1, sizeof(*cpuid)+256*sizeof(struct kvm_cpuid_entry2));
-    if (!cpuid) fail("calloc");
-    cpuid->nent = 256;
-    CHECK(ioctl(kvm,KVM_GET_SUPPORTED_CPUID,cpuid)); CHECK(ioctl(cpu,KVM_SET_CPUID2,cpuid)); free(cpuid);
+    vcpu_features(kvm,cpu);
     struct kvm_sregs s; CHECK(ioctl(cpu,KVM_GET_SREGS,&s));
     s.cs=(struct kvm_segment){.base=0,.limit=~0u,.selector=8,.type=11,.present=1,.s=1,.l=1,.g=1};
     s.ds=s.es=s.fs=s.gs=s.ss=(struct kvm_segment){.base=0,.limit=~0u,.selector=16,.type=3,.present=1,.s=1,.db=1,.g=1};

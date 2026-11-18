@@ -106,7 +106,9 @@ up() {
     docker run -d --name "$pg" -p 127.0.0.1:$pg_port:5432 -e POSTGRES_PASSWORD=local \
       -e POSTGRES_DB=fenders -v fenders-local-pg:/var/lib/postgresql/data postgres:17-alpine >/dev/null
   fi
-  until docker exec "$pg" pg_isready -q -U postgres; do sleep 1; done
+  # Asked over TCP: on a new data directory the image first runs a server
+  # that listens on its socket alone, says it is ready there, and restarts.
+  until docker exec "$pg" pg_isready -q -h 127.0.0.1 -U postgres; do sleep 1; done
   sleep 1
   [[ -f $state/pins.json ]] || "$bin/fenders-pki" --output "$state/pki" \
     --identity control=127.0.0.1,localhost --identity node=127.0.0.1 > "$state/pins.json"
@@ -142,6 +144,7 @@ up() {
     --control-pin "$(jq -er .control "$state/pins.json")" \
     --ca "$state/pki/ca.pem" --cert "$state/pki/node.pem" --key "$state/pki/node.key" \
     --cpu-percent 400 --memory-mib 4096 --max-instances 8 --port $node_port \
+    --local-destinations --nested-virtualization \
     --metrics-listen 127.0.0.1:19464 ${WARM_RUNS:+--warm-runs "$WARM_RUNS"} "${budget[@]}" > /dev/null 2>> "$state/node.log" < /dev/null &
   sleep 1
   pgrep -f "$stage/build/fenders-node --state" | head -1 > "$state/node.pid"

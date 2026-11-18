@@ -54,6 +54,22 @@ impl Store {
         project: &str,
         app: &str,
     ) -> Result<String> {
+        self.app_sample_hostname_for(p, tenant, project, app, "GET", "/")
+            .await
+    }
+
+    /// [`app_sample_hostname`](Self::app_sample_hostname), recording the
+    /// method and path that will be sent: the audit record of a sample says
+    /// what was asked of the app, without its query.
+    pub async fn app_sample_hostname_for(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        app: &str,
+        method: &str,
+        path: &str,
+    ) -> Result<String> {
         let mut tx = self.transaction(true, false).await?;
         Self::project(&mut tx, p, tenant, project, true).await?;
         Self::app_row(&mut tx, tenant, project, app).await?;
@@ -64,7 +80,10 @@ impl Store {
             "app.http-sample",
             app,
             tenant,
-            json!({"method":"GET","path":"/"}),
+            json!({
+                "method": method.chars().take(16).collect::<String>(),
+                "path": path.split('?').next().unwrap_or("/").chars().take(2048).collect::<String>(),
+            }),
         )
         .await?;
         tx.commit().await?;

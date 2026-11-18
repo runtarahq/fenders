@@ -95,6 +95,10 @@ impl ExternalNetworkPolicy {
     }
     pub(crate) fn permits(&self, address: Ipv4Addr) -> bool {
         address.octets()[0] != 0
+            // The address a cloud platform answers its own guests on (Azure's
+            // WireServer): never an externally operated service, whatever a
+            // broad range allows, as it is never one for an HTTPS origin.
+            && address.octets() != [168, 63, 129, 16]
             && !address.is_loopback()
             && !address.is_link_local()
             && !address.is_multicast()
@@ -109,36 +113,67 @@ impl ExternalNetworkPolicy {
                 .iter()
                 .any(|range| range.contains(&address))
     }
+    /// The address `host` is pinned to: itself when it is an IPv4 address,
+    /// else the first of its permitted IPv4 addresses.
+    ///
+    /// A name is looked up as it is written, absolute: this host's search
+    /// domains do not apply, and a name of one label is not looked up at
+    /// all, so a tenant cannot ask after the names of the operator's own
+    /// network. Whatever goes wrong is answered alike, so the answer does
+    /// not say whether a name exists. Lookups in progress are bounded: each
+    /// holds a thread that a slow name server keeps until it answers.
     async fn resolve(&self, host: &str, port: u16) -> Result<Ipv4Addr> {
-        let addresses = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::net::lookup_host((host, port)),
-        )
-        .await
-        .map_err(|_| Error::invalid("external endpoint DNS lookup timed out"))?
-        .map_err(|_| Error::invalid("external endpoint host could not be resolved"))?;
+        let refused = || {
+            Error::invalid(
+                "external endpoint host did not resolve to an address the operator permits",
+            )
+        };
+        if let Ok(address) = host.parse::<Ipv4Addr>() {
+            return if self.permits(address) {
+                Ok(address)
+            } else {
+                Err(refused())
+            };
+        }
+        if !host.contains('.') || host.ends_with('.') {
+            return Err(Error::invalid(
+                "external endpoint host must be an IPv4 address or a fully qualified DNS name",
+            ));
+        }
+        static LOOKUPS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+        let lookup = LOOKUPS
+            .try_acquire()
+            .map_err(|_| quota("too many endpoint lookups in progress"))?;
+        // The lookup keeps its place until it has an answer, though the
+        // caller stops waiting after five seconds.
+        let name = format!("{host}.");
+        let looked_up = tokio::spawn(async move {
+            let _lookup = lookup;
+            tokio::net::lookup_host((name.as_str(), port))
+                .await
+                .map(|addresses| addresses.take(65).collect::<Vec<_>>())
+        });
+        let addresses = tokio::time::timeout(Duration::from_secs(5), looked_up)
+            .await
+            .map_err(|_| refused())?
+            .map_err(|_| refused())?
+            .map_err(|_| refused())?;
+        if addresses.len() > 64 {
+            return Err(refused());
+        }
         let mut ipv4 = BTreeSet::new();
-        for (index, address) in addresses.enumerate() {
-            if index >= 64 {
-                return Err(Error::invalid("external endpoint has too many DNS results"));
-            }
+        for address in addresses {
             if let IpAddr::V4(ip) = address.ip() {
                 if !self.permits(ip) {
-                    return Err(Error::invalid(
-                        "external endpoint address is outside the operator's permitted ranges",
-                    ));
+                    return Err(refused());
                 }
                 ipv4.insert(ip);
             }
         }
         if ipv4.len() > 16 {
-            return Err(Error::invalid(
-                "external endpoint has too many IPv4 addresses",
-            ));
+            return Err(refused());
         }
-        ipv4.into_iter()
-            .next()
-            .ok_or_else(|| Error::invalid("external endpoint needs a permitted IPv4 address"))
+        ipv4.into_iter().next().ok_or_else(refused)
     }
 }
 
@@ -402,6 +437,9 @@ impl Store {
             if let Some(op) = Self::idem(&mut tx, tenant, project, key, &request).await? {
                 return Ok(op);
             }
+            // A project that has its endpoints, or one of this name, is told
+            // so before anything is looked up for it.
+            Self::check_endpoint_catalog(&mut tx, tenant, project, &value["name"]).await?;
         }
         let policy = self.external_network.as_ref().ok_or_else(|| {
             Error::invalid("external endpoint access has not been enabled by the operator")
@@ -476,9 +514,72 @@ mod tests {
             "192.168.10.2",
             "169.254.169.254",
             "100.100.100.200",
+            "168.63.129.16",
         ] {
             assert!(!policy.permits(ip.parse().unwrap()), "{ip}");
         }
+        // What is not public for an HTTPS origin is not for a TCP endpoint
+        // under the shipped policy either: the two cannot drift apart.
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                for (c, d) in [
+                    (0u8, 1u8),
+                    (99, 7),
+                    (100, 9),
+                    (113, 2),
+                    (129, 16),
+                    (193, 4),
+                    (196, 3),
+                    (48, 5),
+                    (2, 8),
+                ] {
+                    let ip = Ipv4Addr::new(a, b, c, d);
+                    assert_eq!(policy.permits(ip), fenders_egress::is_public_v4(ip), "{ip}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_is_pinned_without_asking_after_the_operators_own_names() {
+        let policy = ExternalNetworkPolicy {
+            allowed_cidrs: vec!["0.0.0.0/0".parse().unwrap()],
+            denied_cidrs: vec!["10.0.0.0/8".parse().unwrap()],
+        };
+        // An address is itself, if permitted; no lookup.
+        assert_eq!(
+            policy.resolve("203.0.113.9", 5432).await.unwrap(),
+            Ipv4Addr::new(203, 0, 113, 9)
+        );
+        let denied = policy.resolve("10.1.2.3", 5432).await.unwrap_err();
+        // A name of one label, as this host's search domains would complete
+        // it, and an already absolute one, are not looked up.
+        for name in ["db", "localhost", "intranet", "db.internal."] {
+            let refused = policy.resolve(name, 5432).await.unwrap_err();
+            assert!(refused.message.contains("fully qualified"), "{name}");
+        }
+        // A name that does not exist is answered as a denied address is.
+        let missing = policy
+            .resolve("no-such-host.fenders.invalid", 5432)
+            .await
+            .unwrap_err();
+        assert_eq!(missing.message, denied.message);
+        assert_eq!(missing.status, denied.status);
+    }
+
+    #[test]
+    fn the_cloud_platforms_own_address_is_never_a_destination() {
+        // Azure's WireServer, on an address that is public by its range: an
+        // operator who allows everything and denies nothing still does not
+        // allow it, and the shipped policy denies it by name.
+        let open = ExternalNetworkPolicy {
+            allowed_cidrs: vec!["0.0.0.0/0".parse().unwrap()],
+            denied_cidrs: vec![],
+        };
+        assert!(!open.permits("168.63.129.16".parse().unwrap()));
+        assert!(open.permits("168.63.129.17".parse().unwrap()));
+        let shipped = include_str!("../../../deploy/systemd/external-network-public.json");
+        assert!(shipped.contains("168.63.129.16/32"));
     }
 
     #[test]
@@ -494,6 +595,8 @@ mod tests {
             "224.0.0.1",
             "255.255.255.255",
             "10.20.30.40",
+            // Whatever an operator allows.
+            "168.63.129.16",
         ] {
             assert!(!policy.permits(ip.parse().unwrap()), "{ip}");
         }

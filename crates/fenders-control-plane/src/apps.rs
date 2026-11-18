@@ -224,6 +224,7 @@ impl Store {
             &crate::app_runtime::command_spec(artifact, &configuration)?,
         )
         .await?;
+        Self::metadata_limit(tx, tenant, "apps", crate::store::MAX_APPS).await?;
         let app = one(
             tx,
             "INSERT INTO apps(id,tenant_id,project_id,name,configuration) VALUES($1,$2,$3,$4,$5) RETURNING *",

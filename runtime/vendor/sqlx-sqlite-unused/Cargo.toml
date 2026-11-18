@@ -1,0 +1,29 @@
+# Not SQLx's SQLite driver: an empty crate of its name and version.
+#
+# Fenders uses SQLx for PostgreSQL only, and SQLx's SQLite driver is never
+# built here. Cargo still resolves it into the lockfile, and with it a
+# `libsqlite3-sys` no newer than the driver allows. Only one crate in a build
+# may link SQLite, so that held the node's own `rusqlite` to a bundled SQLite
+# with a published advisory (RUSTSEC-2026-0459). The workspace patches the
+# driver with this crate, which links nothing; enabling SQLx's `sqlite`
+# feature would then fail to build, which is the intent.
+[package]
+name = "sqlx-sqlite"
+version = "0.8.6"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+any = []
+json = []
+offline = []
+migrate = []
+chrono = []
+time = []
+uuid = []
+regexp = []
+bundled = []
+unbundled = []
+preupdate-hook = []
+sqlx-toml = []

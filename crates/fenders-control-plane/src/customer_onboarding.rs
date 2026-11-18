@@ -47,7 +47,13 @@ pub(crate) struct VerifiedProfile {
     pub display_name: Option<String>,
 }
 
+/// Addresses stored before their letters were made lowercase.
+pub(crate) const EMAIL_CASE_MIGRATION: &str = "UPDATE customer_users SET email=lower(email) WHERE email<>lower(email); UPDATE workspace_invitations SET email=lower(email) WHERE email<>lower(email)";
+
 /// Keep mailbox aliases distinct. In particular, do not strip dots or '+' tags.
+/// Letters are made lowercase: providers deliver `Alice@` and `alice@` to one
+/// mailbox, and an invitation written with one must be found by a sign-in
+/// that reports the other.
 pub(crate) fn canonical_email(value: &str) -> Option<String> {
     let value = value.trim();
     if value.len() > 254 {
@@ -69,7 +75,7 @@ pub(crate) fn canonical_email(value: &str) -> Option<String> {
     if !domain.contains('.') || domain.ends_with('.') {
         return None;
     }
-    Some(format!("{local}@{domain}"))
+    Some(format!("{}@{domain}", local.to_ascii_lowercase()))
 }
 
 impl Store {
@@ -291,4 +297,39 @@ async fn provider_json(mut response: reqwest::Response) -> Result<Value> {
         bytes.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&bytes).map_err(|_| verification_delivery_error())
+}
+
+#[cfg(test)]
+mod email_tests {
+    use super::canonical_email;
+
+    #[test]
+    fn an_address_is_one_whatever_its_letters_case() {
+        assert_eq!(
+            canonical_email(" Alice.Smith+Ops@Example.COM "),
+            canonical_email("alice.smith+ops@example.com")
+        );
+        assert_eq!(
+            canonical_email("Alice@example.com").as_deref(),
+            Some("alice@example.com")
+        );
+        // Aliases stay distinct: dots and tags are part of the mailbox.
+        assert_ne!(
+            canonical_email("alice.smith@example.com"),
+            canonical_email("alicesmith@example.com")
+        );
+        assert_ne!(
+            canonical_email("alice+a@example.com"),
+            canonical_email("alice@example.com")
+        );
+        for invalid in [
+            "",
+            "alice",
+            "@example.com",
+            "a b@example.com",
+            "alice@localhost",
+        ] {
+            assert_eq!(canonical_email(invalid), None, "{invalid}");
+        }
+    }
 }

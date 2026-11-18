@@ -49,10 +49,78 @@ pub fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
 pub fn load(path: &Path) -> Result<Value> {
     serde_json::from_slice(&fs::read(path)?).map_err(|_| Error::internal())
 }
+/// Makes `path` a directory of this user's alone. One that is already there
+/// must be this user's own and no link: a directory someone else made, or a
+/// link to one, would be theirs to fill whatever its mode was set to.
+/// The last uid a node with `instances` runs may give out from `base`: one
+/// for each run and warm shim, and one to spare. Refused below the range of
+/// ordinary accounts or past the last usable uid.
+fn run_uid_span(base: u32, instances: usize) -> Result<u32> {
+    let slots = instances as u64 + 32 + 1;
+    let last = base as u64 + slots;
+    if base < 65_536 || last >= u32::MAX as u64 - 1 {
+        return Err(Error::invalid(
+            "--run-uid-base must leave its range between 65536 and the last uid",
+        ));
+    }
+    Ok(last as u32)
+}
+
+/// Whether any uid of `base..=last` is named in `text`: `/etc/passwd`
+/// (`name:x:UID:…`), or with `ranged` `/etc/subuid` (`name:START:COUNT`).
+fn uids_taken(text: &str, ranged: bool, base: u32, last: u32) -> bool {
+    text.lines().any(|line| {
+        let mut fields = line.split(':');
+        let (first, second) = if ranged {
+            (fields.nth(1), fields.next())
+        } else {
+            (fields.nth(2), None)
+        };
+        let Some(start) = first.and_then(|v| v.trim().parse::<u64>().ok()) else {
+            return false;
+        };
+        let count = if ranged {
+            second
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+        } else {
+            1
+        };
+        count > 0 && start <= last as u64 && start + count > base as u64
+    })
+}
+
 pub fn private_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
     fs::create_dir_all(path)?;
+    let found = fs::symlink_metadata(path)?;
+    if !found.is_dir() || found.uid() != unsafe { libc::geteuid() } {
+        return Err(Error::invalid(
+            "a state directory must be a directory of the user the node runs as, not a link",
+        ));
+    }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
+}
+
+/// The contents of `path`, a secret this user keeps: a regular file, no
+/// link, this user's own, that no one else can read.
+pub fn private_text(path: &Path) -> Result<String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let found = file.metadata()?;
+    if !found.is_file() || found.uid() != unsafe { libc::geteuid() } || found.mode() & 0o077 != 0 {
+        return Err(Error::invalid(
+            "a secret file must be a regular file of the user the node runs as, with no group or other access",
+        ));
+    }
+    let mut text = String::new();
+    (&mut file).take(4096).read_to_string(&mut text)?;
+    Ok(text)
 }
 pub fn flock(path: &Path) -> Result<fs::File> {
     use std::os::fd::AsRawFd;
@@ -62,6 +130,7 @@ pub fn flock(path: &Path) -> Result<fs::File> {
         .create(true)
         .truncate(false)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(conflict("state is already owned by another process"));
@@ -283,6 +352,7 @@ pub fn validate_spec(value: &Value) -> Result<Value> {
         if parsed.port() == 0 || parsed.to_string() != string {
             return Err(Error::invalid("invalid TCP endpoint"));
         }
+        destination(*parsed.ip())?;
         tcp.insert(string.to_owned());
     }
     out["tcp_allow"] = json!(tcp);
@@ -327,9 +397,11 @@ pub fn validate_spec(value: &Value) -> Result<Value> {
     }
     out["dns_server"] = value["dns_server"].clone();
     if !out["dns_server"].is_null() {
-        text(&out["dns_server"])?
-            .parse::<std::net::Ipv4Addr>()
-            .map_err(|_| Error::invalid("invalid DNS server"))?;
+        destination(
+            text(&out["dns_server"])?
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| Error::invalid("invalid DNS server"))?,
+        )?;
     }
     if let Some(deadline) = value.get("network_deadline_ns") {
         let deadline = integer(deadline, 0, i64::MAX)?;
@@ -397,6 +469,13 @@ pub struct Node {
     /// compiled artifact each uses: counted against instance and disk
     /// capacity and pinned in the artifact cache until they are in `runs`.
     creating: Mutex<std::collections::HashMap<String, PathBuf>>,
+    /// The host memory this node may give its runs, when it was told: warm
+    /// shims are started only within it.
+    memory_mib: Option<i64>,
+    /// Whether two runs' VMs may run on one core's hardware threads at once.
+    share_cores: bool,
+    /// Held for as long as this node gives out uids from its base.
+    run_uid_lock: Option<fs::File>,
     /// Warm shims kept per artifact and guest configuration (0: none).
     warm_runs: usize,
     /// Whether runs may ask for the outbound byte limit (`egress_budget`).
@@ -435,6 +514,31 @@ static SPAWNING: Mutex<()> = Mutex::new(());
 /// shared one host CPU (CPU 0 on Runtara Cloud's dev node, which capped it
 /// near 27 runs/s with the other eleven half idle). Runs are dealt the CPUs
 /// the node may use in turn.
+/// Whether a run may be given this host's own addresses as destinations
+/// ([`Node::with_local_destinations`]).
+static LOCAL_DESTINATIONS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// A run's destination is another host. The node's own loopback services,
+/// the link-local range (a cloud's instance metadata among it), and the
+/// unspecified, multicast and broadcast addresses are refused here whatever
+/// the launch spec's author allows: a control plane has a policy of its own
+/// for this, and the node does not depend on it having been set right.
+fn destination(ip: std::net::Ipv4Addr) -> Result<()> {
+    if on_this_host_or_link(ip) && !LOCAL_DESTINATIONS.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(Error::invalid(
+            "a destination on this host or its link is refused by this node",
+        ));
+    }
+    Ok(())
+}
+/// Loopback, link-local, unspecified, multicast or broadcast.
+fn on_this_host_or_link(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.octets()[0] == 0
+}
 fn next_vm_cpu() -> Option<usize> {
     static CPUS: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -521,6 +625,9 @@ impl Node {
             endings: Default::default(),
             meters: Default::default(),
             creating: Default::default(),
+            memory_mib: None,
+            share_cores: false,
+            run_uid_lock: None,
             warm_runs: 0,
             egress_budget: false,
             warm: Default::default(),
@@ -616,6 +723,9 @@ impl Node {
             endings: Default::default(),
             meters: Default::default(),
             creating: Default::default(),
+            memory_mib: None,
+            share_cores: false,
+            run_uid_lock: None,
             warm_runs: 0,
             egress_budget: false,
             warm: Default::default(),
@@ -624,6 +734,58 @@ impl Node {
         // The runs a previous agent started, from their shims.
         node.reattach()?;
         Ok(node)
+    }
+    /// Lets runs be given loopback and link-local destinations, which a node
+    /// refuses otherwise: for a node whose runs are meant to reach services
+    /// on its own host, as a developer's is. It holds for the process.
+    pub fn with_local_destinations(self, allowed: bool) -> Self {
+        LOCAL_DESTINATIONS.store(allowed, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+    /// Lets two runs' VMs run on the two hardware threads of one core at the
+    /// same moment. By default each VM has a core-scheduling cookie of its
+    /// own and they never do, which leaves a sibling idle when its core's
+    /// run has nothing for it: a node whose tenants trust each other, or
+    /// whose processor's sibling threads leak nothing that matters to it,
+    /// may prefer the capacity.
+    pub fn with_shared_cores(mut self, shared: bool) -> Self {
+        self.share_cores = shared;
+        self
+    }
+    /// The host memory this node's runs may take in all, as its agent
+    /// counts it: warm shims, which wait outside the agent's admissions, are
+    /// started only where they fit it beside the runs.
+    pub fn with_memory_mib(mut self, memory_mib: i64) -> Self {
+        self.memory_mib = Some(memory_mib);
+        self
+    }
+    /// Runs take their uids from `base` on, one each. Refused when any of
+    /// them is an account's on this host or within a range given to a user
+    /// for containers, and, for a node that is root (the only kind that
+    /// changes uid), when another node on this host already runs from the
+    /// same base: two would give one uid to two runs, which could then
+    /// signal each other.
+    pub fn with_run_uids(mut self, base: u32) -> Result<Self> {
+        let last = run_uid_span(base, self.max_instances)?;
+        for (file, ranged) in [("/etc/passwd", false), ("/etc/subuid", true)] {
+            let Ok(text) = fs::read_to_string(file) else {
+                continue;
+            };
+            if uids_taken(&text, ranged, base, last) {
+                return Err(Error::invalid(
+                    "run uids overlap an account or a subordinate uid range of this host: choose another --run-uid-base",
+                ));
+            }
+        }
+        if unsafe { libc::geteuid() } == 0 {
+            self.run_uid_lock = Some(
+                flock(Path::new(&format!("/run/fenders-run-uids-{base}.lock"))).map_err(|_| {
+                    Error::invalid("another node on this host runs from the same --run-uid-base")
+                })?,
+            );
+        }
+        self.run_uid_base = base;
+        Ok(self)
     }
     /// Keeps `runs` warm shims for each artifact and guest configuration a
     /// run used here: each boots its VM and loads its component before its
@@ -934,8 +1096,69 @@ impl Node {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn run_uids_are_no_accounts_and_no_container_ranges() {
+        use super::*;
+        let passwd = "root:x:0:0:root:/root:/bin/sh\nsvc:x:600010:600010::/:/bin/false\nbad line\n";
+        // An account inside the range, at its edges, and outside it.
+        assert!(uids_taken(passwd, false, 600_000, 600_049));
+        assert!(uids_taken(passwd, false, 600_010, 600_010));
+        assert!(!uids_taken(passwd, false, 600_011, 600_060));
+        assert!(!uids_taken(passwd, false, 700_000, 700_049));
+        // A range given to a user for containers: 100000 uids from 524288.
+        let subuid = "alice:524288:100000\nbob:1000000:65536\n";
+        assert!(uids_taken(subuid, true, 600_000, 600_049));
+        assert!(uids_taken(subuid, true, 624_287, 624_300));
+        assert!(!uids_taken(subuid, true, 624_288, 624_300));
+        assert!(!uids_taken(subuid, true, 900_000, 900_049));
+        assert!(uids_taken(subuid, true, 999_990, 1_000_000));
+        // The span: one uid a run and a warm shim, and never ordinary uids.
+        assert_eq!(run_uid_span(700_000, 16).unwrap(), 700_049);
+        assert!(run_uid_span(1000, 16).is_err());
+        assert!(run_uid_span(u32::MAX - 10, 16).is_err());
+    }
+
+    #[test]
+    fn state_and_secrets_are_this_users_own_and_never_a_link() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        // Made, or found as this user's: private from then on.
+        let state = root.path().join("state/inner");
+        private_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o777)).unwrap();
+        private_dir(&state).unwrap();
+        assert_eq!(
+            fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // A link, even to a directory of this user's, is not a state directory.
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&state, &link).unwrap();
+        assert!(private_dir(&link).is_err());
+        assert!(private_dir(&root.path().join("state/file")).is_ok());
+        fs::write(root.path().join("plain"), "x").unwrap();
+        assert!(private_dir(&root.path().join("plain")).is_err());
+
+        // A secret: this user's regular file that nobody else can read.
+        let token = state.join("token");
+        fenders_node_protocol::pki::private_file(&token, b"a-token-of-this-users-own").unwrap();
+        assert_eq!(private_text(&token).unwrap(), "a-token-of-this-users-own");
+        let linked = state.join("linked-token");
+        std::os::unix::fs::symlink(&token, &linked).unwrap();
+        assert!(private_text(&linked).is_err());
+        fs::set_permissions(&token, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(private_text(&token).is_err());
+        // The lock file is not followed through a link either.
+        let lock = state.join("lock");
+        std::os::unix::fs::symlink(root.path().join("elsewhere"), &lock).unwrap();
+        assert!(flock(&lock).is_err());
+        assert!(!root.path().join("elsewhere").exists());
+    }
+
+    #[test]
     fn compiler_failure_requires_explicit_exit_and_matching_bounded_receipt() {
         use super::*;
+
         let hash = "a".repeat(64);
         let receipt = json!({"format_version":1,"runtime":fenders_node_protocol::artifacts::RUNTIME,"digest":hash,"bytes":8,"error":"unsupported-imports"});
         let bytes = serde_json::to_vec(&receipt).unwrap();
@@ -1058,6 +1281,13 @@ mod tests {
             json!({"run_context":{"trigger":"schedule","trigger_time":"2026-10-21T09:00:00Z","run_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","schedule":"* * * * *","schedule_timezone":"Mars/Base"}}),
             json!({"tcp_allow":["example.test:5432"]}),
             json!({"tcp_allow":["127.0.0.1:0"]}),
+            // This host and its link are not a run's destinations.
+            json!({"tcp_allow":["127.0.0.1:5432"]}),
+            json!({"tcp_allow":["169.254.169.254:80"]}),
+            json!({"tcp_allow":["0.0.0.0:80"]}),
+            json!({"tcp_allow":["224.0.0.1:80"]}),
+            json!({"dns_server":"127.0.0.53"}),
+            json!({"dns_server":"169.254.169.253"}),
             json!({"http_allow":["https://user:pass@example.test/"]}),
             json!({"http_allow":["https://example.test/path"]}),
             json!({"surprise":true}),
@@ -1128,5 +1358,33 @@ mod tests {
             validate_spec(&json!({"artifact":"a".repeat(64),"egress_budget":true})).unwrap()["egress_budget"],
             true
         );
+    }
+}
+#[cfg(test)]
+mod destination_tests {
+    #[test]
+    fn a_runs_destination_is_not_this_host_or_its_link() {
+        let local = |ip: &str| super::on_this_host_or_link(ip.parse().unwrap());
+        for ip in [
+            "127.0.0.1",
+            "127.0.0.53",
+            "169.254.169.254",
+            "0.0.0.0",
+            "0.1.2.3",
+            "224.0.0.1",
+            "255.255.255.255",
+        ] {
+            assert!(local(ip), "{ip}");
+        }
+        // Other hosts, a private network's among them, are destinations.
+        for ip in [
+            "10.50.0.2",
+            "192.168.1.9",
+            "172.16.4.4",
+            "1.1.1.1",
+            "169.253.0.1",
+        ] {
+            assert!(!local(ip), "{ip}");
+        }
     }
 }

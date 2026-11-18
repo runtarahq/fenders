@@ -39,13 +39,15 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "=0.10.4"
 # Auth0 profile claims may serialize updated_at as RFC 3339.
-openidconnect = { version = "=4.0.1", default-features = false, features = ["accept-rfc3339-timestamps"] }
-lettre = { version = "=0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "ring", "webpki-roots"] }
+openidconnect = { version = "=4.1.0", default-features = false, features = ["accept-rfc3339-timestamps"] }
+lettre = { version = "=0.11.24", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "ring", "webpki-roots"] }
 
 [dev-dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 tokio = { workspace = true, features = ["process", "test-util"] }
 fenders-component = { path = "../fenders-component" }
 wat = "=1.239.0"
 tower = { version = "=0.5.3", features = ["util"] }
 tempfile = "3"
+# Only for tests/rsa_verify_only.rs: the workspace patches this crate.
+rsa = { version = "0.9", features = ["getrandom"] }

@@ -67,7 +67,9 @@ multicast and reserved ranges. The conservative exclusions follow the
 [IANA special-purpose registry](https://www.iana.org/assignments/iana-ipv4-special-registry/);
 the entire `192.0.0.0/24` protocol-assignment block is excluded, including its
 public exceptions. Add any platform-owned public control-plane/worker addresses
-to `denied_cidrs` before use. Denials override allows; IPv6 is not supported here.
+to `denied_cidrs` before use, and to `denied_ipv4` of the `--public-egress`
+configuration as well: HTTPS origins are checked against that list, not this
+one. Denials override allows; IPv6 is not supported here.
 This policy controls new registrations, not retroactive revocation of existing
 pinned endpoints. Revoke existing app connections explicitly when removing access.
 

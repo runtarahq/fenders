@@ -43,7 +43,7 @@ impl Pool {
         let connection = match idle {
             Some(connection) => connection,
             None => {
-                let connection = Connection::open(path)?;
+                let mut connection = Connection::open(path)?;
                 connection.busy_timeout(busy)?;
                 // SQLite's own wait backs off to tens of milliseconds between
                 // tries, so a writer that loses a race for the lock sleeps far

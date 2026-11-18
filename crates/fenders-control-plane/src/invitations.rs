@@ -33,6 +33,18 @@ CREATE TABLE IF NOT EXISTS invitation_outbox (
 ";
 const VIEW: &str = "SELECT i.*,CASE WHEN i.status='pending' AND i.expires<=now() THEN 'expired' ELSE i.status END AS status,t.display_name AS workspace_name,p.display_name AS project_name,o.state AS delivery,o.sent_at FROM workspace_invitations i JOIN tenants t ON t.id=i.tenant_id LEFT JOIN projects p ON p.id=i.project_id JOIN invitation_outbox o ON o.invitation_id=i.id";
 
+/// An invitation as the person invited sees it: what it offers and from
+/// which workspace, without the workspace's own bookkeeping of it (who sent
+/// it, under which request key, and the records it led to).
+fn for_recipient(mut invitation: Value) -> Value {
+    if let Some(fields) = invitation.as_object_mut() {
+        for internal in ["request_key", "inviter_id", "recipient_id", "membership_id"] {
+            fields.remove(internal);
+        }
+    }
+    invitation
+}
+
 impl Store {
     pub fn with_invitation_email(mut self, config: InvitationEmailConfig) -> Result<Self> {
         self.invitation_mailer = Some(Arc::new(InvitationMailer::new(config)?));
@@ -234,11 +246,13 @@ impl Store {
                 args![id, user["email"]],
             )
             .await?;
-            return Self::invitation_view(&mut tx, id).await;
+            return Ok(for_recipient(Self::invitation_view(&mut tx, id).await?));
         }
-        Ok(
-            json!({"items":rows(&mut tx,&format!("{VIEW} WHERE i.email=$1 AND i.status='pending' AND i.expires>now() ORDER BY i.created DESC LIMIT 100"),args![user["email"]]).await?}),
-        )
+        let items: Vec<Value> = rows(&mut tx,&format!("{VIEW} WHERE i.email=$1 AND i.status='pending' AND i.expires>now() ORDER BY i.created DESC LIMIT 100"),args![user["email"]]).await?
+            .into_iter()
+            .map(for_recipient)
+            .collect();
+        Ok(json!({ "items": items }))
     }
     pub(crate) async fn decide_invitation(
         &self,

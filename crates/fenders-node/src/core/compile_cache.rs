@@ -29,6 +29,11 @@ pub(super) const RECORDS: [(&str, &str); 2] = [
 ];
 // Bound inventory work, as for compiled artifacts.
 const MAX_INVENTORY: usize = 1_000_000;
+/// The most entries the compile cache keeps across all scopes. A node that
+/// accounts its state by project quota inventories at most 100,000 files of
+/// it before each admission: this, one compile's additions and the compiled
+/// artifacts beside them stay under that.
+const MAX_ENTRIES: usize = 48_000;
 /// The most entries one compile adds to its store: a large first compile
 /// adds about 14,000 across its two passes.
 pub(super) const MERGE_ENTRIES: usize = 32_768;
@@ -143,22 +148,40 @@ pub(super) fn prune_within(node: &Node, inventory: usize) -> Result<()> {
 }
 
 fn prune_scopes(node: &Node, inventory: usize) -> Result<()> {
-    let root = node.state.join("compile-cache");
+    prune_tree(
+        &node.state.join("compile-cache"),
+        &node.compiler_id,
+        node.compile_cache_bytes,
+        MAX_ENTRIES,
+        inventory,
+    )
+}
+
+/// Removes the least recently used scopes of the compile cache at `root`
+/// until what is left takes at most `bytes` of space and `entries` files,
+/// and every store of a compiler other than `compiler`.
+fn prune_tree(
+    root: &Path,
+    compiler: &str,
+    bytes: u64,
+    entries: usize,
+    inventory: usize,
+) -> Result<()> {
     if !root.is_dir() {
         return Ok(());
     }
     let mut seen = 0;
     let mut scopes = Vec::new();
-    for compiler in fs::read_dir(&root)? {
-        let compiler = compiler?;
-        if compiler.file_name().to_str() != Some(node.compiler_id.as_str()) {
-            remove(&compiler.path())?;
+    for found in fs::read_dir(root)? {
+        let found = found?;
+        if found.file_name().to_str() != Some(compiler) {
+            remove(&found.path())?;
             continue;
         }
-        for scope in fs::read_dir(compiler.path())? {
+        for scope in fs::read_dir(found.path())? {
             let scope = scope?;
             let metadata = fs::symlink_metadata(scope.path())?;
-            let mut bytes = 0;
+            let (mut size, mut count) = (0, 0usize);
             if metadata.is_dir() {
                 for shard in fs::read_dir(scope.path())? {
                     let shard = shard?;
@@ -175,21 +198,27 @@ fn prune_scopes(node: &Node, inventory: usize) -> Result<()> {
                         }
                         use std::os::unix::fs::MetadataExt;
                         let metadata = fs::symlink_metadata(file?.path())?;
-                        bytes += (metadata.blocks() * 512).max(allocated(metadata.len()));
+                        size += (metadata.blocks() * 512).max(allocated(metadata.len()));
+                        count += 1;
                     }
                 }
             }
-            scopes.push((metadata.modified()?, bytes, scope.path()));
+            scopes.push((metadata.modified()?, size, count, scope.path()));
         }
     }
-    let mut total: u64 = scopes.iter().map(|(_, bytes, _)| bytes).sum();
+    let mut total: u64 = scopes.iter().map(|(_, size, ..)| size).sum();
+    let mut files: usize = scopes.iter().map(|(_, _, count, _)| count).sum();
     scopes.sort();
-    for (_, bytes, path) in scopes {
-        if total <= node.compile_cache_bytes {
+    for (_, size, count, path) in scopes {
+        // By space and by number of files: many small entries fit a space
+        // budget and still outgrow what a node inventories before each
+        // admission, after which it admits nothing.
+        if total <= bytes && files <= entries {
             break;
         }
         remove(&path)?;
-        total -= bytes;
+        total -= size;
+        files -= count;
     }
     Ok(())
 }
@@ -212,6 +241,47 @@ mod tests {
         out.extend((value.len() as u32).to_le_bytes());
         out.extend(value);
         out
+    }
+    #[test]
+    fn the_cache_is_pruned_by_files_as_well_as_by_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("compile-cache");
+        let scope = |compiler: &str, name: &str, files: usize| {
+            let shard = root.join(compiler).join(name).join("ab");
+            fs::create_dir_all(&shard).unwrap();
+            for n in 0..files {
+                fs::write(shard.join(format!("{n:04}")), b"x").unwrap();
+            }
+            // Its last use: later for each scope made.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let touched = fs::File::open(root.join(compiler).join(name)).unwrap();
+            touched.set_modified(std::time::SystemTime::now()).unwrap();
+        };
+        scope("this", "oldest", 30);
+        scope("this", "middle", 30);
+        scope("this", "newest", 30);
+        scope("another-compiler", "stale", 5);
+        let kept = || {
+            let mut names: Vec<_> = fs::read_dir(root.join("this"))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        // Within both budgets: only another compiler's store goes.
+        prune_tree(&root, "this", u64::MAX, 90, 1000).unwrap();
+        assert_eq!(kept(), ["middle", "newest", "oldest"]);
+        assert!(!root.join("another-compiler").exists());
+        // Over the file budget, though far under the space budget: the least
+        // recently used scopes go until what is left fits.
+        prune_tree(&root, "this", u64::MAX, 60, 1000).unwrap();
+        assert_eq!(kept(), ["middle", "newest"]);
+        prune_tree(&root, "this", u64::MAX, 59, 1000).unwrap();
+        assert_eq!(kept(), ["newest"]);
+        // Over the space budget, as before.
+        prune_tree(&root, "this", 1, usize::MAX, 1000).unwrap();
+        assert!(kept().is_empty());
     }
     #[test]
     fn whole_records_are_stored_up_to_the_first_cut_short() {

@@ -28,6 +28,10 @@ pub const TRACE_HEADER: &str = "runtara-trace-id";
 
 pub struct Relay {
     pub upstream: Upstream,
+    /// Whether the launch gave its guest a host-bound origin. Without one no
+    /// component can name the relay, and nothing asked of it is forwarded:
+    /// only code that had left the component's sandbox could be asking.
+    pub guest: bool,
     pub trace_id: Option<HeaderValue>,
     /// Set once the endpoint accepted the guest's own outcome.
     pub outcome_posted: AtomicBool,
@@ -65,6 +69,38 @@ fn filtered(headers: &HeaderMap) -> HeaderMap {
     out
 }
 
+/// Whether `path` is a call the shim makes for the run and a guest never
+/// does: the run's output, its outbound byte grants, and the requests of an
+/// HTTP run. With them a guest could close or forge its own output, take
+/// the whole of its workspace's transfer allowance, or take requests past
+/// the shim. Its own outcome, and whatever else its endpoint serves it, it
+/// may reach.
+fn shims_own(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    path == crate::output::PATH
+        || path == crate::budget::PATH
+        || path == "/v1/run/http"
+        || path.starts_with("/v1/run/http/")
+}
+
+/// Methods a guest's request may have.
+fn guest_method(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::GET | Method::HEAD | Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
+}
+
+/// Whether a request that came up the relay from the VM is passed on. The
+/// relay's socket is made for every launch, since the shim uses the same
+/// path for the run's own calls; a launch that did not ask for it
+/// (`enabled` false) has nothing answered there, whatever in the guest
+/// reached it. One that did has its own calls, by the methods a guest uses,
+/// and none of the shim's.
+fn guest_may(enabled: bool, method: &Method, path: &str) -> bool {
+    enabled && guest_method(method) && !shims_own(path)
+}
+
 fn status(code: StatusCode) -> Response<Full<Bytes>> {
     let mut response = Response::new(Full::default());
     *response.status_mut() = code;
@@ -96,6 +132,11 @@ impl Relay {
             .to_owned();
         if fenders_node::host_origin::confined(&path).is_err() {
             return status(StatusCode::BAD_REQUEST);
+        }
+        // The guest speaks to its run channel with the run's credential, and
+        // some of what that credential opens is the shim's alone.
+        if !guest_may(self.guest, &parts.method, parts.uri.path()) {
+            return status(StatusCode::FORBIDDEN);
         }
         let Ok(body) = Limited::new(body, REQUEST_LIMIT).collect().await else {
             return status(StatusCode::PAYLOAD_TOO_LARGE);
@@ -150,6 +191,60 @@ pub async fn serve(stream: tokio::net::UnixStream, relay: Arc<Relay>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_guest_reaches_its_outcome_and_not_the_shims_own_calls() {
+        for own in [
+            "/v1/run/output",
+            "/v1/run/output/",
+            "/v1/run/egress",
+            "/v1/run/http/next",
+            "/v1/run/http/response/0123456789abcdef",
+            "/v1/run/http",
+        ] {
+            assert!(shims_own(own), "{own}");
+        }
+        assert_eq!(crate::ingress::NEXT, "/v1/run/http/next");
+        assert!(crate::ingress::RESPONSE.starts_with("/v1/run/http/"));
+        for guests in [
+            OUTCOME_PATH,
+            "/v1/run/ws",
+            "/v1/run/ws/0123456789abcdef",
+            "/v1/run/outputs",
+            "/v1/run/httpx",
+            "/anything/else",
+        ] {
+            assert!(!shims_own(guests), "{guests}");
+        }
+        for method in [Method::GET, Method::POST, Method::DELETE, Method::PUT] {
+            assert!(guest_method(&method));
+        }
+        for method in [Method::CONNECT, Method::TRACE, Method::OPTIONS] {
+            assert!(!guest_method(&method));
+        }
+    }
+
+    #[test]
+    fn a_launch_that_did_not_ask_for_the_relay_is_answered_nothing_there() {
+        // Not asked for: nothing is passed on, the guest's own outcome
+        // included, by any method.
+        for method in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+            for path in [
+                OUTCOME_PATH,
+                "/v1/run/ws",
+                "/anything/else",
+                "/v1/run/egress",
+            ] {
+                assert!(!guest_may(false, &method, path), "{method} {path}");
+            }
+        }
+        // Asked for: its own calls, and still none of the shim's.
+        assert!(guest_may(true, &Method::POST, OUTCOME_PATH));
+        assert!(guest_may(true, &Method::GET, "/anything/else"));
+        assert!(!guest_may(true, &Method::POST, "/v1/run/egress"));
+        assert!(!guest_may(true, &Method::POST, "/v1/run/output"));
+        assert!(!guest_may(true, &Method::CONNECT, OUTCOME_PATH));
+    }
 
     #[test]
     fn the_guest_cannot_set_credentials_bindings_or_trace() {

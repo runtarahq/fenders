@@ -19,7 +19,7 @@ clap.workspace = true
 url = "2"
 libc = "0.2"
 libloading = "0.8"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 base64 = "0.22"
 tempfile = "3"
 subtle = "2"
@@ -35,3 +35,13 @@ fenders-control-plane = { path = "../fenders-control-plane" }
 fenders-component = { path = "../fenders-component" }
 sqlx.workspace = true
 time = "0.3"
+
+# Confinement is applied by a single-threaded process: no test harness.
+[[test]]
+name = "shim_confinement"
+harness = false
+
+# Needs root to load its programs: no harness, and it says when it skipped.
+[[test]]
+name = "destination_limits"
+harness = false

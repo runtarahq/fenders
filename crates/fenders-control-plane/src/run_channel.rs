@@ -44,7 +44,7 @@ use serde_json::{Value, json};
 
 /// The run protocol version the shim speaks.
 const PROTOCOL: i64 = 1;
-const PURPOSE: &str = "fenders-run-channel-v1";
+pub(crate) const PURPOSE: &str = "fenders-run-channel-v1";
 /// Where a shim posts a run's outcome, under the launch's endpoint.
 const OUTCOME: &str = "v1/run/outcome";
 const MAX_OUTCOME_BYTES: usize = 64 * 1024;
@@ -154,9 +154,11 @@ impl Store {
         generation: i64,
         ask: Value,
     ) -> Result<Value> {
+        // `sent`, which a shim may give, is what the launcher's meter says
+        // the run has sent: a grant is then held to what is yet to be sent.
         crate::db::fields(
             &ask,
-            &["expected_revision", "request_id", "bytes"],
+            &["expected_revision", "request_id", "bytes", "sent"],
             &["expected_revision", "request_id", "bytes"],
         )?;
         let mut tx = self.transaction(false, false).await?;
@@ -171,13 +173,16 @@ impl Store {
         let node = placed["node_id"]
             .as_str()
             .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
-        let request = json!({
+        let mut request = json!({
             "boot_id": placed["boot_id"],
             "action": "grant",
             "expected_revision": ask["expected_revision"],
             "request_id": ask["request_id"],
             "bytes": ask["bytes"],
         });
+        if let Some(sent) = ask.get("sent") {
+            request["sent"] = sent.clone();
+        }
         match self
             .egress_budget(node, execution, generation, request)
             .await
@@ -233,7 +238,7 @@ impl Store {
             "run": {"execution": execution, "generation": generation},
             "channel": {
                 "endpoint": format!("{}/run/{execution}/{generation}", channel.endpoint),
-                "credential": self.cipher.encrypt(claim(execution, generation).as_bytes()),
+                "credential": self.channel_cipher.encrypt(claim(execution, generation).as_bytes()),
                 "trust": trust,
             },
         }))
@@ -249,20 +254,29 @@ impl Store {
     ) -> Result<()> {
         identity(execution)?;
         let issued = self
-            .cipher
+            .channel_cipher
             .decrypt(credential)
             .map_err(|_| Error::unauthorized())?;
         if issued != claim(execution, generation).as_bytes() {
             return Err(Error::unauthorized());
         }
         let mut tx = self.transaction(false, false).await?;
-        optional(
+        let launch = optional(
             &mut tx,
-            "SELECT id FROM executions WHERE id=$1 AND generation=$2 AND reserved",
+            "SELECT n.disabled FROM executions e LEFT JOIN nodes n ON n.id=e.node_id WHERE e.id=$1 AND e.generation=$2 AND e.reserved",
             args![execution, generation],
         )
         .await?
         .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
+        // A disabled node is told nothing more and heard from no more, so
+        // nothing moves its runs on: their credentials, which it holds, are
+        // refused for as long as it is disabled.
+        if launch["disabled"] != false {
+            return Err(Error::new(
+                StatusCode::FORBIDDEN,
+                "the launch's node is disabled",
+            ));
+        }
         Ok(())
     }
 }
@@ -365,9 +379,12 @@ async fn dispatch(State(store): State<Store>, request: Request) -> Result<Respon
         // new release took over from still finishes the requests it has.
         // The exchange gives an answer only to the request its taker took.
         let mut body = body;
-        let (head, rest) = read_head(&mut body)
-            .await
-            .ok_or_else(|| Error::invalid("invalid response"))?;
+        let Some((head, rest)) = read_head(&mut body).await else {
+            // An answer that cannot be read is still the end of what its
+            // taker had to do with the request.
+            store.exchange.finished(execution, id);
+            return Err(Error::invalid("invalid response"));
+        };
         // The gateway is given the head now and the body as the shim sends
         // it; this call answers when the body has ended or nobody reads it.
         let (tx, piped) = pipe();

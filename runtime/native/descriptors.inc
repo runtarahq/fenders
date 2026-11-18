@@ -14,6 +14,10 @@ static int guest_fd_install(int host,int mount,struct network_connection *networ
         pthread_mutex_lock(&fd_lock);if(network && !--network->refs)free(network);pthread_mutex_unlock(&fd_lock);
         return -error;
     }
+    // Whatever the guest asked for, a host descriptor is closed on exec: the
+    // launcher runs no other program, and none may inherit a guest's files
+    // and sockets if it ever did.
+    fcntl(host,F_SETFD,FD_CLOEXEC);
     *desc=(struct descriptor){.fd=host,.refs=1,.mount=mount,.network=network};
     pthread_mutex_lock(&fd_lock);
     for(unsigned i=3;i<64;i++) if(!host_fds[i]) {host_fds[i]=desc;desc->next=all_descriptors;all_descriptors=desc;pthread_mutex_unlock(&fd_lock);return i;}

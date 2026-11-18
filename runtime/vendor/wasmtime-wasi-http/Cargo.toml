@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.97.0"
 name = "wasmtime-wasi-http"
-version = "50.0.0"
+version = "50.0.1"
 authors = ["The Wasmtime Project Developers"]
 build = false
 autolib = false
@@ -133,16 +133,16 @@ version = "0.1.41"
 default-features = false
 
 [dependencies.wasmtime]
-version = "50.0.0"
+version = "50.0.1"
 features = ["component-model"]
 default-features = false
 
 [dependencies.wasmtime-wasi]
-version = "50.0.0"
+version = "50.0.1"
 default-features = false
 
 [dependencies.wasmtime-wasi-io]
-version = "50.0.0"
+version = "50.0.1"
 default-features = false
 
 [dependencies.fenders-egress]
@@ -193,6 +193,7 @@ features = [
     "time",
     "fs",
     "macros",
+    "io-util",
 ]
 
 [dev-dependencies.tracing-subscriber]
@@ -210,7 +211,7 @@ version = "0.261.0"
 default-features = false
 
 [dev-dependencies.wasmtime]
-version = "50.0.0"
+version = "50.0.1"
 features = [
     "default",
     "anyhow",

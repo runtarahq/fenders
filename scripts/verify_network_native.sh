@@ -10,6 +10,17 @@ timeout 15 "$task_build/network-test"
 timeout 15 "$task_build/network-test" --budget
 timeout 15 "$task_build/network-test" --budget-wait
 timeout 15 "$task_build/network-test" --meter
+timeout 60 "$task_build/network-test" --meter-final
+timeout 15 "$task_build/network-test" --resolver
+timeout 15 "$task_build/network-test" --open-rate
+cc -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+  "$task_root/runtime/native/guest_args_test.c" -o "$task_build/guest-args-test"
+"$task_build/guest-args-test"
+if [[ $(uname -m) == x86_64 ]]; then
+  cc -pthread -O1 -g -Wall -Wextra -Werror \
+    "$task_root/runtime/native/running_filter_test.c" -o "$task_build/running-filter-test"
+  "$task_build/running-filter-test"
+fi
 task_status=0
 timeout 15 "$task_build/network-test" --leases 2>/dev/null || task_status=$?
 if [[ $task_status != 2 ]]; then
@@ -28,6 +39,11 @@ elif command -v x86_64-linux-gnu-gcc >/dev/null; then
 else
   echo 'The x86-64 VMM compilation check requires x86_64-linux-gnu-gcc and libc6-dev-amd64-cross.' >&2
   exit 2
+fi
+if [[ $(uname -m) == x86_64 ]]; then
+  cc -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+    "$task_root/runtime/native/cpuid_test.c" -o "$task_build/cpuid-test"
+  "$task_build/cpuid-test"
 fi
 echo 'PASS x86-64 VMM compile (not a KVM execution test)'
 # The launcher's own messages: standard error unless a pipe is named for them.

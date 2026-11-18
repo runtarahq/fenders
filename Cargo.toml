@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/fenders-control-plane", "crates/fenders-node-protocol", "crates/fenders-node", "crates/fenders-shim", "crates/fenders-component", "crates/fenders-service-trust", "crates/fenders-egress", "crates/fenders-runtime-limits"]
-exclude = ["runtime/guest", "runtime/vendor/wasmtime-wasi-http", "examples/service-client", "examples/runtime-fixtures", "examples/demo-components"]
+exclude = ["runtime/guest", "runtime/vendor/wasmtime-wasi-http", "runtime/vendor/sqlx-sqlite-unused", "runtime/vendor/rsa-verify-only", "examples/service-client", "examples/runtime-fixtures", "examples/demo-components"]
 
 [workspace.package]
 edition = "2024"
@@ -11,13 +11,21 @@ publish = false
 
 [workspace.dependencies]
 axum = "=0.8.9"
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "fs", "io-util"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "net", "signal", "time", "fs", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "=1.0.151"
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json"] }
 sha2 = "=0.10.9"
 uuid = { version = "=1.23.1", features = ["v4"] }
 clap = { version = "=4.6.7", features = ["derive", "env"] }
+
+# SQLx's SQLite driver is not used; an empty crate stands in for it so that
+# it does not hold `libsqlite3-sys` back (runtime/vendor/sqlx-sqlite-unused).
+[patch.crates-io]
+sqlx-sqlite = { path = "runtime/vendor/sqlx-sqlite-unused" }
+# rsa 0.9 with its private-key operation, which has an advisory against it and
+# which Fenders never uses, taken out (runtime/vendor/rsa-verify-only).
+rsa = { path = "runtime/vendor/rsa-verify-only" }
 
 # Backup and restore tests encrypt and authenticate whole archives. Optimize the
 # controller's crypto call sites and crypto dependencies, keeping test debug checks.

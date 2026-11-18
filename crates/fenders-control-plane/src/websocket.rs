@@ -81,6 +81,25 @@ struct Open {
     tenant: String,
     project: String,
     push: mpsc::Sender<Push>,
+    /// Bytes pushed to it and not yet taken to be sent.
+    queued: usize,
+}
+
+/// The most bytes that wait to be sent to one connection, and to all of an
+/// app's together. A client that does not read holds what it is sent in this
+/// process's memory: this much of it, after which the app is told the
+/// connection is not taking more.
+const MAX_QUEUED: usize = 4 * 1024 * 1024;
+const MAX_QUEUED_PER_APP: usize = 64 * 1024 * 1024;
+
+impl Push {
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Text(text) => text.len(),
+            Self::Binary(bytes) => bytes.len(),
+            Self::Close => 0,
+        }
+    }
 }
 
 /// The connections open now.
@@ -118,6 +137,7 @@ impl Sockets {
                 tenant: tenant.to_owned(),
                 project: project.to_owned(),
                 push,
+                queued: 0,
             },
         );
         Some(pushed)
@@ -137,16 +157,40 @@ impl Sockets {
     /// Sends `push` to connection `id` of `app`. False when the app has no
     /// such connection open, or it is not taking what it is sent.
     pub async fn push(&self, app: &str, id: &str, push: Push) -> bool {
+        let bytes = push.bytes();
         let sender = {
-            let open = self.lock();
-            match open.get(id).filter(|c| c.app == app) {
-                Some(found) => found.push.clone(),
-                None => return false,
+            let mut open = self.lock();
+            let of_app: usize = open
+                .values()
+                .filter(|c| c.app == app)
+                .map(|c| c.queued)
+                .sum();
+            match open.get_mut(id).filter(|c| c.app == app) {
+                Some(found)
+                    if found.queued + bytes <= MAX_QUEUED
+                        && of_app + bytes <= MAX_QUEUED_PER_APP =>
+                {
+                    found.queued += bytes;
+                    found.push.clone()
+                }
+                _ => return false,
             }
         };
-        tokio::time::timeout(Duration::from_secs(5), sender.send(push))
+        let sent = tokio::time::timeout(Duration::from_secs(5), sender.send(push))
             .await
-            .is_ok_and(|sent| sent.is_ok())
+            .is_ok_and(|sent| sent.is_ok());
+        if !sent {
+            self.taken(id, bytes);
+        }
+        sent
+    }
+
+    /// `bytes` pushed to connection `id` no longer wait: they were taken to
+    /// be sent, or never queued.
+    fn taken(&self, id: &str, bytes: usize) {
+        if let Some(found) = self.lock().get_mut(id) {
+            found.queued = found.queued.saturating_sub(bytes);
+        }
     }
 
     /// The ids of `app`'s open connections.
@@ -263,11 +307,51 @@ pub async fn accept(state: ApiState, host: String, request: Request) -> Result<R
             "too many connections are open",
         ));
     };
+    // The connection has a place now. It is given up when the connection is
+    // served to its end, and also when it never is: recording it fails, this
+    // call is dropped with its client, or the upgrade is not completed.
+    let held = held(state.clone(), &host, &id);
     state.store.websocket_opened(&id, &app.0, &path).await?;
     Ok(upgrade
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_MESSAGE)
-        .on_upgrade(move |socket| serve(state, host, id, socket, pushed)))
+        .on_upgrade(move |socket| serve(state, host, id, socket, pushed, held)))
+}
+
+/// An open connection's place among those of its app and workspace. Dropped
+/// before the connection was served, it gives the place back, closes its
+/// record and tells the app the client is gone, as the end of serving does.
+pub struct Held {
+    state: ApiState,
+    host: String,
+    id: String,
+    served: bool,
+}
+
+/// The place of connection `id`, which [`Sockets::open`] opened. Public for
+/// tests, which stand in for a client that goes away before its upgrade.
+#[doc(hidden)]
+pub fn held(state: ApiState, host: &str, id: &str) -> Held {
+    Held {
+        state,
+        host: host.to_owned(),
+        id: id.to_owned(),
+        served: false,
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.state.store.sockets.closed(&self.id);
+        if self.served {
+            return;
+        }
+        let (state, host, id) = (self.state.clone(), self.host.clone(), self.id.clone());
+        tokio::spawn(async move {
+            let _ = state.store.websocket_closed(&id, [0; 4]).await;
+            let _ = event(&state, &host, &id, "disconnect", None, None, Bytes::new()).await;
+        });
+    }
 }
 
 /// Serves one connection until it closes.
@@ -277,7 +361,10 @@ async fn serve(
     id: String,
     mut socket: WebSocket,
     mut pushed: mpsc::Receiver<Push>,
+    mut held: Held,
 ) {
+    // Served from here: this function closes it.
+    held.served = true;
     let closing = |code: u16, reason: &'static str| {
         Message::Close(Some(CloseFrame {
             code,
@@ -319,6 +406,9 @@ async fn serve(
             }
             // What the app sends this connection.
             push = pushed.recv() => {
+                if let Some(push) = &push {
+                    state.store.sockets.taken(&id, push.bytes());
+                }
                 if let Some(Push::Text(_) | Push::Binary(_)) = &push {
                     passed[2] += 1;
                 }
@@ -369,7 +459,7 @@ async fn serve(
             }
         }
     }
-    state.store.sockets.closed(&id);
+    drop(held);
     // A message still with the app is seen to its end: dropping it would
     // leave its request unsettled until its reservation lapsed.
     if let Some(answer) = answering {
@@ -525,5 +615,71 @@ impl crate::store::Store {
         Ok(
             serde_json::json!({"enabled":found["configuration"]["websocket"]==true,"open":open.len(),"connections":connections}),
         )
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn what_waits_for_a_client_that_does_not_read_is_bounded() {
+        let sockets = Sockets::default();
+        let mut slow = sockets.open("slow", "app", "tenant", "project").unwrap();
+        let mut other = sockets.open("other", "app", "tenant", "project").unwrap();
+        let megabyte = || Push::Binary(Bytes::from(vec![0u8; MAX_MESSAGE]));
+        // Four megabytes wait for the client that does not read; the fifth
+        // is refused at once, not held for it.
+        for _ in 0..4 {
+            assert!(sockets.push("app", "slow", megabyte()).await);
+        }
+        let started = std::time::Instant::now();
+        assert!(!sockets.push("app", "slow", megabyte()).await);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // Another connection of the app still takes what it is sent, and a
+        // close is always taken.
+        assert!(sockets.push("app", "other", megabyte()).await);
+        assert!(sockets.push("app", "other", Push::Close).await);
+        // Once the client has been sent some, there is room for as much.
+        let sent = slow.recv().await.unwrap();
+        sockets.taken("slow", sent.bytes());
+        assert!(sockets.push("app", "slow", megabyte()).await);
+        assert!(!sockets.push("app", "slow", megabyte()).await);
+        // Another app's connection is not this app's to push to.
+        assert!(!sockets.push("elsewhere", "other", Push::Close).await);
+        assert!(other.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_apps_connections_share_a_bound_too() {
+        let sockets = Sockets::default();
+        let mut held = Vec::new();
+        // Sixteen connections with four megabytes waiting each: the app's
+        // whole share.
+        for n in 0..17 {
+            held.push(
+                sockets
+                    .open(&format!("c{n}"), "app", "tenant", "project")
+                    .unwrap(),
+            );
+        }
+        for n in 0..16 {
+            for _ in 0..4 {
+                let push = Push::Binary(Bytes::from(vec![0u8; MAX_MESSAGE]));
+                assert!(sockets.push("app", &format!("c{n}"), push).await);
+            }
+        }
+        assert!(
+            !sockets
+                .push("app", "c16", Push::Text("one more".into()))
+                .await
+        );
+        // A connection that closes gives back what waited for it.
+        sockets.closed("c0");
+        assert!(
+            sockets
+                .push("app", "c16", Push::Text("one more".into()))
+                .await
+        );
     }
 }

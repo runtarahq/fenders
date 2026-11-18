@@ -9,6 +9,15 @@ use axum::http::StatusCode;
 pub use fenders_node_protocol::workloads::*;
 use serde_json::{Value, json};
 
+/// The shortest value a secret may have.
+const MIN_SECRET_BYTES: usize = 4;
+/// Whether `plain` may be a secret's value: long enough that masking it in
+/// a run's output does not mask the output, no longer than a value is, and
+/// without NUL.
+fn secret_value_fits(plain: &str) -> bool {
+    (MIN_SECRET_BYTES..=1024).contains(&plain.len()) && !plain.contains('\0')
+}
+
 impl Store {
     pub(crate) async fn idem(
         tx: &mut Tx,
@@ -84,29 +93,31 @@ impl Store {
         fields(&value, &["name", "value"], &["name", "value"])?;
         named(&value["name"])?;
         let plain = text(&value["value"])?;
-        if plain.len() > 1024 || plain.contains('\0') {
-            return Err(Error::invalid("invalid secret value"));
+        // A secret's value is masked wherever it appears in its runs' output.
+        // One of a few bytes would mask those bytes everywhere in it, which
+        // hides the output and shows where the value is: such a value is not
+        // a secret worth storing, and is refused.
+        if !secret_value_fits(plain) {
+            return Err(Error::invalid(
+                "invalid secret value: 4 to 1024 bytes, without NUL",
+            ));
         }
         let mut tx = self.transaction(true, false).await?;
         Self::project(&mut tx, p, tenant, project, true).await?;
-        // Receipt fingerprints exclude plaintext; compare the existing encrypted
-        // value after scope authorization rather than retaining a guessable hash.
+        // Receipt fingerprints exclude plaintext, and a replay is answered
+        // with the first request's receipt whatever value it carries. Were
+        // the value compared with the one stored, the answer would say
+        // whether a guess was right: a secret is otherwise never read back,
+        // and a key with `secrets:write` could try values without limit.
         let request = json!({"kind":"secret.create","project_id":project,"name":value["name"]});
         if let Some(key) = key
             && let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await?
         {
-            let existing = one(&mut tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE id=$1 AND tenant_id=$2 AND project_id=$3",args![row["id"],tenant,project]).await?;
-            let saved = self
-                .cipher
-                .decrypt(s(&existing["token"]))
-                .map_err(|_| Error::internal())?;
-            if saved != plain.as_bytes() {
-                return Err(conflict("idempotency key has different arguments"));
-            }
             return Ok(row);
         }
+        Self::metadata_limit(&mut tx, tenant, "secrets", crate::store::MAX_SECRETS).await?;
         let resource = uid();
-        let row=one(&mut tx,"INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext) VALUES($1,$2,$3,$4,convert_to($5,'UTF8')) RETURNING id,name,created",args![resource,tenant,project,value["name"],self.cipher.encrypt(plain.as_bytes())]).await?;
+        let row=one(&mut tx,"INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext,bound) VALUES($1,$2,$3,$4,convert_to($5,'UTF8'),true) RETURNING id,name,created",args![resource,tenant,project,value["name"],crate::secret_binding::seal(&self.cipher,tenant,project,&resource,plain.as_bytes())]).await?;
         Self::audit(&mut tx, p, "secret.create", &resource, tenant, json!({})).await?;
         if let Some(key) = key {
             crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
@@ -131,12 +142,15 @@ impl Store {
         .await?;
         let mut size = serde_json::to_vec(&spec["env"]).unwrap().len();
         for (key, secret) in spec["secret_env"].as_object().unwrap() {
-            let row=one(tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3",args![tenant,project,secret]).await?;
-            size += self
-                .cipher
-                .decrypt(s(&row["token"]))
-                .map_err(|_| Error::internal())?
-                .len()
+            let row=one(tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3 AND bound",args![tenant,project,secret]).await?;
+            size += crate::secret_binding::open(
+                &self.cipher,
+                tenant,
+                project,
+                s(secret),
+                s(&row["token"]),
+            )?
+            .len()
                 + key.len()
                 + 8;
         }
@@ -460,5 +474,22 @@ impl Store {
         self.reclaim_orphan_uploads().await?;
         self.websocket_sweep().await?;
         Ok(())
+    }
+}
+#[cfg(test)]
+mod secret_value_tests {
+    use super::secret_value_fits;
+
+    #[test]
+    fn a_secrets_value_is_at_least_four_bytes() {
+        for short in ["", "a", "ab", "abc"] {
+            assert!(!secret_value_fits(short), "{short:?}");
+        }
+        assert!(secret_value_fits("abcd"));
+        assert!(secret_value_fits(&"x".repeat(1024)));
+        assert!(!secret_value_fits(&"x".repeat(1025)));
+        assert!(!secret_value_fits("ab\0cd"));
+        // Bytes, not characters: two letters of two bytes each are four.
+        assert!(secret_value_fits("éé"));
     }
 }

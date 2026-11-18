@@ -15,9 +15,12 @@ if [ -d /run/systemd/system ]; then
             ;;
     esac
 fi
-# KillMode=process preserves detached VMs after the supervisor exits.
-if [ -f /sys/fs/cgroup/system.slice/fenders-worker.service/workloads/cgroup.events ] && \
-    grep -q '^populated 1$' /sys/fs/cgroup/system.slice/fenders-worker.service/workloads/cgroup.events; then
-    echo 'Worker executions remain in its cgroup; confirmed teardown is required before changing the package.' >&2
+# KillMode=process preserves detached VMs after the supervisor exits: their
+# shims and VMMs are in the cgroup root the unit gives the agent
+# (--cgroup-root), not in the unit's own cgroup. FENDERS_RUN_CGROUP names
+# another root, for a unit that was edited to use one.
+runs=${FENDERS_RUN_CGROUP:-/sys/fs/cgroup/fenders-runs}
+if [ -f "$runs/cgroup.events" ] && grep -q '^populated 1$' "$runs/cgroup.events"; then
+    echo "Worker executions remain in $runs; confirmed teardown is required before changing the package." >&2
     exit 1
 fi

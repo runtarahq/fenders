@@ -49,6 +49,21 @@ pub(crate) struct Warm {
     /// Its pipe's end signal ([`Run::signalled`]).
     signalled: Arc<std::sync::atomic::AtomicBool>,
     since: Instant,
+    /// The host memory its VM may take, as a run's is counted.
+    memory_mib: i64,
+}
+
+/// Whether one more warm shim of `memory_mib` may be started: a waiting VM
+/// is a VM. With the runs that live and the shims that wait it must fit the
+/// node's instances, and its memory where the node was told its own.
+fn warm_fits(
+    (runs, run_memory): (usize, i64),
+    (waiting, waiting_memory): (usize, i64),
+    memory_mib: i64,
+    (instances, node_memory): (usize, Option<i64>),
+) -> bool {
+    runs + waiting < instances
+        && node_memory.is_none_or(|limit| run_memory + waiting_memory + memory_mib <= limit)
 }
 
 /// The warm shims, by artifact and guest configuration ([`warm_key`]).
@@ -63,6 +78,41 @@ pub(crate) struct WarmPool {
 impl WarmPool {
     fn len(&self) -> usize {
         self.shims.values().map(Vec::len).sum::<usize>() + self.reserved.len()
+    }
+    fn memory_mib(&self) -> i64 {
+        self.shims
+            .values()
+            .flatten()
+            .map(|warm| warm.memory_mib)
+            .sum()
+    }
+    /// Drops the warm shim that has waited longest; false when none waits.
+    /// Dropped, its standard input closes and it ends itself.
+    fn drop_oldest(&mut self) -> bool {
+        let Some(pool) = self
+            .shims
+            .iter()
+            .filter_map(|(pool, shims)| {
+                shims
+                    .iter()
+                    .map(|shim| shim.since)
+                    .min()
+                    .map(|at| (at, pool))
+            })
+            .min()
+            .map(|(_, pool)| pool.clone())
+        else {
+            return false;
+        };
+        if let Some(shims) = self.shims.get_mut(&pool) {
+            if let Some(index) = (0..shims.len()).min_by_key(|index| shims[*index].since) {
+                shims.remove(index);
+            }
+            if shims.is_empty() {
+                self.shims.remove(&pool);
+            }
+        }
+        true
     }
     fn holds_uid(&self, uid: u32) -> bool {
         self.reserved.iter().any(|(reserved, _)| *reserved == uid)
@@ -181,10 +231,132 @@ fn is_run_id(name: &str) -> bool {
     name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Asks run `id`'s shim `request` (`status`, `stop` or `collect`). `None`
-/// when no shim holds the run.
-pub(crate) fn ask(id: &str, request: &str) -> Result<Option<Value>> {
-    let address = SocketAddr::from_abstract_name(format!("fenders/run/{id}").as_bytes())?;
+/// Host memory counted for a run beyond its VM's: its shim and launcher.
+const RUN_OVERHEAD_MIB: i64 = 24;
+
+/// The CPU time a run's shim may use in each 100 ms beyond its VM's share.
+const SHIM_CPU_USEC: u64 = 50_000;
+/// The limits on a run's cgroup, which holds its shim and its VM.
+fn run_limits(host_memory_mib: i64, cpu_percent: i64) -> [(&'static str, String); 5] {
+    // The run as a whole: the VM's memory and the shim's own.
+    let host = host_memory_mib.max(32) as u64 + 64;
+    // Its CPU likewise: the VM's share, which the shim sets on the VM's
+    // leaf, and half a CPU for the shim's own work (the run's output, its
+    // requests, its calls). Without it the shim's threads ran unthrottled,
+    // on a uid the guest's work drives.
+    let cpu = (cpu_percent.max(1) as u64) * 1000 + SHIM_CPU_USEC;
+    [
+        ("memory.max", (host * 1024 * 1024).to_string()),
+        ("memory.swap.max", "0".into()),
+        // Out of memory as a whole, the run ends as a whole: a shim killed
+        // alone would leave its VM running unwatched.
+        ("memory.oom.group", "1".into()),
+        ("cpu.max", format!("{cpu} 100000")),
+        ("pids.max", "64".into()),
+    ]
+}
+
+/// The SHA-256 of the compiled component in artifact directory `artifact`,
+/// as its `artifact.json` recorded it.
+fn compiled_digest(artifact: &Path) -> Option<String> {
+    let recorded: Value =
+        serde_json::from_slice(&fs::read(artifact.join("artifact.json")).ok()?).ok()?;
+    let digest = recorded["compiled_sha256"].as_str()?;
+    (digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    .then(|| digest.to_owned())
+}
+
+/// The longest line a shim's standard output is read for: `ended`, or
+/// `meter` and a few counters.
+const MAX_SHIM_LINE: usize = 1024;
+
+/// The next line of `input`, without its newline: `Some(None)` for one over
+/// `max` bytes or not UTF-8, which is read past and not kept, and `None` at
+/// the end of input.
+fn bounded_line(
+    input: &mut impl std::io::BufRead,
+    max: usize,
+) -> std::io::Result<Option<Option<String>>> {
+    let mut line = Vec::new();
+    let mut over = false;
+    loop {
+        let buffered = match input.fill_buf() {
+            Ok(buffered) => buffered,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if buffered.is_empty() {
+            // The end: a last line without a newline counts if it fits.
+            return Ok((!line.is_empty() || over)
+                .then(|| (!over).then(|| String::from_utf8(line).ok()).flatten()));
+        }
+        let newline = buffered.iter().position(|byte| *byte == b'\n');
+        let taken = newline.unwrap_or(buffered.len());
+        if !over && line.len() + taken <= max {
+            line.extend_from_slice(&buffered[..taken]);
+        } else {
+            over = true;
+            line = Vec::new();
+        }
+        input.consume(taken + usize::from(newline.is_some()));
+        if newline.is_some() {
+            return Ok(Some(
+                (!over).then(|| String::from_utf8(line).ok()).flatten(),
+            ));
+        }
+    }
+}
+
+/// The abstract address of run `id`'s link.
+fn link_address(id: &str) -> std::io::Result<SocketAddr> {
+    SocketAddr::from_abstract_name(format!("fenders/run/{id}").as_bytes())
+}
+
+/// Whether the process listening at the other end of `stream` is in run
+/// cgroup `cgroup` (or its `shim` or `vm` leaf): the run's own shim.
+///
+/// An abstract socket name has no owner: any process in the node's network
+/// namespace may bind one. Only the node puts a process in a run's cgroup,
+/// so membership is what makes an answer the run's.
+fn peer_in_cgroup(stream: &UnixStream, cgroup: &Path) -> bool {
+    peer_pid(stream).is_some_and(|pid| {
+        let pid = pid.to_string();
+        [cgroup.to_path_buf(), cgroup.join("shim"), cgroup.join("vm")]
+            .iter()
+            .filter_map(|group| fs::read_to_string(group.join("cgroup.procs")).ok())
+            .any(|procs| procs.lines().any(|line| line == pid))
+    })
+}
+
+/// The process listening at the other end of `stream`.
+fn peer_pid(stream: &UnixStream) -> Option<libc::pid_t> {
+    use std::os::fd::AsRawFd;
+    let mut peer = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut peer).cast(),
+            &raw mut size,
+        )
+    };
+    (rc == 0 && peer.pid > 0).then_some(peer.pid)
+}
+
+/// Asks run `id`'s shim, a process of run cgroup `cgroup`, `request`
+/// (`status`, `stop` or `collect`). `None` when no shim holds the run: also
+/// when something that is not its shim answers at its name.
+pub(crate) fn ask(cgroup: &Path, id: &str, request: &str) -> Result<Option<Value>> {
+    let address = link_address(id)?;
     let mut stream = match UnixStream::connect_addr(&address) {
         Ok(stream) => stream,
         Err(error)
@@ -197,6 +369,18 @@ pub(crate) fn ask(id: &str, request: &str) -> Result<Option<Value>> {
         }
         Err(error) => return Err(error.into()),
     };
+    // The node binds a run's name and its shim takes the socket over: until
+    // it has, the listener is the node itself. Not there yet.
+    if peer_pid(&stream) == Some(std::process::id() as libc::pid_t) {
+        return Ok(None);
+    }
+    if !peer_in_cgroup(&stream, cgroup) {
+        tracing::error!(
+            run = id,
+            "its name is held by a process outside its cgroup: not its shim"
+        );
+        return Ok(None);
+    }
     stream.set_read_timeout(Some(ASK_TIMEOUT))?;
     stream.set_write_timeout(Some(ASK_TIMEOUT))?;
     let mut answer = Vec::new();
@@ -356,7 +540,7 @@ impl Node {
                 continue;
             };
             let name = id;
-            match ask(&name, "status") {
+            match ask(&entry.path(), &name, "status") {
                 Ok(Some(status)) => {
                     let artifact = Path::new(s(&status["component"]))
                         .parent()
@@ -482,6 +666,18 @@ impl Node {
                 if held >= self.warm_runs || warm.len() >= MAX_WARM_TOTAL {
                     return;
                 }
+                // Counted as a run is: one that would not fit is not started.
+                let live = table.values().filter(|run| run.ended.is_none());
+                let runs = live.clone().count();
+                let run_memory: i64 = live.map(|run| run.shape.1 + RUN_OVERHEAD_MIB).sum();
+                if !warm_fits(
+                    (runs, run_memory),
+                    (warm.len(), warm.memory_mib()),
+                    n(&guest["host_memory_mib"]) + RUN_OVERHEAD_MIB,
+                    (self.max_instances, self.memory_mib),
+                ) {
+                    return;
+                }
                 warm.next += 1;
                 // Named for this agent: a previous one's may still be leaving.
                 let name = format!("{WARM_PREFIX}{}-{}", std::process::id(), warm.next);
@@ -525,6 +721,7 @@ impl Node {
                         serving,
                         signalled,
                         since: Instant::now(),
+                        memory_mib: n(&guest["host_memory_mib"]) + RUN_OVERHEAD_MIB,
                     })
                 }
                 Ok((None, _, _)) => return,
@@ -681,8 +878,29 @@ impl Node {
                 self.start_cold(id, key, run, guest, artifact)
             }
         };
+        // A run that started beside waiting shims may have taken the node
+        // past its instances: those that waited longest give way.
+        if let (Ok(table), Ok(mut warm)) = (lock(&self.runs), lock(&self.warm)) {
+            let runs = table.values().filter(|run| run.ended.is_none()).count();
+            while runs + warm.len() > self.max_instances && warm.drop_oldest() {}
+        }
         self.fill_warm(&pool, guest, artifact);
         started
+    }
+
+    /// The host memory of the warm shims that wait, counted as runs' is.
+    pub fn warm_memory_mib(&self) -> i64 {
+        lock(&self.warm).map_or(0, |warm| warm.memory_mib())
+    }
+
+    /// Discards every warm shim that waits. They hold the environment of the
+    /// launches they were made like, secret values among it, and the memory
+    /// of a VM each: discarded when a run is stopped (what it was given may
+    /// have been taken back) and when a run needs their room.
+    pub fn discard_warm(&self) {
+        if let Ok(mut warm) = lock(&self.warm) {
+            warm.shims.clear();
+        }
     }
 
     fn start_cold(
@@ -734,15 +952,23 @@ impl Node {
         guest: &Value,
         artifact: &Path,
     ) {
-        spec.insert(
-            "artifact".into(),
-            json!({"component": artifact.join("component.cwasm")}),
-        );
+        // The digest recorded when the component was compiled: the shim
+        // checks what it opens against it, so that what the guest loads as
+        // native code is what the compiler wrote, not only what the cache's
+        // file permissions kept.
+        let mut component = json!({"component": artifact.join("component.cwasm")});
+        if let Some(digest) = compiled_digest(artifact) {
+            component["component_sha256"] = json!(digest);
+        }
+        spec.insert("artifact".into(), component);
         spec.insert("runtime".into(), json!({"dir": self.build}));
         spec.insert("uid".into(), json!(uid));
         spec.insert("gid".into(), json!(uid));
         if let Some(cpu) = next_vm_cpu() {
             spec.insert("cpu".into(), json!(cpu));
+        }
+        if self.share_cores {
+            spec.insert("share_core".into(), json!(true));
         }
         spec.insert("guest".into(), guest.clone());
     }
@@ -769,15 +995,22 @@ impl Node {
                 Error::from(error)
             }
         };
+        // A run's link is bound here, before its cgroup shows its id to the
+        // host, and handed to the shim: no other process can take the name
+        // first. A warm shim has no run yet; it binds when it is claimed, and
+        // a claimed run's id is on its cgroup only as a `trusted.` attribute.
+        let link = if is_run_id(name) {
+            Some(
+                std::os::unix::net::UnixListener::bind_addr(&link_address(name)?)
+                    .map_err(io("binding its link"))?,
+            )
+        } else {
+            None
+        };
         let started = (|| -> Result<Option<std::process::ChildStdin>> {
             fs::create_dir(&cgroup).map_err(io("creating its cgroup"))?;
-            // The run as a whole: the VM's memory and the shim's own.
-            let host = n(&guest["host_memory_mib"]).max(32) as u64 + 64;
-            for (file, value) in [
-                ("memory.max", (host * 1024 * 1024).to_string()),
-                ("memory.swap.max", "0".into()),
-                ("pids.max", "64".into()),
-            ] {
+            for (file, value) in run_limits(n(&guest["host_memory_mib"]), n(&guest["cpu_percent"]))
+            {
                 fs::write(cgroup.join(file), value).map_err(io("limiting its cgroup"))?;
             }
             let procs =
@@ -795,12 +1028,25 @@ impl Node {
                 .stdout(Stdio::piped())
                 // The shim logs to the agent's standard error (its journal).
                 .stderr(Stdio::inherit());
+            let link_fd = link.as_ref().map(|link| {
+                use std::os::fd::AsRawFd;
+                link.as_raw_fd()
+            });
+            if let Some(fd) = link_fd {
+                command.env("FENDERS_SHIM_LINK_FD", fd.to_string());
+            }
             unsafe {
                 use std::os::unix::process::CommandExt;
                 // In the child, before exec: its own session and the run's
                 // cgroup, so it outlives the agent. Only async-signal-safe calls.
                 command.pre_exec(move || {
                     libc::setsid();
+                    // The link keeps its descriptor number across the exec.
+                    if let Some(fd) = link_fd
+                        && libc::fcntl(fd, libc::F_SETFD, 0) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
                     let fd = libc::open(procs.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
                     if fd < 0 || libc::write(fd, b"0".as_ptr().cast(), 1) != 1 {
                         return Err(std::io::Error::last_os_error());
@@ -830,13 +1076,17 @@ impl Node {
                         // The shim streams its outbound totals as they change
                         // and says when its run ended; its pipe closing (the
                         // shim gone) is looked into as an end too.
-                        use std::io::BufRead;
                         let run = || serving.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                        for line in std::io::BufReader::new(stdout).lines() {
-                            let Ok(line) = line else { break };
+                        // A shim runs as its run's uid and may be anything by
+                        // the time it writes here: a line is read up to a
+                        // bound, and one over it is passed by, not held.
+                        let mut stdout = std::io::BufReader::new(stdout);
+                        while let Ok(Some(line)) = bounded_line(&mut stdout, MAX_SHIM_LINE) {
+                            let Some(line) = line else { continue };
                             if let Some(totals) = line.strip_prefix("meter ") {
                                 if let (Ok(totals), Some(run)) =
                                     (serde_json::from_str::<Value>(totals), run())
+                                    && totals.is_object()
                                 {
                                     meters
                                         .lock()
@@ -897,7 +1147,7 @@ impl Node {
         };
         let (unanswered_since, cgroup) = unanswered_since;
         let cgroup = self.run_cgroup(cgroup.as_deref().unwrap_or(id));
-        let ended = match ask(id, "status")? {
+        let ended = match ask(&cgroup, id, "status")? {
             Some(shim) => {
                 if let Some(run) = lock(&self.runs)?.get_mut(id) {
                     if unanswered_since.is_some() {
@@ -920,7 +1170,7 @@ impl Node {
                     return Ok(status);
                 }
                 // Ended: its end report is the run's; the shim may exit.
-                match ask(id, "collect")? {
+                match ask(&cgroup, id, "collect")? {
                     Some(last) => as_status(id, &last, &cgroup, &boot, None),
                     None => status,
                 }
@@ -1062,8 +1312,13 @@ impl Node {
             ));
         }
         let status = self.status(id)?;
+        // A run is stopped when what it was given is taken back: shims
+        // waiting with the same environment do not outlast that.
+        self.discard_warm();
         if !terminal(s(&status["state"])) {
-            ask(id, "stop")?;
+            let cgroup = lock(&self.runs)?.get(id).and_then(|run| run.cgroup.clone());
+            let cgroup = self.run_cgroup(cgroup.as_deref().unwrap_or(id));
+            ask(&cgroup, id, "stop")?;
         }
         self.status(id)
     }
@@ -1099,6 +1354,22 @@ mod tests {
         assert!(pool.holds_uid(600_007));
         assert!(!pool.holds_uid(600_008));
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn a_waiting_shim_is_counted_as_a_run_is() {
+        // Four instances, 1024 MiB: two runs of 280 MiB and one shim waiting.
+        let node = (4, Some(1024));
+        assert!(warm_fits((2, 560), (1, 280), 152, node));
+        // No instance left, though memory is.
+        assert!(!warm_fits((2, 560), (2, 300), 100, node));
+        assert!(!warm_fits((4, 100), (0, 0), 10, node));
+        // No memory left, though an instance is.
+        assert!(!warm_fits((2, 560), (1, 280), 185, node));
+        assert!(warm_fits((2, 560), (1, 280), 184, node));
+        // A node not told its memory counts instances alone.
+        assert!(warm_fits((2, 9000), (1, 9000), 9000, (4, None)));
+        assert!(!warm_fits((3, 0), (1, 0), 0, (4, None)));
     }
 
     #[test]
@@ -1178,9 +1449,132 @@ mod tests {
     #[test]
     fn asking_a_run_without_a_shim_finds_none() {
         assert!(
-            ask(&run_id("nobody-holds-this"), "status")
-                .unwrap()
-                .is_none()
+            ask(
+                Path::new("/nowhere"),
+                &run_id("nobody-holds-this"),
+                "status"
+            )
+            .unwrap()
+            .is_none()
         );
+    }
+
+    #[test]
+    fn a_runs_cgroup_limits_its_shim_as_well_as_its_vm() {
+        let limits: std::collections::HashMap<_, _> = run_limits(256, 100).into_iter().collect();
+        // The VM's whole CPU and half a CPU for the shim, of a 100 ms period:
+        // never without a limit, which is what "max" would be.
+        assert_eq!(limits["cpu.max"], "150000 100000");
+        assert_eq!(limits["memory.max"], ((256 + 64) * 1024 * 1024).to_string());
+        assert_eq!(limits["memory.swap.max"], "0");
+        assert_eq!(limits["memory.oom.group"], "1");
+        assert_eq!(limits["pids.max"], "64");
+        // The least a run is given still has both.
+        assert_eq!(run_limits(0, 0)[3].1, "51000 100000");
+    }
+
+    #[test]
+    fn a_launch_names_the_digest_its_component_was_compiled_to() {
+        let artifact = tempfile::tempdir().unwrap();
+        assert_eq!(compiled_digest(artifact.path()), None);
+        let digest = "ab".repeat(32);
+        for (recorded, expected) in [
+            (json!({"compiled_sha256": digest}), Some(digest.clone())),
+            (json!({"compiled_sha256": "AB".repeat(32)}), None),
+            (json!({"compiled_sha256": "abc"}), None),
+            (json!({"compiled_bytes": 1}), None),
+        ] {
+            std::fs::write(artifact.path().join("artifact.json"), recorded.to_string()).unwrap();
+            assert_eq!(compiled_digest(artifact.path()), expected, "{recorded}");
+        }
+    }
+
+    #[test]
+    fn a_shims_output_is_read_a_bounded_line_at_a_time() {
+        let mut input = Vec::new();
+        input.extend_from_slice(b"meter {\"bytes\":1}\n");
+        // A megabyte with no newline, then one: never held, and passed by.
+        input.extend(std::iter::repeat_n(b'x', 1 << 20));
+        input.extend_from_slice(b"\nended\n");
+        input.extend_from_slice(&[0xff, 0xfe, b'\n']);
+        input.extend_from_slice(b"\n");
+        input.extend_from_slice(b"last");
+        // Read through a small buffer, so lines span several fills.
+        let mut reader = std::io::BufReader::with_capacity(7, &input[..]);
+        let mut lines = Vec::new();
+        while let Some(line) = bounded_line(&mut reader, 32).unwrap() {
+            lines.push(line);
+        }
+        assert_eq!(
+            lines,
+            [
+                Some("meter {\"bytes\":1}".to_owned()),
+                None,
+                Some("ended".to_owned()),
+                None,
+                Some(String::new()),
+                Some("last".to_owned()),
+            ]
+        );
+        // Exactly the bound fits; one byte more does not.
+        let mut reader = &b"abcd\nabcde\n"[..];
+        assert_eq!(
+            bounded_line(&mut reader, 4).unwrap(),
+            Some(Some("abcd".into()))
+        );
+        assert_eq!(bounded_line(&mut reader, 4).unwrap(), Some(None));
+        assert_eq!(bounded_line(&mut reader, 4).unwrap(), None);
+    }
+
+    #[test]
+    fn an_answer_at_a_runs_name_from_outside_its_cgroup_is_not_its_shims() {
+        use std::os::fd::AsRawFd;
+        let id = run_id(&format!("squatted-{}", std::process::id()));
+        let listener =
+            std::os::unix::net::UnixListener::bind_addr(&link_address(&id).unwrap()).unwrap();
+        let cgroup = tempfile::tempdir().unwrap();
+        std::fs::create_dir(cgroup.path().join("shim")).unwrap();
+        let members = |pids: &str| {
+            std::fs::write(cgroup.path().join("shim/cgroup.procs"), pids).unwrap();
+        };
+        // Bound by the node and not yet taken over by a shim: nobody there.
+        members("1\n");
+        assert!(ask(cgroup.path(), &id, "status").unwrap().is_none());
+
+        // Another process holds the name and answers as a shim would. Only
+        // calls that are safe after a fork are made in it.
+        let fd = listener.as_raw_fd();
+        const ANSWER: &[u8] = b"{\"state\":\"exited\",\"exit_code\":0}\n";
+        let holder = unsafe { libc::fork() };
+        assert!(holder >= 0);
+        if holder == 0 {
+            unsafe {
+                libc::listen(fd, 8);
+                loop {
+                    let stream = libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut());
+                    if stream < 0 {
+                        libc::_exit(1);
+                    }
+                    let mut asked = [0u8; 16];
+                    libc::read(stream, asked.as_mut_ptr().cast(), asked.len());
+                    libc::write(stream, ANSWER.as_ptr().cast(), ANSWER.len());
+                    libc::close(stream);
+                }
+            }
+        }
+        // The connection asked before it took over was never answered; let
+        // it take the socket before asking again.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // It is in no cgroup of the run's: what a local process squatting
+        // the name looks like to the node. Its answer is not the run's.
+        assert!(ask(cgroup.path(), &id, "status").unwrap().is_none());
+        // The same answer from a member of the run's cgroup is.
+        members(&format!("1\n{holder}\n"));
+        let status = ask(cgroup.path(), &id, "status").unwrap().unwrap();
+        assert_eq!(status["state"], "exited");
+        unsafe {
+            libc::kill(holder, libc::SIGKILL);
+            libc::waitpid(holder, std::ptr::null_mut(), 0);
+        }
     }
 }

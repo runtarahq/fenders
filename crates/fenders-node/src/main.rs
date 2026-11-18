@@ -27,6 +27,27 @@ struct Args {
     cgroup_root: PathBuf,
     #[arg(long, default_value_t = 16)]
     max_instances: usize,
+    /// The first of the uids runs are given, one each. None may be an
+    /// account's or in a subordinate uid range on this host, and two nodes
+    /// on one host need different bases.
+    #[arg(long, default_value_t = 600_000)]
+    run_uid_base: u32,
+    /// Let runs be given destinations on this host and its link (loopback,
+    /// link-local), which the node refuses otherwise. For a node whose runs
+    /// are meant to reach services beside it, as a local environment's is.
+    #[arg(long)]
+    local_destinations: bool,
+    /// Let two runs' VMs run on the two hardware threads of one core at the
+    /// same moment. By default they never do (each VM has a core-scheduling
+    /// cookie of its own), and a sibling stands idle when its core's run has
+    /// nothing for it.
+    #[arg(long)]
+    share_cores: bool,
+    /// Start although this host's KVM has nested virtualization enabled
+    /// (`kvm_intel` or `kvm_amd` loaded with `nested=1`). No run uses it; a
+    /// node refuses to start beside it unless told this.
+    #[arg(long)]
+    nested_virtualization: bool,
     /// Warm shims (VM booted, component loaded, each for one run) kept per
     /// artifact and guest configuration a run used.
     #[arg(long, default_value_t = 0)]
@@ -113,6 +134,52 @@ struct Args {
     #[arg(long, default_value_t = 1000)]
     retention_batch: usize,
 }
+/// What this host's settings mean for runs that share it, checked once at
+/// start.
+/// Whether to go on beside a KVM module with nested virtualization
+/// `enabled`: refused unless the operator `allowed` it, and worth a warning
+/// when they did.
+fn nested(enabled: bool, allowed: bool) -> Result<bool> {
+    if enabled && !allowed {
+        return Err(Error::invalid(
+            "nested virtualization is enabled in this host's KVM (kvm_intel or kvm_amd, nested=1); reload the module with nested=0, or start the node with --nested-virtualization",
+        ));
+    }
+    Ok(enabled)
+}
+fn host_notes(share_cores: bool, nested_virtualization: bool) -> Result<()> {
+    let on = |path: &str| {
+        std::fs::read_to_string(path).is_ok_and(|v| matches!(v.trim(), "1" | "Y" | "y"))
+    };
+    // A guest is never told of nested virtualization, and its launcher gives
+    // up the call that could tell it before the guest runs. It is still
+    // host kernel code for nothing: a host that runs Fenders has it off, or
+    // its operator says the node may start beside it.
+    for module in ["kvm_intel", "kvm_amd"] {
+        let enabled = on(&format!("/sys/module/{module}/parameters/nested"));
+        if nested(enabled, nested_virtualization)? {
+            tracing::warn!(
+                module,
+                "nested virtualization is enabled in this host's KVM and --nested-virtualization is set; no run uses it"
+            );
+        }
+    }
+    // Each run's VM has a core-scheduling cookie of its own (the shim asks
+    // for one), so two runs never share a core at the same moment, unless
+    // the node was started with --share-cores.
+    if on("/sys/devices/system/cpu/smt/active") {
+        if share_cores {
+            tracing::warn!(
+                "sibling hardware threads are active and --share-cores is set: two runs may run on one core at the same moment"
+            );
+        } else {
+            tracing::info!(
+                "sibling hardware threads are active: runs are kept off each other's cores, and a sibling stands idle when its core's run has nothing for it (--share-cores lets them share)"
+            );
+        }
+    }
+    Ok(())
+}
 fn main() {
     if let Err(error) = entry() {
         if fenders_node::log::installed() {
@@ -151,6 +218,8 @@ fn entry() -> Result<()> {
     }
     let _ = (&args, Path::new(""));
     let args = Args::parse();
+    // Before anything is opened or made: a host the node will not run on.
+    host_notes(args.share_cores, args.nested_virtualization)?;
     fenders_node::log::init(args.log_format);
     let inherited_listener = fenders_node::activation::descriptor(args.listen_fd)?
         .map(|fd| {
@@ -198,6 +267,10 @@ fn entry() -> Result<()> {
         args.max_instances,
     )?
     .with_disk_free_mib(args.disk_free_mib)?
+    .with_run_uids(args.run_uid_base)?
+    .with_memory_mib(args.memory_mib)
+    .with_local_destinations(args.local_destinations)
+    .with_shared_cores(args.share_cores)
     .with_warm_runs(args.warm_runs)?
     .with_egress_budget(args.egress_budget)
     .with_compiler_limits(fenders_node::core::CompilerLimits {
@@ -474,5 +547,25 @@ mod quota_args_tests {
         assert_eq!(parsed.state_project_id, Some(123));
         assert_eq!(parsed.state_quota_mib, Some(4096));
         assert_eq!(parsed.state_quota_inodes, Some(100000));
+    }
+
+    #[test]
+    fn a_node_does_not_start_beside_nested_virtualization_unless_told() {
+        // Off: nothing to refuse or to say, whatever the operator allowed.
+        assert!(!nested(false, false).unwrap());
+        assert!(!nested(false, true).unwrap());
+        // On: refused, with how to change it, unless allowed; then said.
+        let refused = nested(true, false).unwrap_err();
+        assert!(refused.message.contains("--nested-virtualization"));
+        assert!(nested(true, true).unwrap());
+        // And the flag is one the node takes.
+        let mut args = arguments();
+        args.push("--nested-virtualization");
+        assert!(Args::try_parse_from(args).unwrap().nested_virtualization);
+        assert!(
+            !Args::try_parse_from(arguments())
+                .unwrap()
+                .nested_virtualization
+        );
     }
 }

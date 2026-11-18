@@ -32,6 +32,51 @@ pub fn bind(id: &str) -> std::io::Result<UnixListener> {
     UnixListener::bind_addr(&address)
 }
 
+/// The environment variable naming a descriptor its launcher bound for the
+/// run and passed on.
+pub const INHERITED: &str = "FENDERS_SHIM_LINK_FD";
+
+/// Run `id`'s socket as its launcher bound it and passed it on: descriptor
+/// `fd`. A launcher that binds the name before it shows the run's id to
+/// anything leaves nobody a moment to take it first.
+///
+/// Refused unless it is that socket. It is listened on again here, which
+/// makes this process the one a connecting launcher sees as its peer.
+pub fn inherited(id: &str, fd: std::os::fd::RawFd) -> std::io::Result<UnixListener> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::linux::net::SocketAddrExt;
+    if fd < 3 {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    // Checked before it is owned: a descriptor that is not ours to close is
+    // left as it was.
+    let mut kind: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let is_stream = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&raw mut kind).cast(),
+            &raw mut size,
+        )
+    } == 0
+        && kind == libc::SOCK_STREAM;
+    if !is_stream {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let listener = unsafe { UnixListener::from_raw_fd(fd) };
+    if listener.local_addr()?.as_abstract_name() != Some(name(id).as_bytes()) {
+        return Err(std::io::ErrorKind::AddrNotAvailable.into());
+    }
+    if unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0
+        || unsafe { libc::listen(listener.as_raw_fd(), 128) } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(listener)
+}
+
 /// What the shim tells its launcher, and what the launcher asks of it.
 pub struct Link {
     status: Mutex<Value>,
@@ -114,6 +159,20 @@ impl Link {
     }
 }
 
+/// What an accept gave, after a wait when it failed. Out of descriptors,
+/// most often, and the next would fail the same at once: the shim's one
+/// thread also relays and reports for the run, and must not spin on it.
+async fn accepted<T>(result: std::io::Result<T>) -> Option<T> {
+    match result {
+        Ok(taken) => Some(taken),
+        Err(_) => {
+            tokio::time::sleep(ACCEPT_WAIT).await;
+            None
+        }
+    }
+}
+const ACCEPT_WAIT: Duration = Duration::from_millis(50);
+
 /// Serves the launcher on `listener` for the shim's life.
 pub async fn serve(listener: UnixListener, link: Arc<Link>) {
     if listener.set_nonblocking(true).is_err() {
@@ -123,7 +182,7 @@ pub async fn serve(listener: UnixListener, link: Arc<Link>) {
         return;
     };
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
+        let Some((stream, _)) = accepted(listener.accept().await).await else {
             continue;
         };
         let link = link.clone();
@@ -203,5 +262,58 @@ mod tests {
             .expect("collected")
             .unwrap();
         assert!(ask(&id, "bogus").await["error"].is_string());
+    }
+
+    #[test]
+    fn a_link_its_launcher_bound_is_taken_only_if_it_is_the_runs() {
+        use std::os::fd::IntoRawFd;
+        use std::os::linux::net::SocketAddrExt;
+        let id = format!("inherited-{}", std::process::id());
+        // Bound by the launcher: nobody else can bind the name now.
+        let bound = bind(&id).unwrap();
+        assert!(bind(&id).is_err());
+        let fd = bound.into_raw_fd();
+        // Another run's name, a descriptor that is no socket, a standard one.
+        assert!(inherited("another-run", fd).is_err());
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert!(inherited(&id, std::os::fd::AsRawFd::as_raw_fd(&file)).is_err());
+        assert!(inherited(&id, 1).is_err());
+        // The first refusal owned and closed the descriptor: bind it again,
+        // as a launcher would for a new run, and take it.
+        let bound = bind(&id).unwrap();
+        let listener = inherited(&id, bound.into_raw_fd()).unwrap();
+        assert_eq!(
+            listener.local_addr().unwrap().as_abstract_name(),
+            Some(name(&id).as_bytes())
+        );
+        // A launcher that connects sees this process as its peer.
+        let address = SocketAddr::from_abstract_name(name(&id).as_bytes()).unwrap();
+        let stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
+        let mut peer = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                std::os::fd::AsRawFd::as_raw_fd(&stream),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&raw mut peer).cast(),
+                &raw mut size,
+            )
+        };
+        assert_eq!((rc, peer.pid), (0, std::process::id() as i32));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_accept_is_waited_out_and_a_good_one_is_not() {
+        let started = tokio::time::Instant::now();
+        assert_eq!(accepted(Ok(7)).await, Some(7));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        let failed: std::io::Result<i32> = Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+        assert_eq!(accepted(failed).await, None);
+        assert_eq!(started.elapsed(), ACCEPT_WAIT);
     }
 }

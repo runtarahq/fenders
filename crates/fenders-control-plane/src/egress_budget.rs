@@ -11,6 +11,22 @@ use axum::http::StatusCode;
 pub use fenders_node_protocol::egress_budget::*;
 use serde_json::Value;
 const MAX_GRANT: i64 = 16 * 1024 * 1024;
+/// The most a run holds beyond what it has sent, where its shim says what it
+/// has sent: one grant, and the least a running run keeps.
+const MAX_UNSENT: u64 = MAX_GRANT as u64 + 256 * 1024;
+/// How much of the `additional` bytes asked for is granted to a run whose
+/// ceiling is `ceiling` and whose shim says it has `sent` so many: no more
+/// than brings what it holds unsent to [`MAX_UNSENT`]. A shim that does not
+/// say is granted what it asks, as before it could say.
+fn grantable(additional: i64, ceiling: u64, sent: Option<u64>) -> i64 {
+    match sent {
+        Some(sent) => {
+            let unsent = ceiling.saturating_sub(sent.min(ceiling));
+            (additional as u64).min(MAX_UNSENT.saturating_sub(unsent)) as i64
+        }
+        None => additional,
+    }
+}
 pub(crate) const RETAINED_LAUNCHERS_MIGRATION: &str = "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS retained_egress_launchers jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(retained_egress_launchers)='array' AND jsonb_array_length(retained_egress_launchers)<=32)";
 
 pub(crate) fn validate_retained_launchers(value: &Value) -> Result<()> {
@@ -184,10 +200,18 @@ impl Store {
                 "request_id",
                 "action",
                 "bytes",
+                "sent",
                 "observation",
             ],
             &["boot_id", "expected_revision", "request_id", "action"],
         )?;
+        // What the run has sent of what it was granted, as its shim reads it
+        // from the launcher's meter: with it, a grant is held to what the
+        // run has yet to send.
+        let sent = match value.get("sent") {
+            None | Some(Value::Null) => None,
+            Some(sent) => Some(integer(sent, 0, i64::MAX)? as u64),
+        };
         let expected = integer(&value["expected_revision"], 0, i64::MAX)?;
         let request = text(&value["request_id"])?;
         if request.is_empty() || request.len() > 128 {
@@ -287,13 +311,20 @@ impl Store {
                             "freeze and settle the previous grant before renewing",
                         ));
                     }
-                    Self::transfer_capacity(&mut tx, s(&e["tenant_id"]), additional).await?;
                     let base = bytes(&g["base_bytes"])?;
                     let ceiling = if g["state"] == "frozen" {
                         base
                     } else {
                         bytes(&g["ceiling_bytes"])?
                     };
+                    // A run holds, of its workspace's allowance, no more
+                    // than it has yet to send plus one grant: asked for more
+                    // while that much is unsent, it is given what brings it
+                    // there, and its grant is renewed all the same. Without
+                    // this a run could be granted the whole allowance and
+                    // hold it from its workspace's other runs and requests.
+                    let additional = grantable(additional, ceiling, sent);
+                    Self::transfer_capacity(&mut tx, s(&e["tenant_id"]), additional).await?;
                     let ceiling = ceiling
                         .checked_add(additional as u64)
                         .ok_or_else(|| quota("cumulative byte ceiling exhausted"))?;
@@ -391,5 +422,32 @@ mod tests {
             invalid[key] = value;
             assert!(!execution_launcher_eligible(&invalid, &e, &old), "{key}");
         }
+    }
+}
+#[cfg(test)]
+mod grant_tests {
+    use super::{MAX_GRANT, MAX_UNSENT, grantable};
+
+    #[test]
+    fn a_run_holds_no_more_than_it_has_yet_to_send_and_one_grant() {
+        let grant = MAX_GRANT;
+        // Everything granted so far was sent: a whole grant more.
+        assert_eq!(grantable(grant, 1 << 30, Some(1 << 30)), grant);
+        // Nothing of the last grant was sent: only the least a run keeps.
+        let ceiling = 1 << 30;
+        let sent = ceiling - grant as u64;
+        assert_eq!(
+            grantable(grant, ceiling, Some(sent)),
+            (MAX_UNSENT - grant as u64) as i64
+        );
+        // Asking again and again while sending nothing gains nothing more.
+        let held = ceiling + MAX_UNSENT - grant as u64;
+        assert_eq!(grantable(grant, held, Some(sent)), 0);
+        assert_eq!(grantable(grant, held + (1 << 40), Some(sent)), 0);
+        // A shim that claims more sent than it was granted gains no more
+        // than one that sent it all.
+        assert_eq!(grantable(grant, ceiling, Some(u64::MAX)), grant);
+        // One that does not say is granted what it asks.
+        assert_eq!(grantable(4096, ceiling, None), 4096);
     }
 }
