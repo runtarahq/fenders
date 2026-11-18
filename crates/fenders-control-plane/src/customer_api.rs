@@ -144,6 +144,58 @@ CREATE TABLE IF NOT EXISTS customer_request_receipts (
  created timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(tenant_id,request_key));
 ";
 
+/// A request key is what its caller chose: 1 to 128 bytes, nothing more.
+pub(crate) fn request_key(key: &str) -> Result<()> {
+    if key.is_empty() || key.len() > 128 {
+        return Err(Error::invalid(
+            "Idempotency-Key is required (1–128 characters)",
+        ));
+    }
+    Ok(())
+}
+
+/// Receipts of the operator's own changes, which may have no tenant (a
+/// node's registration has none).
+pub(crate) const OPERATOR_RECEIPTS_MIGRATION: &str =
+    "ALTER TABLE operator_request_receipts ALTER COLUMN tenant_id DROP NOT NULL";
+
+/// What an operator's change answered when it was first made with `key`:
+/// a retry is given that again, and the same key with other arguments is
+/// refused. Keys are the actor's own; another operator credential's are
+/// nothing to it.
+pub(crate) async fn operator_receipt(
+    tx: &mut Tx,
+    actor: &str,
+    key: &str,
+    request: &Value,
+) -> Result<Option<Value>> {
+    request_key(key)?;
+    let previous: Option<Value> = sqlx::query_scalar("SELECT jsonb_build_object('hash',request_hash,'response',response) FROM operator_request_receipts WHERE actor=$1 AND request_key=$2")
+        .bind(actor).bind(key).fetch_optional(&mut **tx).await?;
+    if let Some(previous) = previous {
+        if previous["hash"] != fingerprint(request) {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "idempotency key has different arguments",
+            ));
+        }
+        return Ok(Some(previous["response"].clone()));
+    }
+    Ok(None)
+}
+pub(crate) async fn save_operator_receipt(
+    tx: &mut Tx,
+    actor: &str,
+    key: &str,
+    tenant: Option<&str>,
+    request: &Value,
+    response: &Value,
+) -> Result<()> {
+    sqlx::query("INSERT INTO operator_request_receipts(actor,request_key,tenant_id,request_hash,response) VALUES($1,$2,$3,$4,$5)")
+        .bind(actor).bind(key).bind(tenant).bind(fingerprint(request)).bind(response).execute(&mut **tx).await?;
+    Ok(())
+}
+
 // Only non-secret synchronous requests use these receipts. App operations retain
 // their existing durable operations and fencing. No credential plaintext is saved.
 pub(crate) async fn receipt(
@@ -152,11 +204,7 @@ pub(crate) async fn receipt(
     key: &str,
     request: &Value,
 ) -> Result<Option<Value>> {
-    if key.is_empty() || key.len() > 128 {
-        return Err(Error::invalid(
-            "Idempotency-Key is required (1–128 characters)",
-        ));
-    }
+    request_key(key)?;
     let previous: Option<Value> = sqlx::query_scalar("SELECT jsonb_build_object('hash',request_hash,'response',response) FROM customer_request_receipts WHERE tenant_id=$1 AND request_key=$2")
         .bind(tenant).bind(key).fetch_optional(&mut **tx).await?;
     if let Some(previous) = previous {

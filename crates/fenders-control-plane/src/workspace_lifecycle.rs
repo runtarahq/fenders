@@ -4,7 +4,7 @@ use crate::{
     args,
     db::*,
     error::{Error, Result},
-    model::{fingerprint, identity},
+    model::identity,
     store::{Store, Tx},
 };
 use axum::http::StatusCode;
@@ -77,18 +77,13 @@ impl Store {
         {
             return Err(Error::invalid("invalid workspace action or reason"));
         }
-        let hash = fingerprint(&json!({"kind":"workspace-lifecycle","input":input}));
+        let request = json!({"kind":"workspace-lifecycle","input":input});
         let mut tx = self.transaction(true, false).await?;
-        let previous:Option<Value>=sqlx::query_scalar("SELECT jsonb_build_object('hash',request_hash,'response',response) FROM operator_request_receipts WHERE actor=$1 AND request_key=$2")
-            .bind(actor).bind(&input.request_key).fetch_optional(&mut *tx).await?;
-        if let Some(previous) = previous {
-            if previous["hash"] != hash {
-                return Err(Error::new(
-                    StatusCode::CONFLICT,
-                    "idempotency key has different arguments",
-                ));
-            }
-            return Ok(previous["response"].clone());
+        if let Some(previous) =
+            crate::customer_api::operator_receipt(&mut tx, actor, &input.request_key, &request)
+                .await?
+        {
+            return Ok(previous);
         }
         let before = one(
             &mut tx,
@@ -165,8 +160,15 @@ impl Store {
         let row=one(&mut tx,"SELECT lifecycle_state AS status,lifecycle_revision AS revision FROM tenants WHERE id=$1",args![input.id]).await?;
         let result =
             json!({"id":input.id,"status":row["status"],"revision":row["revision"],"audit":audit});
-        sqlx::query("INSERT INTO operator_request_receipts(actor,request_key,tenant_id,request_hash,response) VALUES($1,$2,$3,$4,$5)")
-            .bind(actor).bind(&input.request_key).bind(&input.id).bind(hash).bind(&result).execute(&mut *tx).await?;
+        crate::customer_api::save_operator_receipt(
+            &mut tx,
+            actor,
+            &input.request_key,
+            Some(&input.id),
+            &request,
+            &result,
+        )
+        .await?;
         tx.commit().await?;
         Ok(result)
     }

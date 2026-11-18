@@ -380,10 +380,28 @@ impl Store {
         Ok(Value::Array(rows))
     }
     pub async fn create_tenant(&self, p: &Principal, value: CreateTenant) -> Result<Value> {
+        self.create_tenant_keyed(p, value, None).await
+    }
+    /// With a key, a retry is answered with the tenant the first call made
+    /// and makes no second one. Two tenants may share a name; nothing but
+    /// the key tells a retry from another tenant.
+    pub async fn create_tenant_keyed(
+        &self,
+        p: &Principal,
+        value: CreateTenant,
+        key: Option<&str>,
+    ) -> Result<Value> {
         p.operator()?;
         name(&value.name)?;
         value.allowance.validate()?;
+        let request = json!({"kind":"tenant.create","name":value.name,"allowance":value.allowance});
         let mut tx = self.transaction(true, false).await?;
+        if let Some(key) = key
+            && let Some(row) =
+                crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
         let (row, project_id) =
             Self::create_workspace_records(&mut tx, &value.name, &value.name, &value.allowance)
                 .await?;
@@ -398,6 +416,17 @@ impl Store {
             json!({"default":true}),
         )
         .await?;
+        if let Some(key) = key {
+            crate::customer_api::save_operator_receipt(
+                &mut tx,
+                &p.id,
+                key,
+                Some(id),
+                &request,
+                &row,
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(row)
     }

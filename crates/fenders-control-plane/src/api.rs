@@ -258,7 +258,9 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         ("PATCH", ["v1", "nodes", node]) => store.node_mode(&p, node, parse(&bytes)?).await?,
         ("POST", ["v1", "tenants"]) => {
             status = StatusCode::CREATED;
-            store.create_tenant(&p, parse(&bytes)?).await?
+            store
+                .create_tenant_keyed(&p, parse(&bytes)?, Some(key))
+                .await?
         }
         // A tenant's allowance, and the size its apps take when they name none.
         ("PATCH", ["v1", "tenants", tenant]) => {

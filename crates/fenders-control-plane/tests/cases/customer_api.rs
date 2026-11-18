@@ -1189,3 +1189,55 @@ async fn a_secrets_ciphertext_opens_only_for_its_own_row() {
     assert!(launch("never-bound", after.to_owned()).await.is_err());
     l.finish().await;
 }
+
+async fn tenants_named(l: &Lab, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM tenants WHERE name=$1")
+        .bind(name)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_retried_tenant_creation_makes_one_tenant() {
+    let l = Lab::new().await;
+    let tenant = json!({"name":"acme","allowance":{"cpu_percent":200,"memory_mib":1024,"storage_bytes":1073741824,"instances":2,"transfer_bytes":1073741824}});
+    // Two at once, as a client that timed out and tried again would send.
+    let (a, b) = tokio::join!(
+        call(&l, &l.token, "POST", "/v1/tenants", tenant.clone(), "acme"),
+        call(&l, &l.token, "POST", "/v1/tenants", tenant.clone(), "acme")
+    );
+    assert_eq!(a.0, StatusCode::CREATED, "{}", a.1);
+    assert_eq!(a, b);
+    assert_eq!(tenants_named(&l, "acme").await, 1);
+    // One audit record of it, and one default project.
+    let (audits, projects): (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM audit WHERE action='tenant.create' AND resource_id=$1),(SELECT count(*) FROM projects WHERE tenant_id=$1)")
+        .bind(s(&a.1["id"]))
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!((audits, projects), (1, 1));
+    // The key with other arguments is refused, and makes nothing.
+    let mut other = tenant.clone();
+    other["allowance"]["instances"] = json!(3);
+    let refused = call(&l, &l.token, "POST", "/v1/tenants", other, "acme").await;
+    assert_eq!(refused.0, StatusCode::CONFLICT, "{}", refused.1);
+    // A name is a label, not an identity: another key makes another tenant of it.
+    let second = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/tenants",
+        tenant.clone(),
+        "acme-2",
+    )
+    .await;
+    assert_eq!(second.0, StatusCode::CREATED, "{}", second.1);
+    assert_ne!(second.1["id"], a.1["id"]);
+    assert_eq!(tenants_named(&l, "acme").await, 2);
+    // Without a key nothing is made: a retry could not be told from a new request.
+    let keyless = call(&l, &l.token, "POST", "/v1/tenants", tenant, "").await;
+    assert_eq!(keyless.0, StatusCode::BAD_REQUEST, "{}", keyless.1);
+    assert_eq!(tenants_named(&l, "acme").await, 2);
+    l.finish().await;
+}
