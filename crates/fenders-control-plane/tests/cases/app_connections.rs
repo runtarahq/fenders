@@ -212,33 +212,6 @@ async fn removal_stops_the_run_that_holds_it_and_readding_never_reopens_it() {
     assert_eq!(counts["revoking"], 1);
     // The connection saved again belongs to later runs, not to this one.
     assert_eq!(l.execution(s(&e["id"])).await["desired"], "stopped");
-    assert_eq!(
-        l.store
-            .create_grant(
-                &l.operator,
-                &l.tenant,
-                &l.project,
-                json!({"source_kind":"execution","source_id":e["id"],"endpoint_id":service["id"]}),
-                "bypass"
-            )
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::CONFLICT
-    );
-    let grant: String = sqlx::query_scalar("SELECT id FROM network_grants WHERE execution_id=$1")
-        .bind(s(&e["id"]))
-        .fetch_one(&l.store.pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        l.store
-            .revoke_grant(&l.operator, &l.tenant, &l.project, &grant, "bypass-revoke")
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::CONFLICT
-    );
     // Only the run's end finishes the removal: not a report that it runs.
     l.report(&node, &stopped, "running", 2).await;
     assert_eq!(l.operation(&removed).await["state"], "pending");
@@ -249,8 +222,8 @@ async fn removal_stops_the_run_that_holds_it_and_readding_never_reopens_it() {
     assert_eq!(summary(&l, app).await["revoking"], 0);
     assert_ne!(current["items"][0]["id"], first);
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT state FROM network_grants WHERE id=$1")
-            .bind(&grant)
+        sqlx::query_scalar::<_, String>("SELECT state FROM network_grants WHERE execution_id=$1")
+            .bind(s(&e["id"]))
             .fetch_one(&l.store.pool)
             .await
             .unwrap(),
@@ -373,25 +346,6 @@ async fn connection_completion_waits_for_http_replacement_and_the_commands_end()
     let command = run(&l, app, "command").await;
     assign(&l, &node, &command).await;
     l.report(&node, &command, "running", 1).await;
-    for (kind, id) in [
-        ("deployment", &http["deployment_id"]),
-        ("execution", &http["id"]),
-    ] {
-        assert_eq!(
-            l.store
-                .create_grant(
-                    &l.operator,
-                    &l.tenant,
-                    &l.project,
-                    json!({"source_kind":kind,"source_id":id,"endpoint_id":service["id"]}),
-                    &uid()
-                )
-                .await
-                .unwrap_err()
-                .status,
-            StatusCode::CONFLICT
-        );
-    }
     let removed = set(&l, app, json!([]), "remove").await;
     assert_eq!(removed["state"], "pending");
     // Both the serving execution and the command hold the connection.

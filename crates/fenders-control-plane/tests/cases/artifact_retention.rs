@@ -51,13 +51,12 @@ async fn unused_upload_expiry_releases_quota_and_reupload_preserves_identity_wit
     );
     assert!(
         l.store
-            .create_workload(
+            .create_app(
                 &l.operator,
                 &l.tenant,
                 &l.project,
-                json!({"spec":{"artifact_id":l.artifact}}),
+                json!({"name":"expired","artifact_id":l.artifact}),
                 "expired",
-                false
             )
             .await
             .is_err()

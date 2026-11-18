@@ -108,7 +108,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
     let dsn = database_url(args.database_url_file.as_deref())?;
-    let mut store = Store::connect(&dsn, &args.state).await?.refusing_unserved();
+    let mut store = Store::connect(&dsn, &args.state).await?;
     if let Some(endpoint) = &args.run_channel_endpoint {
         let tls = tls
             .as_ref()

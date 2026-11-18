@@ -222,9 +222,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             ));
         }
     }
-    if store.refuse_unserved {
-        crate::unavailable::refuse(method, &segments, &bytes)?;
-    }
     let mut status = StatusCode::OK;
     let value: Value = match (method, segments.as_slice()) {
         (

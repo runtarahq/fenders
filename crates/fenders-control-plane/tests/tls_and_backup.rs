@@ -1590,37 +1590,40 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
         )
         .await
         .unwrap();
+    // An app with a URL, deployed as a tenant deploys one, once the node has
+    // inspected its component.
+    let job = store
+        .claim_component(node_id, json!({"boot_id":"fixture"}))
+        .await
+        .unwrap()["job"]
+        .clone();
+    store.component_result(node_id,a["id"].as_str().unwrap(),job["generation"].as_i64().unwrap(),json!({"boot_id":"fixture","inspection":{"format_version":1,"runtime":fenders_control_plane::artifacts::RUNTIME,"digest":a["digest"],"bytes":8,"command":false,"http":true,"imports":[],"exports":[]}})).await.unwrap();
     let op = store
-        .create_workload(
+        .deploy_app(
             &operator,
             tenant,
             project,
-            json!({"name":"web","spec":{"artifact_id":a["id"],"secret_env":{"TOKEN":secret["id"]}}}),
-            "web",
-            true,
+            fenders_control_plane::apps::AppSubmission {
+                value: json!({"name":"web","artifact_id":a["id"],"triggers":{"manual":false,"http":true},"configuration":{"secret_env":{"TOKEN":secret["id"]}}}),
+                key: "web",
+                domain: "apps.test",
+            },
         )
         .await
         .unwrap();
-    let route = store
-        .create_route(
-            &operator,
-            tenant,
-            project,
-            json!({"name":"web","deployment_id":op["resource_id"]}),
-            "apps.test",
-        )
-        .await
-        .unwrap();
+    let web = op["resource_id"].as_str().unwrap().to_owned();
+    let route =
+        json!({"hostname":fenders_control_plane::app_http::hostname(&web, "apps.test").unwrap()});
     store.schedule().await.unwrap();
     let executions = store
         .resources(&operator, tenant, project, "executions", None)
         .await
         .unwrap();
     store.heartbeat(node_id,json!({"boot_id":"fixture","confinement":fenders_control_plane::model::HOST_CONFINEMENT,"reports":[{"id":executions[0]["id"],"generation":1,"sequence":1,"state":"running","cpu_usec":0,"memory_bytes":0}]})).await.unwrap();
-    // An execution of no app takes its own requests; an app's take the app's.
+    // An app's executions take the app's requests.
     fixture_shim(
         store.clone(),
-        executions[0]["id"].as_str().unwrap().to_owned(),
+        web.clone(),
         executions[0]["id"].as_str().unwrap().to_owned(),
         redacting.clone(),
         ingress_calls.clone(),
@@ -1699,12 +1702,6 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
         .execute(&store.pool)
         .await
         .unwrap();
-    let job = store
-        .claim_component(node_id, json!({"boot_id":"fixture"}))
-        .await
-        .unwrap()["job"]
-        .clone();
-    store.component_result(node_id,a["id"].as_str().unwrap(),job["generation"].as_i64().unwrap(),json!({"boot_id":"fixture","inspection":{"format_version":1,"runtime":fenders_control_plane::artifacts::RUNTIME,"digest":a["digest"],"bytes":8,"command":false,"http":true,"imports":[],"exports":[]}})).await.unwrap();
     let demand=store.deploy_app(&operator,tenant,project,fenders_control_plane::apps::AppSubmission{value:json!({"name":"demand-gateway","artifact_id":a["id"],"configuration":{"keep_warm":false},"triggers":{"http":true,"manual":false}}),key:"demand-gateway",domain:"apps.test"}).await.unwrap();
     let demand_id = demand["resource_id"].as_str().unwrap();
     store.schedule().await.unwrap();

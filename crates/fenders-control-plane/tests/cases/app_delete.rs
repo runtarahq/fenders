@@ -238,24 +238,6 @@ async fn assigned_deletion_holds_quota_until_current_terminal_report_and_never_r
     assert_eq!(row["desired"], "stopped");
     assert_eq!(row["generation"], 2);
     assert_eq!(row["reserved"], true);
-    for action in ["pause", "resume"] {
-        assert_eq!(
-            l.store
-                .action(
-                    &l.operator,
-                    &l.tenant,
-                    &l.project,
-                    execution,
-                    action,
-                    &uid()
-                )
-                .await
-                .unwrap_err()
-                .status,
-            StatusCode::CONFLICT,
-            "deleted app execution accepted {action}"
-        );
-    }
     l.store.heartbeat(s(&node["id"]),json!({"boot_id":"test-boot","confinement":HOST_CONFINEMENT,
         "reports":[{"id":execution,"generation":1,"sequence":1,"state":"stopped","cpu_usec":0,"memory_bytes":0}]})).await.unwrap();
     assert_eq!(l.execution(execution).await["reserved"], true);

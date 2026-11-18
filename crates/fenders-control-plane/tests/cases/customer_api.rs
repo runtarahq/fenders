@@ -1116,16 +1116,10 @@ async fn a_secrets_ciphertext_opens_only_for_its_own_row() {
     let launch = |key: &'static str, id: String| {
         let l = &l;
         async move {
-            l.store
-                .create_workload(
-                    &l.operator,
-                    &l.tenant,
-                    &l.project,
-                    json!({"spec":{"artifact_id":l.artifact,"secret_env":{"TOKEN":id}}}),
-                    key,
-                    false,
-                )
-                .await
+            let app = l
+                .try_configured_app(json!({"secret_env":{"TOKEN":id}}))
+                .await?;
+            l.start_app(&app, key).await
         }
     };
     let (own, other) = (

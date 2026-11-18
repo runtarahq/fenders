@@ -61,8 +61,6 @@ pub struct Store {
     pub api_rates: std::sync::Arc<crate::ingress::Rates>,
     /// Whose each gateway host name is, for refusing without a transaction.
     pub ingress_hosts: std::sync::Arc<crate::ingress::Hosts>,
-    /// Refuse what no shim node can serve; see [`crate::unavailable`].
-    pub(crate) refuse_unserved: bool,
 }
 
 fn private_directory(path: &Path) -> Result<()> {
@@ -166,13 +164,7 @@ impl Store {
             api_rates: Default::default(),
             node_turns: Default::default(),
             sockets: Default::default(),
-            refuse_unserved: false,
         })
-    }
-    /// The shipped configuration: features no shim node serves answer 501.
-    pub fn refusing_unserved(mut self) -> Self {
-        self.refuse_unserved = true;
-        self
     }
 
     pub async fn transaction(&self, mutate: bool, recovery: bool) -> Result<Tx> {

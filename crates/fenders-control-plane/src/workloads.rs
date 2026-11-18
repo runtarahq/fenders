@@ -212,71 +212,18 @@ impl Store {
         }
         Ok(row)
     }
-    pub async fn create_workload(
-        &self,
-        p: &Principal,
-        tenant: &str,
-        project: &str,
-        value: Value,
-        key: &str,
-        service: bool,
-    ) -> Result<Value> {
-        let allowed = if service {
-            &["name", "spec"][..]
-        } else {
-            &["spec"][..]
-        };
-        fields(&value, allowed, allowed)?;
-        let spec = wasm_spec(&value["spec"], service)?;
-        let mut request = json!({"kind":if service {"deployment"} else {"execution"},"spec":spec});
-        if service {
-            request["name"] = json!(named(&value["name"])?);
-        }
-        let mut tx = self.transaction(true, false).await?;
-        Self::project(&mut tx, p, tenant, project, true).await?;
-        if let Some(previous) = Self::idem(&mut tx, tenant, project, key, &request).await? {
-            return Ok(previous);
-        }
-        self.check_refs(&mut tx, tenant, project, &spec).await?;
-        let deployment = if service { Some(uid()) } else { None };
-        if let Some(d) = &deployment {
-            exec(
-                &mut tx,
-                "INSERT INTO deployments(id,tenant_id,project_id,name,spec) VALUES($1,$2,$3,$4,$5)",
-                args![d, tenant, project, request["name"], spec],
-            )
-            .await?;
-            Self::initial_grants(&mut tx, tenant, project, "deployment", d, &spec).await?;
-        }
-        let run =
-            Self::execution(&mut tx, tenant, project, &spec, deployment.as_deref(), 1).await?;
-        let resource = deployment.as_deref().unwrap_or(s(&run["id"]));
-        let kind = if service {
-            "create-deployment"
-        } else {
-            "create-execution"
-        };
-        let op = Self::operation(&mut tx, tenant, project, key, &request, resource, kind).await?;
-        Self::audit(&mut tx, p, kind, resource, tenant, json!({})).await?;
-        tx.commit().await?;
-        Ok(op)
-    }
-    pub async fn action(
+    /// Stops an execution that has not ended. Reached through the run of
+    /// an app it is: see `cancel_app_run`.
+    pub(crate) async fn stop_execution(
         &self,
         p: &Principal,
         tenant: &str,
         project: &str,
         run: &str,
-        action: &str,
         key: &str,
     ) -> Result<Value> {
         identity(run)?;
-        let desired = match action {
-            "pause" => "paused",
-            "resume" => "running",
-            "stop" => "stopped",
-            _ => return Err(Error::invalid("unknown action")),
-        };
+        let (action, desired) = ("stop", "stopped");
         let request = json!({"kind":action,"execution":run});
         let mut tx = self.transaction(true, false).await?;
         Self::project(&mut tx, p, tenant, project, true).await?;
@@ -344,85 +291,6 @@ impl Store {
         )
         .await?;
         Self::reconcile_app_runs(&mut tx).await?;
-        tx.commit().await?;
-        Ok(op)
-    }
-    pub async fn update_deployment(
-        &self,
-        p: &Principal,
-        tenant: &str,
-        project: &str,
-        deployment: &str,
-        value: Value,
-        key: &str,
-    ) -> Result<Value> {
-        identity(deployment)?;
-        fields(
-            &value,
-            &["expected_revision", "spec", "desired"],
-            &["expected_revision"],
-        )?;
-        let revision = integer(&value["expected_revision"], 1, i32::MAX as i64 - 1)?;
-        let desired = get(&value, "desired", json!("running"));
-        if !matches!(s(&desired), "running" | "stopped") {
-            return Err(Error::invalid("invalid deployment desired state"));
-        }
-        let new_spec = value.get("spec").map(|v| wasm_spec(v, true)).transpose()?;
-        let mut request = value.clone();
-        request["kind"] = json!("update-deployment");
-        request["deployment"] = json!(deployment);
-        let mut tx = self.transaction(true, false).await?;
-        Self::project(&mut tx, p, tenant, project, true).await?;
-        if let Some(previous) = Self::idem(&mut tx, tenant, project, key, &request).await? {
-            return Ok(previous);
-        }
-        let old = one(
-            &mut tx,
-            "SELECT * FROM deployments WHERE tenant_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE",
-            args![tenant, project, deployment],
-        )
-        .await?;
-        Self::independent_deployment(&mut tx, &old["id"]).await?;
-        if n(&old["revision"]) != revision {
-            return Err(conflict("deployment revision changed"));
-        }
-        let spec = new_spec.as_ref().unwrap_or(&old["spec"]);
-        self.check_refs(&mut tx, tenant, project, spec).await?;
-        if new_spec.is_some() {
-            Self::initial_grants(&mut tx, tenant, project, "deployment", deployment, spec).await?;
-        }
-        exec(
-            &mut tx,
-            "UPDATE deployments SET spec=$1,revision=revision+1,desired=$2 WHERE id=$3",
-            args![spec, desired, deployment],
-        )
-        .await?;
-        exec(&mut tx,"UPDATE executions SET desired='stopped',generation=generation+1,updated=now() WHERE deployment_id=$1 AND reserved",args![deployment]).await?;
-        exec(&mut tx,"UPDATE executions SET state='stopped',reserved=false WHERE deployment_id=$1 AND node_id IS NULL AND reserved",args![deployment]).await?;
-        exec(&mut tx,"UPDATE operations SET state='failed',error='superseded',updated=now() WHERE resource_id=$1 AND state='pending'",args![deployment]).await?;
-        let kind = if desired == "stopped" {
-            "stop-deployment"
-        } else {
-            "update-deployment"
-        };
-        let mut op =
-            Self::operation(&mut tx, tenant, project, key, &request, deployment, kind).await?;
-        exec(
-            &mut tx,
-            "UPDATE operations SET target_revision=$1 WHERE id=$2",
-            args![revision + 1, op["id"]],
-        )
-        .await?;
-        op["target_revision"] = json!(revision + 1);
-        Self::audit(
-            &mut tx,
-            p,
-            kind,
-            deployment,
-            tenant,
-            json!({"revision":revision+1}),
-        )
-        .await?;
         tx.commit().await?;
         Ok(op)
     }

@@ -45,7 +45,6 @@ pub mod store;
 pub mod stream_listener;
 pub mod supervision;
 pub use fenders_node_protocol::transport;
-pub mod unavailable;
 pub mod usage;
 mod usage_compaction;
 pub mod websocket;

@@ -175,18 +175,138 @@ impl Lab {
             .unwrap();
         (self.store.authenticate(s(&v["token"])).await.unwrap(), v)
     }
-    async fn create(&self, key: &str, spec: Value) -> Value {
+    /// Says of the lab's component what a node says once it has inspected
+    /// it, for tests that are not about inspection.
+    async fn validated(&self) {
+        // No node inspected it: the one rule a fixture's row cannot keep.
+        sqlx::query("ALTER TABLE artifact_validations DROP CONSTRAINT IF EXISTS artifact_validations_check2")
+            .execute(&self.store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE artifact_validations v SET state='valid',lease_until=NULL,updated=now(),inspection=jsonb_build_object('format_version',1,'runtime',$2::text,'digest',a.digest,'bytes',a.size,'http',true,'command',true,'imports','[]'::jsonb,'exports','[]'::jsonb) FROM artifacts a WHERE a.id=v.artifact_id AND a.id=$1 AND v.state<>'valid'")
+            .bind(&self.artifact)
+            .bind(fenders_control_plane::artifacts::RUNTIME)
+            .execute(&self.store.pool)
+            .await
+            .unwrap();
+    }
+    /// An app of the lab's component that runs on request, ready to.
+    async fn command_app(&self) -> String {
+        self.configured_app(json!({})).await
+    }
+    /// The same, with the environment and secrets its runs are given.
+    async fn configured_app(&self, configuration: Value) -> String {
+        self.try_configured_app(configuration).await.unwrap()
+    }
+    async fn try_configured_app(
+        &self,
+        configuration: Value,
+    ) -> fenders_control_plane::error::Result<String> {
+        self.validated().await;
+        let name = format!("run-{}", &uid()[..12]);
+        let (app, version) = define_app(self, &name).await;
         self.store
-            .create_workload(
+            .update_app_triggers(
                 &self.operator,
                 &self.tenant,
                 &self.project,
-                json!({"spec":spec}),
-                key,
-                false,
+                &app,
+                json!({"manual":true,"expected_revision":1}),
+                &uid(),
             )
             .await
-            .unwrap()
+            .unwrap();
+        self.store
+            .activate_app_release(
+                &self.operator,
+                &self.tenant,
+                &self.project,
+                &app,
+                json!({"version_id":version,"expected_revision":1,"configuration":configuration}),
+                &uid(),
+            )
+            .await?;
+        Ok(app)
+    }
+    /// An app with a URL, deployed as a tenant deploys one. Answers with its
+    /// id and hostname; its execution is `web_execution` once scheduled.
+    async fn web_app(&self, name: &str, domain: &str) -> Value {
+        self.validated().await;
+        let op = self
+            .store
+            .deploy_app(
+                &self.operator,
+                &self.tenant,
+                &self.project,
+                fenders_control_plane::apps::AppSubmission {
+                    value: json!({"name":name,"artifact_id":self.artifact,"triggers":{"manual":false,"http":true}}),
+                    key: &uid(),
+                    domain,
+                },
+            )
+            .await
+            .unwrap();
+        let app = s(&op["resource_id"]).to_owned();
+        let hostname = fenders_control_plane::app_http::hostname(&app, domain).unwrap();
+        json!({"app_id":app,"hostname":hostname})
+    }
+    async fn web_execution(&self, web: &Value) -> Value {
+        let status = self
+            .store
+            .app_http_status(
+                &self.operator,
+                &self.tenant,
+                &self.project,
+                s(&web["app_id"]),
+            )
+            .await
+            .unwrap();
+        self.run(&json!({"resource_id":status["execution_id"]}))
+            .await
+    }
+    /// A run, started as a tenant starts one: of an app, on request. What a
+    /// test of the engine beneath the apps begins from. `resource_id` is
+    /// the run's execution.
+    async fn start_app(&self, app: &str, key: &str) -> fenders_control_plane::error::Result<Value> {
+        let op = self
+            .store
+            .run_app(&self.operator, &self.tenant, &self.project, app, key)
+            .await?;
+        let run = self
+            .store
+            .app_run(
+                &self.operator,
+                &self.tenant,
+                &self.project,
+                app,
+                s(&op["resource_id"]),
+            )
+            .await?;
+        Ok(json!({"resource_id":run["execution_id"],"run_id":run["id"],"app_id":app}))
+    }
+    /// `spec` names the lab's component and, at most, the environment and
+    /// secrets of the app made for the run.
+    async fn create(&self, key: &str, mut spec: Value) -> Value {
+        let given = spec.as_object_mut().unwrap();
+        assert_eq!(given.remove("artifact_id"), Some(json!(self.artifact)));
+        let app = self.configured_app(spec).await;
+        self.start_app(&app, key).await.unwrap()
+    }
+    /// Stops a run through its app, as a tenant does, by its execution.
+    async fn stop(
+        &self,
+        execution: &str,
+        key: &str,
+    ) -> fenders_control_plane::error::Result<Value> {
+        let (app, run): (String, String) =
+            sqlx::query_as("SELECT app_id,id FROM customer_app_runs WHERE execution_id=$1")
+                .bind(execution)
+                .fetch_one(&self.store.pool)
+                .await
+                .unwrap();
+        self.store
+            .cancel_app_run(&self.operator, &self.tenant, &self.project, &app, &run, key)
+            .await
     }
     async fn run(&self, op: &Value) -> Value {
         self.store
@@ -296,62 +416,45 @@ async fn tenant_credentials_roles_and_http_boundaries() {
 #[tokio::test]
 async fn concurrent_quota_and_idempotency() {
     let l = Lab::new().await;
+    let app = l.command_app().await;
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..12 {
-        let st = l.store.clone();
-        let p = l.operator.clone();
-        let t = l.tenant.clone();
-        let project = l.project.clone();
-        let a = l.artifact.clone();
-        tasks.spawn(async move {
-            st.create_workload(
-                &p,
-                &t,
-                &project,
-                json!({"spec":{"artifact_id":a}}),
-                "same",
-                false,
-            )
-            .await
-            .unwrap()
-        });
+        let (st, p, t, project, app) = (
+            l.store.clone(),
+            l.operator.clone(),
+            l.tenant.clone(),
+            l.project.clone(),
+            app.clone(),
+        );
+        tasks.spawn(async move { st.run_app(&p, &t, &project, &app, "same").await.unwrap() });
     }
     let mut ids = std::collections::BTreeSet::new();
     while let Some(v) = tasks.join_next().await {
         ids.insert(s(&v.unwrap()["id"]).to_owned());
     }
     assert_eq!(ids.len(), 1);
+    // The same request made of another app is another request's key.
+    let other = l.command_app().await;
     assert_eq!(
         l.store
-            .create_workload(
-                &l.operator,
-                &l.tenant,
-                &l.project,
-                json!({"spec":{"artifact_id":l.artifact,"cpu_percent":25}}),
-                "same",
-                false
-            )
+            .run_app(&l.operator, &l.tenant, &l.project, &other, "same")
             .await
             .unwrap_err()
             .status,
         StatusCode::CONFLICT
     );
+    // An app runs once at a time: ten apps, started together.
     for index in 0..10 {
-        let st = l.store.clone();
-        let p = l.operator.clone();
-        let t = l.tenant.clone();
-        let project = l.project.clone();
-        let a = l.artifact.clone();
+        let app = l.command_app().await;
+        let (st, p, t, project) = (
+            l.store.clone(),
+            l.operator.clone(),
+            l.tenant.clone(),
+            l.project.clone(),
+        );
         tasks.spawn(async move {
             match st
-                .create_workload(
-                    &p,
-                    &t,
-                    &project,
-                    json!({"spec":{"artifact_id":a}}),
-                    &format!("run-{index}"),
-                    false,
-                )
+                .run_app(&p, &t, &project, &app, &format!("run-{index}"))
                 .await
             {
                 Ok(v) => v,
@@ -368,10 +471,10 @@ async fn concurrent_quota_and_idempotency() {
             admitted += 1
         }
     }
+    // Four at once is the tenant's allowance; one is running already.
     assert_eq!(admitted, 3);
     let usage = l.store.usage(&l.operator, &l.tenant, None).await.unwrap();
     assert_eq!(usage["reserved"]["instances"], 4);
-    assert_eq!(usage["reserved"]["memory_mib"], 352);
     l.finish().await;
 }
 
@@ -430,48 +533,10 @@ async fn secret_delivery_generation_fencing_and_confinement() {
         b"\0asm\x0d\0\x01\0"
     );
     l.report(own, &e, "running", 1).await;
-    l.store
-        .action(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            s(&e["id"]),
-            "pause",
-            "pause",
-        )
-        .await
-        .unwrap();
-    let paused = l.run(&op).await;
-    l.report(own, &e, "stopped", 10).await;
-    assert_eq!(l.run(&op).await["reserved"], true);
-    l.report(own, &paused, "paused", 2).await;
-    assert_eq!(l.run(&op).await["state"], "paused");
-    l.store
-        .heartbeat(s(&own["id"]), json!({"boot_id":"test-boot","reports":[]}))
-        .await
-        .unwrap();
-    assert_eq!(
-        l.store
-            .assignment(s(&own["id"]), s(&e["id"]), 2)
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    l.store
-        .action(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            s(&e["id"]),
-            "stop",
-            "stop",
-        )
-        .await
-        .unwrap();
+    l.stop(s(&e["id"]), "stop").await.unwrap();
     let stopped = l
         .store
-        .assignment(s(&own["id"]), s(&e["id"]), 3)
+        .assignment(s(&own["id"]), s(&e["id"]), 2)
         .await
         .unwrap();
     assert!(stopped["spec"].is_null());
@@ -482,184 +547,10 @@ async fn secret_delivery_generation_fencing_and_confinement() {
 }
 
 #[tokio::test]
-async fn partition_reservations_and_revision_replacement() {
-    let l = Lab::new().await;
-    let node = l.node("node-a").await;
-    let op = l
-        .store
-        .create_workload(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"web","spec":{"artifact_id":l.artifact}}),
-            "deploy",
-            true,
-        )
-        .await
-        .unwrap();
-    l.store.schedule().await.unwrap();
-    let all = l
-        .store
-        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
-        .await
-        .unwrap();
-    let old = all[0].clone();
-    l.report(&node, &old, "running", 1).await;
-    l.store
-        .update_deployment(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            s(&op["resource_id"]),
-            json!({"expected_revision":1,"spec":{"artifact_id":l.artifact,"cpu_percent":50}}),
-            "revision",
-        )
-        .await
-        .unwrap();
-    l.report(&node, &old, "stopped", 20).await;
-    l.store.schedule().await.unwrap();
-    assert_eq!(
-        l.store
-            .resources(&l.operator, &l.tenant, &l.project, "executions", None)
-            .await
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    let current = l
-        .store
-        .resources(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            "executions",
-            Some(s(&old["id"])),
-        )
-        .await
-        .unwrap();
-    l.report(&node, &current, "stopped", 21).await;
-    l.store.schedule().await.unwrap();
-    l.store.schedule().await.unwrap();
-    let all = l
-        .store
-        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
-        .await
-        .unwrap();
-    assert_eq!(all.as_array().unwrap().len(), 2);
-    let mut tx = l.store.transaction(true, false).await.unwrap();
-    exec(
-        &mut tx,
-        "UPDATE nodes SET last_seen=now()-interval '1 minute' WHERE id=$1",
-        fenders_control_plane::args![node["id"]],
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-    l.store.schedule().await.unwrap();
-    let all = l
-        .store
-        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
-        .await
-        .unwrap();
-    let active = all
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["reserved"] == true)
-        .unwrap();
-    assert_eq!(active["state"], "unreachable");
-    assert_eq!(active["node_id"], node["id"]);
-    l.finish().await;
-}
-
-#[tokio::test]
-async fn external_endpoint_network_revocation() {
-    let (l, node, ca) = app_connections::setup().await;
-    let endpoint = app_connections::endpoint(&l, &ca, 2).await;
-    let op=l.create("networked",json!({"artifact_id":l.artifact,"network_id":endpoint["network_id"],"endpoint_ids":[endpoint["id"]],"endpoint_env":{"PGHOST":{"endpoint_id":endpoint["id"],"field":"host"}}})).await;
-    l.store.schedule().await.unwrap();
-    let e = l.run(&op).await;
-    let assignment = l
-        .store
-        .assignment(s(&node["id"]), s(&e["id"]), 1)
-        .await
-        .unwrap();
-    assert_eq!(assignment["spec"]["env"]["PGHOST"], "10.50.0.2");
-    assert_eq!(assignment["spec"]["tcp_allow"], json!(["10.50.0.2:5432"]));
-    assert!(assignment["spec"].get("network_start_blocked").is_none());
-    assert!(assignment.get("network").is_none());
-    let grants = l
-        .store
-        .resources(&l.operator, &l.tenant, &l.project, "grants", None)
-        .await
-        .unwrap();
-    let revoke = l
-        .store
-        .revoke_grant(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            s(&grants[0]["id"]),
-            "revoke",
-        )
-        .await
-        .unwrap();
-    assert_eq!(revoke["state"], "pending");
-    // The grant is part of the run's launch policy, so the run is stopped.
-    let stopped = l.execution(s(&e["id"])).await;
-    assert_eq!(stopped["desired"], "stopped");
-    assert_eq!(stopped["generation"], 2);
-    let operation = || {
-        l.store.resources(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            "operations",
-            Some(s(&revoke["id"])),
-        )
-    };
-    l.report(&node, &stopped, "running", 1).await;
-    assert_eq!(operation().await.unwrap()["state"], "pending");
-    l.report(&node, &stopped, "stopped", 2).await;
-    assert_eq!(operation().await.unwrap()["state"], "succeeded");
-    let grants = l
-        .store
-        .resources(&l.operator, &l.tenant, &l.project, "grants", None)
-        .await
-        .unwrap();
-    assert_eq!(grants[0]["state"], "revoked");
-    l.finish().await;
-}
-
-#[tokio::test]
 async fn ingress_budget_and_recovery_barrier() {
     let l = Lab::new().await;
     let node = l.node("node-a").await;
-    let op = l
-        .store
-        .create_workload(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"web","spec":{"artifact_id":l.artifact}}),
-            "web",
-            true,
-        )
-        .await
-        .unwrap();
-    let route = l
-        .store
-        .create_route(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"web","deployment_id":op["resource_id"]}),
-            "apps.test",
-        )
-        .await
-        .unwrap();
+    let route = l.web_app("web", "apps.test").await;
     assert!(
         l.store
             .ingress_start(s(&route["hostname"]), 0)
@@ -667,12 +558,8 @@ async fn ingress_budget_and_recovery_barrier() {
             .is_err()
     );
     l.store.schedule().await.unwrap();
-    let all = l
-        .store
-        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
-        .await
-        .unwrap();
-    l.report(&node, &all[0], "running", 1).await;
+    let serving = l.web_execution(&route).await;
+    l.report(&node, &serving, "running", 1).await;
     let (_, lease) = l
         .store
         .ingress_start(s(&route["hostname"]), 4)

@@ -63,7 +63,7 @@ as both control plane and node.
 
 | Feature | State |
 |---|---|
-| Pause and resume | The node answers 501 and the API refuses the request (`unavailable.rs`); a run can only be stopped |
+| Pause and resume | The API has no such request; a run can only be stopped (`POST …/apps/APP/runs/RUN/cancel`) |
 | Worker host qualification | There is no harness that qualifies a new host for production |
 | A user interface | None is included. `Store::with_assets` lets a wrapping binary serve its own |
 
@@ -244,5 +244,5 @@ as both control plane and node.
 - The control-plane suite is run with `--test-threads=4`; at full parallelism
   a varying handful fail under load and pass when rerun.
 - Code kept for features not yet rebuilt on shims (the `freeze` and `settle`
-  actions of `egress_budget.rs`, pause and resume in `workloads.rs`, lease
+  actions of `egress_budget.rs`, pausing in the node, lease
   validation in the node) is exercised only against stand-ins.

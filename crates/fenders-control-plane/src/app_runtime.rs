@@ -806,7 +806,7 @@ impl Store {
                 "run has nothing started to stop",
             ));
         };
-        self.action(p, tenant, project, execution, "stop", key)
+        self.stop_execution(p, tenant, project, execution, key)
             .await
     }
 

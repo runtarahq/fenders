@@ -103,17 +103,7 @@ async fn app_run(l: &Lab, artifact: &str, name: &str, size: &str) -> String {
 }
 
 async fn stop(l: &Lab, execution: &str) {
-    l.store
-        .action(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            execution,
-            "stop",
-            &uid(),
-        )
-        .await
-        .unwrap();
+    l.stop(execution, &uid()).await.unwrap();
     settled(l, execution).await;
 }
 async fn settled(l: &Lab, execution: &str) {

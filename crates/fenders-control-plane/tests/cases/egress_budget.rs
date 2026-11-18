@@ -3,29 +3,7 @@ use fenders_control_plane::egress_budget::CONTRACT;
 const LAUNCHER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 async fn fixture(l: &Lab) -> (Value, Value, Value) {
     let node = l.node("budget-node").await;
-    let op = l
-        .store
-        .create_workload(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"budget-web","spec":{"artifact_id":l.artifact}}),
-            "web",
-            true,
-        )
-        .await
-        .unwrap();
-    let route = l
-        .store
-        .create_route(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"web","deployment_id":op["resource_id"]}),
-            "apps.test",
-        )
-        .await
-        .unwrap();
+    let route = l.web_app("budget-web", "apps.test").await;
     l.store.schedule().await.unwrap();
     let all = l
         .store
@@ -44,6 +22,35 @@ async fn fixture(l: &Lab) -> (Value, Value, Value) {
         .unwrap();
     l.store.heartbeat(s(&node["id"]),json!({"boot_id":"test-boot","reports":[],"confinement":HOST_CONFINEMENT,"egress_budget_contract":CONTRACT,"launcher_digest":LAUNCHER})).await.unwrap();
     (node, e, route)
+}
+/// A run with a network of its own, as a run of an app with a connection
+/// has. `resource_id` is its execution.
+async fn networked(l: &mut Lab, key: &str) -> Value {
+    l.store = l.store.clone().with_external_network(
+        fenders_control_plane::external_endpoints::ExternalNetworkPolicy {
+            allowed_cidrs: vec!["10.50.0.0/24".parse().unwrap()],
+            denied_cidrs: vec![],
+        },
+    );
+    let pki = l.root.path().join("external-pki");
+    if !pki.exists() {
+        fenders_control_plane::pki::create(
+            &pki,
+            &std::collections::BTreeMap::from([("database".into(), vec!["10.50.0.2".into()])]),
+        )
+        .unwrap();
+    }
+    let ca = json!(std::fs::read_to_string(pki.join("ca.pem")).unwrap());
+    let known: i64 = sqlx::query_scalar("SELECT count(*) FROM external_endpoints")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    let service = super::app_connections::endpoint(l, &ca, 2 + known as u8).await;
+    l.validated().await;
+    let app = super::app_connections::deploy(l, &service, false, key).await;
+    l.start_app(s(&app["resource_id"]), &format!("run-{key}"))
+        .await
+        .unwrap()
 }
 fn request(action: &str, revision: i64, key: &str) -> Value {
     json!({"boot_id":"test-boot","expected_revision":revision,"request_id":key,"action":action})
@@ -197,7 +204,7 @@ async fn retained_launcher_renewal_requires_explicit_approval_and_matching_execu
 
 #[tokio::test]
 async fn retained_runtime_receives_lifecycle_intent_before_reporting_the_new_generation() {
-    let l = Lab::new().await;
+    let mut l = Lab::new().await;
     let node = l.node("retained-lifecycle").await;
     let nid = s(&node["id"]);
     l.store
@@ -210,29 +217,7 @@ async fn retained_runtime_receives_lifecycle_intent_before_reporting_the_new_gen
         .unwrap();
     l.store.heartbeat(nid, json!({"boot_id":"test-boot","reports":[],
         "confinement":HOST_CONFINEMENT,"egress_budget_contract":CONTRACT,"launcher_digest":LAUNCHER})).await.unwrap();
-    let network = l
-        .store
-        .create_network(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"retained-lifecycle"}),
-            "lifecycle-network",
-        )
-        .await
-        .unwrap();
-    let op = l
-        .store
-        .create_workload(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"spec":{"artifact_id":l.artifact,"network_id":network["resource_id"]}}),
-            "lifecycle-execution",
-            false,
-        )
-        .await
-        .unwrap();
+    let op = networked(&mut l, "lifecycle-execution").await;
     let eid = s(&op["resource_id"]).to_owned();
     let mut e = json!({"id":eid,"generation":1});
     l.store.schedule().await.unwrap();
@@ -260,13 +245,9 @@ async fn retained_runtime_receives_lifecycle_intent_before_reporting_the_new_gen
         .heartbeat(nid, heartbeat(1, "running", 2))
         .await
         .unwrap();
-    for (action, generation, state, sequence) in
-        [("pause", 2, "paused", 3), ("resume", 3, "running", 4)]
-    {
-        l.store
-            .action(&l.operator, &l.tenant, &l.project, &eid, action, &uid())
-            .await
-            .unwrap();
+    // Stopping is the one change a tenant makes to a run in flight.
+    for (generation, state, sequence) in [(2, "stopped", 3)] {
+        l.stop(&eid, &uid()).await.unwrap();
         assert_eq!(
             l.store.assignment(nid, &eid, generation).await.unwrap()["desired"],
             state
@@ -299,9 +280,13 @@ async fn retained_runtime_receives_lifecycle_intent_before_reporting_the_new_gen
             .unwrap();
         e["generation"] = json!(generation);
     }
-    let frozen = apply(&l, &node, &e, request("freeze", 1, "acknowledged-control")).await;
-    apply(&l, &node, &e, settlement(&frozen, 0, "settle-control")).await;
-    assert_eq!(totals(&l).await, (0, 0));
+    // It has ended: nothing more is granted to it.
+    assert!(
+        l.store
+            .egress_budget(nid, &eid, 2, grant(1, "after-the-end", 1))
+            .await
+            .is_err()
+    );
     l.finish().await;
 }
 
@@ -361,7 +346,7 @@ async fn retained_launcher_approval_is_bounded_operator_only_and_never_automatic
 
 #[tokio::test]
 async fn retained_launcher_approval_cannot_select_the_runtime_for_a_new_placement() {
-    let l = Lab::new().await;
+    let mut l = Lab::new().await;
     let node = l.node("mixed-placement").await;
     let nid = s(&node["id"]);
     let replacement = "b".repeat(64);
@@ -374,29 +359,7 @@ async fn retained_launcher_approval_cannot_select_the_runtime_for_a_new_placemen
         )
         .await
         .unwrap();
-    let network = l
-        .store
-        .create_network(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"mixed-placement"}),
-            "mixed-placement-network",
-        )
-        .await
-        .unwrap();
-    let op = l
-        .store
-        .create_workload(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"spec":{"artifact_id":l.artifact,"network_id":network["resource_id"]}}),
-            "mixed-placement",
-            false,
-        )
-        .await
-        .unwrap();
+    let op = networked(&mut l, "mixed-placement").await;
     let eid = s(&op["resource_id"]);
     // Observing only the retained launcher cannot qualify new work.
     l.store.heartbeat(nid, json!({"boot_id":"test-boot","reports":[],
@@ -975,7 +938,7 @@ async fn exact_final_counter_preserves_admission_month_and_prior_settlements() {
 
 #[tokio::test]
 async fn budgeted_placement_requires_approval_and_pins_only_new_networked_executions() {
-    let l = Lab::new().await;
+    let mut l = Lab::new().await;
     let node = l.node("budget-placement").await;
     let nid = s(&node["id"]);
     sqlx::query("UPDATE nodes SET cpu_percent=400,memory_mib=4096,instances=4 WHERE id=$1")
@@ -1013,29 +976,7 @@ async fn budgeted_placement_requires_approval_and_pins_only_new_networked_execut
             .await
             .is_err()
     );
-    let network = l
-        .store
-        .create_network(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"budget-private"}),
-            "budget-private",
-        )
-        .await
-        .unwrap();
-    let op = l
-        .store
-        .create_workload(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"spec":{"artifact_id":l.artifact,"network_id":network["resource_id"]}}),
-            "budgeted",
-            false,
-        )
-        .await
-        .unwrap();
+    let op = networked(&mut l, "budgeted").await;
     let eid = s(&op["resource_id"]);
     l.store.schedule().await.unwrap();
     let assigned: Option<String> = sqlx::query_scalar("SELECT node_id FROM executions WHERE id=$1")
@@ -1060,18 +1001,7 @@ async fn budgeted_placement_requires_approval_and_pins_only_new_networked_execut
     let assignment = l.store.assignment(nid, eid, 1).await.unwrap();
     assert_eq!(assignment["egress"]["launcher_digest"], LAUNCHER);
     assert_eq!(assignment["spec"]["egress_budget"], true);
-    let offline = l
-        .store
-        .create_workload(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"spec":{"artifact_id":l.artifact}}),
-            "offline",
-            false,
-        )
-        .await
-        .unwrap();
+    let offline = l.create("offline", json!({"artifact_id":l.artifact})).await;
     l.store.schedule().await.unwrap();
     assert!(
         l.store
@@ -1110,17 +1040,7 @@ async fn budgeted_placement_requires_approval_and_pins_only_new_networked_execut
             .status,
         StatusCode::CONFLICT
     );
-    l.store
-        .action(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            eid,
-            "stop",
-            "stop-budgeted",
-        )
-        .await
-        .unwrap();
+    l.stop(eid, "stop-budgeted").await.unwrap();
     assert_eq!(
         l.store.assignment(nid, eid, 2).await.unwrap()["desired"],
         "stopped"
