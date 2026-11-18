@@ -1,7 +1,7 @@
 # Fixing the management API's inconsistencies
 
-A plan, and a record of how far it has got: phase 1 is done, the rest is
-not. It answers an audit of the
+A plan, and a record of how far it has got: phases 1 and 2 are done, the
+rest is not. It answers an audit of the
 management API (the operator's routes and the workspace API) made on
 2026-11-18 by reading `crates/fenders-control-plane` and probing a running
 control plane with no node attached. The node protocol, the run channel and
@@ -112,7 +112,25 @@ answer.
 
 ## Phase 2: errors
 
-One change to `error.rs` and its callers; no success response changes.
+**Done**, one commit an item, each with its test in
+`tests/cases/customer_api.rs`. No success response changes. Where what was
+built differs from what is written below:
+
+- 2.2: a refusal for want of allowance is `409 quota_exhausted` at the
+  management API only. Inside the control plane the error keeps the status
+  `429`: the scheduler, the gateway and the run channel tell an exhausted
+  allowance by it, and the gateway and the run channel answer with it,
+  which this plan does not change. `dispatch` (`api.rs`) makes the
+  translation. `Rates::admit` still returns a `bool`; `Rates::retry_after`
+  gives the seconds.
+- 2.3: `405` is given only for a method that is in neither route table. A
+  key asking for one of the operator's routes is still `403`, which the
+  embedding guide promises and `verify_embedding_live.sh` asserts.
+- 2.3: `415` also where a body has no `Content-Type` at all. `fendersctl`
+  sent a component as `application/json` and no longer does.
+- The codes are an enum in the contract already; `Retry-After`, `Allow` and
+  `WWW-Authenticate` are described in the guide and wait for 3.4 to be in
+  the contract.
 
 ### 2.1 `code` says no more than the status
 

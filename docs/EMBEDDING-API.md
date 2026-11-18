@@ -226,6 +226,37 @@ knows its own users and calls this API.
 - A key cannot issue, list or revoke keys, whatever it holds: those are the
   operator's.
 
+## What a refusal says
+
+Every refusal is `{"error": …, "code": …, "request_id": …}`, and the
+request's id is in `X-Request-Id` too. `error` is for a person and its
+wording may change. Branch on `code`: it is the status named
+(`not_found`, `unauthorized`, `invalid_request`, …), or, where one status
+stands for things a program treats differently, the reason:
+
+| Status | `code` | What to do |
+|---|---|---|
+| 400 | `idempotency_key_required` | Send `Idempotency-Key` |
+| 403 | `permission_denied` | The key may not; issue one that may |
+| 403 | `workspace_suspended` | Nothing, until the operator resumes it; reads still work |
+| 409 | `idempotency_key_reused` | The key was used for another request: choose a new one |
+| 409 | `already_exists` | Read the one that exists |
+| 409 | `revision_conflict` | Read the resource again and send its revision |
+| 409 | `not_validated` | Wait for the artifact's inspection to be `valid` |
+| 409 | `quota_exhausted` | An allowance or a limit is reached; waiting does not cure it |
+| 429 | `rate_limited` | Wait the seconds `Retry-After` gives |
+
+The whole list is the enum of `Error.code` in the contract. Beside it:
+
+- `401` carries `WWW-Authenticate: Bearer`.
+- A route asked with a method it does not take is `405`, with the ones it
+  takes in `Allow`. `HEAD` is answered wherever `GET` is.
+- A body is `application/json`, and an upload `application/wasm`; anything
+  else is `415`. `curl -d` sends a form unless told otherwise.
+- An id in a body that could be no id (not 32 lowercase hexadecimal
+  characters) is `400`. `404` is for one that names nothing, and for
+  anything a path names, another tenant's included.
+
 ## Limits
 
 [STATUS.md](STATUS.md) lists them all. The ones that shape an integration:
