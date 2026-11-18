@@ -221,6 +221,63 @@ fn the_checker_refuses_what_a_schema_forbids() {
     }
 }
 
+/// Checks one answer the API gave, from any test, against the contract:
+/// the tour below asks every operation once, and the other tests ask them
+/// in states the tour does not reach (a run on a node, an app being
+/// replaced). A path that is no route of the contract is not checked.
+pub(crate) fn conforms(method: &str, path: &str, status: StatusCode, body: &Value) {
+    static SPEC: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let spec = SPEC.get_or_init(spec);
+    let method = method.to_lowercase();
+    let path = path.split('?').next().unwrap();
+    // The names the control plane has for the workspace's routes are
+    // answered as the public ones are.
+    let public = path
+        .replacen("/v1/tenants/", "/v1/workspaces/", 1)
+        .replace("/external-endpoints", "/connections");
+    let found = operation(spec, &method, path).or_else(|| operation(spec, &method, &public));
+    let Some((template, operation)) = found else {
+        return;
+    };
+    // What each answer was, for writing the contract from.
+    if let Ok(file) = std::env::var("FENDERS_CONTRACT_DUMP") {
+        use std::io::Write;
+        let line =
+            json!({"method":method,"template":template,"status":status.as_u16(),"body":body});
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
+        return;
+    }
+    let at = format!("{method} {path} -> {}", status.as_u16());
+    let responses = &operation["responses"];
+    let code = status.as_u16().to_string();
+    assert!(
+        !status.is_success() || responses.get(&code).is_some(),
+        "{at}: the contract gives {template} no {code}"
+    );
+    let mut response = responses.get(&code).unwrap_or(&responses["default"]);
+    if let Some(pointer) = response["$ref"].as_str() {
+        response = spec.pointer(pointer.trim_start_matches('#')).unwrap();
+    }
+    let mut wrong = Vec::new();
+    check(
+        spec,
+        &response["content"]["application/json"]["schema"],
+        body,
+        &at,
+        &mut wrong,
+    );
+    assert!(
+        wrong.is_empty(),
+        "an answer differs from the contract:\n{}",
+        wrong.join("\n")
+    );
+}
+
 /// What was asked and what came back.
 struct Seen {
     method: String,
@@ -347,17 +404,10 @@ async fn every_operation_answers_as_the_contract_says() {
     .await;
     let tenant = format!("/v1/tenants/{}", l.tenant);
     let issue = json!({"name":"tour","project_id":null,"permissions":["read","apps:write","runs:write","projects:write","connections:write","secrets:write"],"ttl_seconds":3600,"label":"tour"});
-    let issued = t
-        .ok(
-            &operator,
-            "POST",
-            &format!("{tenant}/api-keys"),
-            Some(issue.clone()),
-        )
-        .await;
-    let key = s(&issued["token"]).to_owned();
-    // A retry, which is another answer of the same operation.
-    {
+    // Issued, and then asked for again with the same key: two answers of
+    // one operation, the second without a token.
+    let mut issued = Value::Null;
+    for expected in [StatusCode::CREATED, StatusCode::OK] {
         let response = api::router(l.store.clone())
             .oneshot(
                 Request::builder()
@@ -371,8 +421,20 @@ async fn every_operation_answers_as_the_contract_says() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.status(), expected);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        t.seen.push(Seen {
+            method: "post".into(),
+            path: format!("{tenant}/api-keys"),
+            status: expected,
+            body: body.clone(),
+        });
+        if expected == StatusCode::CREATED {
+            issued = body;
+        }
     }
+    let key = s(&issued["token"]).to_owned();
     let spare = t
         .ok(
             &operator,
@@ -739,17 +801,10 @@ async fn every_operation_answers_as_the_contract_says() {
     t.send(&key, "PUT", &format!("{w}/projects"), Some(json!({})))
         .await;
 
-    // What each answer was, for writing the contract from: see the plan.
-    if let Ok(path) = std::env::var("FENDERS_CONTRACT_DUMP") {
-        let lines: Vec<String> = t
-            .seen
-            .iter()
-            .map(|seen| {
-                let template = operation(&spec, &seen.method, &seen.path).map(|found| found.0);
-                json!({"method":seen.method,"template":template,"status":seen.status.as_u16(),"body":seen.body}).to_string()
-            })
-            .collect();
-        std::fs::write(path, lines.join("\n")).unwrap();
+    if std::env::var("FENDERS_CONTRACT_DUMP").is_ok() {
+        for seen in &t.seen {
+            conforms(&seen.method, &seen.path, seen.status, &seen.body);
+        }
     }
 
     // Every answer is what the contract says an answer of its status is.

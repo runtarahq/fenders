@@ -86,8 +86,15 @@ as both control plane and node.
   the operator credential.
 - The OpenAPI contract (`/api/openapi.json`) describes every route the
   management API answers, the operator's among them (tagged `operator`), and
-  a test fails when the two differ. Most responses are still described
-  only as an object.
+  a test fails when the two differ. Every answer has a schema, and the
+  tests hold what the API answers to it: one asks every operation, and the
+  API tests check each answer they are given. The schemas were written from
+  what those tests are answered, with no node attached, so a field is
+  called required only where it identifies or dates a thing, and a few
+  parts no test produces (an app's connection entries, a component's
+  imports) are described only as objects. Fields the contract does not
+  name may be present, and some will go: see
+  [inconsistencies-fix.md](inconsistencies-fix.md).
 - The node's control protocol has no written, versioned specification: the
   `fenders-node-protocol` crate and the control plane's `/internal` routes are
   the reference ([EMBEDDING-NODE.md](EMBEDDING-NODE.md)).

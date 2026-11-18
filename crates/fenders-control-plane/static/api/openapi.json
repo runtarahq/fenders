@@ -43,7 +43,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Me"
                 }
               }
             }
@@ -79,7 +79,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Record"
+                    "$ref": "#/components/schemas/Workspace"
                   }
                 }
               }
@@ -120,7 +120,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Record"
+                    "$ref": "#/components/schemas/Project"
                   }
                 }
               }
@@ -160,7 +160,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Project"
                 }
               }
             }
@@ -211,7 +211,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Usage"
                 }
               }
             }
@@ -265,7 +265,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page"
+                  "$ref": "#/components/schemas/UsageHistory"
                 }
               }
             }
@@ -306,7 +306,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Usage"
                 }
               }
             }
@@ -363,7 +363,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page"
+                  "$ref": "#/components/schemas/UsageHistory"
                 }
               }
             }
@@ -404,7 +404,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/AppSizes"
                 }
               }
             }
@@ -445,7 +445,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/HttpsAccess"
                 }
               }
             }
@@ -486,7 +486,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/HttpsValidated"
                 }
               }
             }
@@ -540,7 +540,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/SchedulePreview"
                 }
               }
             }
@@ -631,7 +631,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page"
+                  "$ref": "#/components/schemas/AppPage"
                 }
               }
             }
@@ -817,7 +817,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/App"
                 }
               }
             }
@@ -1015,7 +1015,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page"
+                  "$ref": "#/components/schemas/VersionPage"
                 }
               }
             }
@@ -1135,7 +1135,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Version"
                 }
               }
             }
@@ -1195,7 +1195,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page"
+                  "$ref": "#/components/schemas/ReleasePage"
                 }
               }
             }
@@ -1315,7 +1315,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Release"
                 }
               }
             }
@@ -1388,7 +1388,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page"
+                  "$ref": "#/components/schemas/RunPage"
                 }
               }
             }
@@ -1508,7 +1508,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Run"
                 }
               }
             }
@@ -1620,7 +1620,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Triggers"
                 }
               }
             }
@@ -1737,7 +1737,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/AppConnections"
                 }
               }
             }
@@ -1854,7 +1854,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/AppHttp"
                 }
               }
             }
@@ -1898,33 +1898,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "enabled": {
-                      "type": "boolean"
-                    },
-                    "open": {
-                      "type": "integer"
-                    },
-                    "connections": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "id": {
-                            "type": "string"
-                          },
-                          "path": {
-                            "type": "string"
-                          },
-                          "opened": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        }
-                      }
-                    }
-                  }
+                  "$ref": "#/components/schemas/AppWebSocket"
                 }
               }
             }
@@ -2005,7 +1979,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page"
+                  "$ref": "#/components/schemas/LogPage"
                 }
               }
             }
@@ -2100,7 +2074,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page"
+                  "$ref": "#/components/schemas/EventPage"
                 }
               }
             }
@@ -2143,7 +2117,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Record"
+                    "$ref": "#/components/schemas/Artifact"
                   }
                 }
               }
@@ -2183,7 +2157,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Artifact"
                 }
               }
             }
@@ -2242,7 +2216,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Artifact"
                 }
               }
             }
@@ -2285,7 +2259,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Record"
+                    "$ref": "#/components/schemas/Connection"
                   }
                 }
               }
@@ -2400,7 +2374,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Connection"
                 }
               }
             }
@@ -2506,7 +2480,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Record"
+                    "$ref": "#/components/schemas/Secret"
                   }
                 }
               }
@@ -2549,7 +2523,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Secret"
                 }
               }
             }
@@ -2606,7 +2580,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Secret"
                 }
               }
             }
@@ -2649,7 +2623,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Record"
+                    "$ref": "#/components/schemas/Operation"
                   }
                 }
               }
@@ -2738,7 +2712,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Record"
+                  "$ref": "#/components/schemas/Inspection"
                 }
               }
             }
@@ -4042,44 +4016,8 @@
           "kind",
           "resource_id",
           "state"
-        ]
-      },
-      "Record": {
-        "type": "object",
-        "additionalProperties": true,
-        "description": "Observed resource fields; read-only fields may be added. See the reference and examples."
-      },
-      "Page": {
-        "type": "object",
-        "properties": {
-          "items": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Record"
-            }
-          },
-          "next": {
-            "anyOf": [
-              {
-                "oneOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  }
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "items",
-          "next"
-        ]
+        ],
+        "description": "A change that was asked for, and how it stands. state is pending until it is made; then succeeded, or failed with error. resource_id is what it changes or makes."
       },
       "ProjectCreate": {
         "type": "object",
@@ -5573,6 +5511,3319 @@
           "process_id",
           "uptime_ms",
           "components"
+        ]
+      },
+      "Me": {
+        "type": "object",
+        "description": "The credential a request was made with: the operator's, or a key with its workspace, project, permissions and label.",
+        "properties": {
+          "api_permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "Project": {
+        "type": "object",
+        "description": "A project of a workspace. slug is its name in lower case with hyphens; name will be the name as given.",
+        "properties": {
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "created",
+          "id",
+          "name"
+        ]
+      },
+      "Usage": {
+        "type": "object",
+        "description": "What a workspace or a project holds and has used, as of as_of.",
+        "properties": {
+          "accounting_retention": {
+            "type": "object",
+            "properties": {
+              "active_and_uncertain_records": {
+                "type": "string"
+              },
+              "calendar": {
+                "type": "string"
+              },
+              "finalized_detail_months": {
+                "type": "integer"
+              },
+              "max_detail_rows_per_pass": {
+                "type": "integer"
+              },
+              "monthly_totals": {
+                "type": "string"
+              },
+              "resource_identities": {
+                "type": "string"
+              }
+            }
+          },
+          "allowance": {
+            "type": "object",
+            "properties": {
+              "cpu_percent": {
+                "type": "integer"
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              "instances": {
+                "type": "integer"
+              },
+              "memory_mib": {
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              },
+              "storage_bytes": {
+                "type": "integer"
+              },
+              "transfer_bytes": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "name"
+            ]
+          },
+          "artifact_bytes": {
+            "type": "integer"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cpu_usec": {
+            "type": "integer"
+          },
+          "diagnostics": {
+            "type": "object",
+            "properties": {
+              "charged_to_storage_allowance": {
+                "type": "boolean"
+              },
+              "retention_days": {
+                "type": "integer"
+              },
+              "workspace_payload_limit_bytes": {
+                "type": "integer"
+              },
+              "workspace_record_limit": {
+                "type": "integer"
+              }
+            }
+          },
+          "http_limits": {
+            "type": "object",
+            "properties": {
+              "concurrent_requests": {
+                "type": "integer"
+              },
+              "requests_per_minute": {
+                "type": "integer"
+              }
+            }
+          },
+          "ingress_month": {
+            "type": "object",
+            "properties": {
+              "bytes": {
+                "type": "integer"
+              },
+              "requests": {
+                "type": "integer"
+              }
+            }
+          },
+          "measurement": {
+            "type": "object",
+            "properties": {
+              "cpu_window": {
+                "type": "string"
+              },
+              "egress_bytes": {
+                "type": "integer"
+              },
+              "egress_contract": {
+                "type": "string"
+              },
+              "egress_period_allowance_enforced": {
+                "type": "boolean"
+              },
+              "egress_period_contract": {
+                "type": "string"
+              },
+              "egress_window": {
+                "type": "string"
+              },
+              "memory_freshness_seconds": {
+                "type": "integer"
+              }
+            }
+          },
+          "paused_memory_is_reserved": {
+            "type": "boolean"
+          },
+          "period": {
+            "type": "object",
+            "properties": {
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "timezone": {
+                "type": "string"
+              }
+            }
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_bytes": {
+                  "type": "integer"
+                },
+                "cpu_usec": {
+                  "type": "integer"
+                },
+                "diagnostic_bytes": {
+                  "type": "integer"
+                },
+                "diagnostic_expired_bytes": {
+                  "type": "integer"
+                },
+                "diagnostic_records": {
+                  "type": "integer"
+                },
+                "egress_bytes": {
+                  "type": "integer"
+                },
+                "egress_complete": {
+                  "type": "integer"
+                },
+                "egress_discontinuities": {
+                  "type": "integer"
+                },
+                "egress_first_sampled": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "egress_last_sampled": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "egress_measured": {
+                  "type": "integer"
+                },
+                "egress_month_bytes": {
+                  "type": "integer"
+                },
+                "egress_month_complete": {
+                  "type": "integer"
+                },
+                "egress_month_measured": {
+                  "type": "integer"
+                },
+                "egress_month_sampled": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "egress_period_discontinuities": {
+                  "type": "integer"
+                },
+                "egress_period_sources": {
+                  "type": "integer"
+                },
+                "egress_received": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "egress_unassigned_bytes": {
+                  "type": "integer"
+                },
+                "executions": {
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                },
+                "ingress_bytes": {
+                  "type": "integer"
+                },
+                "ingress_requests": {
+                  "type": "integer"
+                },
+                "ingress_reserved_bytes": {
+                  "type": "integer"
+                },
+                "last_cpu_observed": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "measured_executions": {
+                  "type": "integer"
+                },
+                "memory_bytes": {
+                  "type": "integer"
+                },
+                "memory_expected": {
+                  "type": "integer"
+                },
+                "memory_measured": {
+                  "type": "integer"
+                },
+                "oldest_memory_observed": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "outbound_conservative_bytes": {
+                  "type": "integer"
+                },
+                "outbound_grant_executions": {
+                  "type": "integer"
+                },
+                "reserved_cpu_percent": {
+                  "type": "integer"
+                },
+                "reserved_instances": {
+                  "type": "integer"
+                },
+                "reserved_memory_mib": {
+                  "type": "integer"
+                },
+                "storage_bytes": {
+                  "type": "integer"
+                },
+                "transfer_accounted_bytes": {
+                  "type": "integer"
+                },
+                "transfer_reserved_bytes": {
+                  "type": "integer"
+                },
+                "uncertain_instances": {
+                  "type": "integer"
+                },
+                "wasm_instances": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id"
+              ]
+            }
+          },
+          "reserved": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "cpu_percent": {
+                    "type": "integer"
+                  },
+                  "instances": {
+                    "type": "integer"
+                  },
+                  "memory_mib": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "type": "string"
+          },
+          "storage_bytes": {
+            "type": "integer"
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "artifact_bytes": {
+                "type": "integer"
+              },
+              "cpu_usec": {
+                "type": "integer"
+              },
+              "diagnostic_bytes": {
+                "type": "integer"
+              },
+              "diagnostic_expired_bytes": {
+                "type": "integer"
+              },
+              "diagnostic_records": {
+                "type": "integer"
+              },
+              "egress_bytes": {
+                "type": "integer"
+              },
+              "egress_complete": {
+                "type": "integer"
+              },
+              "egress_discontinuities": {
+                "type": "integer"
+              },
+              "egress_first_sampled": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "egress_last_sampled": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "egress_measured": {
+                "type": "integer"
+              },
+              "egress_month_bytes": {
+                "type": "integer"
+              },
+              "egress_month_complete": {
+                "type": "integer"
+              },
+              "egress_month_measured": {
+                "type": "integer"
+              },
+              "egress_month_sampled": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "egress_period_discontinuities": {
+                "type": "integer"
+              },
+              "egress_period_sources": {
+                "type": "integer"
+              },
+              "egress_received": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "egress_unassigned_bytes": {
+                "type": "integer"
+              },
+              "executions": {
+                "type": "integer"
+              },
+              "ingress_bytes": {
+                "type": "integer"
+              },
+              "ingress_requests": {
+                "type": "integer"
+              },
+              "ingress_reserved_bytes": {
+                "type": "integer"
+              },
+              "last_cpu_observed": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "measured_executions": {
+                "type": "integer"
+              },
+              "memory_bytes": {
+                "type": "integer"
+              },
+              "memory_expected": {
+                "type": "integer"
+              },
+              "memory_measured": {
+                "type": "integer"
+              },
+              "oldest_memory_observed": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outbound_conservative_bytes": {
+                "type": "integer"
+              },
+              "outbound_grant_executions": {
+                "type": "integer"
+              },
+              "reserved_cpu_percent": {
+                "type": "integer"
+              },
+              "reserved_instances": {
+                "type": "integer"
+              },
+              "reserved_memory_mib": {
+                "type": "integer"
+              },
+              "storage_bytes": {
+                "type": "integer"
+              },
+              "transfer_accounted_bytes": {
+                "type": "integer"
+              },
+              "transfer_reserved_bytes": {
+                "type": "integer"
+              },
+              "uncertain_instances": {
+                "type": "integer"
+              },
+              "wasm_instances": {
+                "type": "integer"
+              }
+            }
+          },
+          "transfer_allowance": {
+            "type": "object",
+            "properties": {
+              "bytes": {
+                "type": "integer"
+              },
+              "outbound_conservative_bytes": {
+                "type": "integer"
+              },
+              "outbound_fleet_enforcement": {
+                "type": "boolean"
+              },
+              "period_basis": {
+                "type": "string"
+              },
+              "reserved_bytes": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "UsageHistory": {
+        "type": "object",
+        "description": "A page of a workspace's or a project's months. next is the cursor to pass as before.",
+        "properties": {
+          "as_of": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageMonth"
+            }
+          },
+          "measurement": {
+            "type": "object",
+            "properties": {
+              "allowance_basis": {
+                "type": "string"
+              },
+              "observations_are_allowance_charges": {
+                "type": "boolean"
+              },
+              "outbound_observation_basis": {
+                "type": "string"
+              },
+              "period": {
+                "type": "string"
+              }
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The same as next. It goes when the list shapes are made one.",
+                "deprecated": true
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retention": {
+            "type": "object",
+            "properties": {
+              "active_and_uncertain_records": {
+                "type": "string"
+              },
+              "calendar": {
+                "type": "string"
+              },
+              "finalized_detail_months": {
+                "type": "integer"
+              },
+              "max_detail_rows_per_pass": {
+                "type": "integer"
+              },
+              "monthly_totals": {
+                "type": "string"
+              },
+              "resource_identities": {
+                "type": "string"
+              }
+            }
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "AppSizes": {
+        "type": "object",
+        "description": "The sizes an app may take.",
+        "properties": {
+          "default_size": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "cpu_percent": {
+                  "type": "integer"
+                },
+                "guest_memory_mib": {
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "reservation_memory_mib": {
+                  "type": "integer"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "vm_memory_mib": {
+                  "type": "integer"
+                },
+                "wasm_linear_memory_mib": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id"
+              ]
+            }
+          },
+          "memory_contract": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "HttpsAccess": {
+        "type": "object",
+        "description": "Whether apps of this project may be given public HTTPS origins.",
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "max_origins": {
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "HttpsValidated": {
+        "type": "object",
+        "description": "The origins as they would be stored.",
+        "properties": {
+          "origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SchedulePreview": {
+        "type": "object",
+        "description": "The next times a schedule would run.",
+        "properties": {
+          "expression": {
+            "type": "string"
+          },
+          "occurrences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "local": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "utc": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "timezone_database": {
+            "type": "string"
+          }
+        }
+      },
+      "Artifact": {
+        "type": "object",
+        "description": "An uploaded component.",
+        "properties": {
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "last_uploaded_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retired_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "size": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "created",
+          "digest",
+          "id",
+          "size"
+        ]
+      },
+      "Inspection": {
+        "type": "object",
+        "description": "What a node found of an artifact. state is valid once it may be deployed.",
+        "properties": {
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "inspection": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "bytes": {
+                    "type": "integer"
+                  },
+                  "command": {
+                    "type": "boolean"
+                  },
+                  "digest": {
+                    "type": "string"
+                  },
+                  "exports": {
+                    "type": "array"
+                  },
+                  "format_version": {
+                    "type": "integer"
+                  },
+                  "http": {
+                    "type": "boolean"
+                  },
+                  "imports": {
+                    "type": "array"
+                  },
+                  "runtime": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "digest"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "created",
+          "state"
+        ]
+      },
+      "Secret": {
+        "type": "object",
+        "description": "A secret, without its value.",
+        "properties": {
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "created",
+          "id",
+          "name"
+        ]
+      },
+      "Connection": {
+        "type": "object",
+        "description": "An HTTPS origin or a TCP endpoint apps of the project may be connected to.",
+        "properties": {
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "created",
+          "id",
+          "name",
+          "type"
+        ]
+      },
+      "App": {
+        "type": "object",
+        "description": "An app: its code, release, triggers and what it is doing.",
+        "properties": {
+          "active_release": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "created": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "updated": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "version": {
+                    "type": "integer"
+                  },
+                  "version_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{32}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "created",
+                  "id",
+                  "state"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "active_release_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "command_busy": {
+            "type": "boolean"
+          },
+          "configuration": {
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "secret_env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "size": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "size"
+            ]
+          },
+          "connections": {
+            "type": "object",
+            "properties": {
+              "allowed": {
+                "type": "integer"
+              },
+              "items": {
+                "type": "array"
+              },
+              "pending": {
+                "type": "integer"
+              },
+              "revoking": {
+                "type": "integer"
+              },
+              "total": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "items"
+            ]
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "desired": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "http": {
+            "type": "object",
+            "properties": {
+              "diagnostic": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "detail": {
+                        "type": "string"
+                      },
+                      "summary": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "execution_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "type": "string"
+              },
+              "url": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "https_connections": {
+            "type": "object",
+            "properties": {
+              "allowed": {
+                "type": "integer"
+              },
+              "destinations": {
+                "type": "integer"
+              },
+              "items": {
+                "type": "array"
+              },
+              "pending": {
+                "type": "integer"
+              },
+              "revoking": {
+                "type": "integer"
+              },
+              "total": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "items"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "latest_code": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "capabilities": {
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "type": "boolean"
+                  },
+                  "http": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              "number": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "number"
+            ]
+          },
+          "latest_run": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "created": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "execution_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{32}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "exit_code": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "finished_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "release_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{32}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "scheduled_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source": {
+                    "type": "string"
+                  },
+                  "started_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "state": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "created",
+                  "id",
+                  "state"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_version": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "schedule": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "expression": {
+                    "type": "string"
+                  },
+                  "next_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "timezone": {
+                    "type": "string"
+                  },
+                  "timezone_database": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduled_work_cancellable": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          },
+          "target_release": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "created": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "updated": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "version": {
+                    "type": "integer"
+                  },
+                  "version_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{32}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "created",
+                  "id",
+                  "state"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_release_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "triggers": {
+            "type": "object",
+            "properties": {
+              "http": {
+                "type": "boolean"
+              },
+              "manual": {
+                "type": "boolean"
+              },
+              "revision": {
+                "type": "integer"
+              },
+              "schedule": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "revision"
+            ]
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "created",
+          "id",
+          "name",
+          "revision",
+          "state"
+        ]
+      },
+      "AppPage": {
+        "type": "object",
+        "description": "A page of App records. next is the cursor for the page after it, or null.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/App"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "http": {
+                "type": "integer"
+              },
+              "manual": {
+                "type": "integer"
+              },
+              "none": {
+                "type": "integer"
+              },
+              "pending_connections": {
+                "type": "integer"
+              },
+              "ready": {
+                "type": "integer"
+              },
+              "schedule": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "serving_http": {
+                "type": "integer"
+              },
+              "stopped": {
+                "type": "integer"
+              },
+              "total": {
+                "type": "integer"
+              }
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "Version": {
+        "type": "object",
+        "description": "A version of an app's code.",
+        "properties": {
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "inspection": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "bytes": {
+                    "type": "integer"
+                  },
+                  "command": {
+                    "type": "boolean"
+                  },
+                  "digest": {
+                    "type": "string"
+                  },
+                  "exports": {
+                    "type": "array"
+                  },
+                  "format_version": {
+                    "type": "integer"
+                  },
+                  "http": {
+                    "type": "boolean"
+                  },
+                  "imports": {
+                    "type": "array"
+                  },
+                  "runtime": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "digest"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_release": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "created": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "updated": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "created",
+                  "id",
+                  "state"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "number": {
+            "type": "integer"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "created",
+          "id",
+          "number"
+        ]
+      },
+      "VersionPage": {
+        "type": "object",
+        "description": "A page of Version records. next is the cursor for the page after it, or null.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Version"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "Release": {
+        "type": "object",
+        "description": "A version released with a configuration.",
+        "properties": {
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configuration": {
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "secret_env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "size": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "size"
+            ]
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "inputs_retired_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "created",
+          "id",
+          "state"
+        ]
+      },
+      "ReleasePage": {
+        "type": "object",
+        "description": "A page of Release records. next is the cursor for the page after it, or null.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Release"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "Run": {
+        "type": "object",
+        "description": "One invocation of an app: manual, scheduled, or a recorded HTTP request.",
+        "properties": {
+          "admission": {
+            "type": "string"
+          },
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "context": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "trigger": {
+                "type": "string"
+              },
+              "trigger_time": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_state": {
+            "type": "string"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "release_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reserved": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "trigger_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "websocket": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "created",
+          "id",
+          "state"
+        ]
+      },
+      "RunPage": {
+        "type": "object",
+        "description": "A page of Run records. next is the cursor for the page after it, or null.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Run"
+            }
+          },
+          "missed_history_pending": {
+            "type": "boolean"
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "Triggers": {
+        "type": "object",
+        "description": "What starts an app.",
+        "properties": {
+          "http": {
+            "type": "boolean"
+          },
+          "manual": {
+            "type": "boolean"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "schedule": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "compatible": {
+                    "type": "boolean"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "expression": {
+                    "type": "string"
+                  },
+                  "missed_history_pending": {
+                    "type": "boolean"
+                  },
+                  "next_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "occurrences": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "local": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "utc": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      }
+                    }
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "runtime_timezone_database": {
+                    "type": "string"
+                  },
+                  "timezone": {
+                    "type": "string"
+                  },
+                  "timezone_database": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "revision"
+        ]
+      },
+      "AppConnections": {
+        "type": "object",
+        "description": "The connections an app holds.",
+        "properties": {
+          "https_origins": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "desired": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                },
+                "origin": {
+                  "type": "string"
+                },
+                "reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "revocation_operation_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "state": {
+                  "type": "string"
+                },
+                "updated": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "id",
+                "state"
+              ]
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "desired": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "endpoint_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "source": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string"
+                          },
+                          "value": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ]
+                  }
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "prefix": {
+                  "type": "string"
+                },
+                "reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "revocation_operation_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "state": {
+                  "type": "string"
+                },
+                "updated": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state"
+              ]
+            }
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "revision"
+        ]
+      },
+      "AppHttp": {
+        "type": "object",
+        "description": "How an app's HTTP serving stands.",
+        "properties": {
+          "diagnostic": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "detail": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "executions": {
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "AppWebSocket": {
+        "type": "object",
+        "description": "Whether an app accepts WebSocket connections, and those the gateway holds for it now.",
+        "properties": {
+          "connections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string",
+                  "description": "The path its client asked for."
+                },
+                "opened": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "open": {
+            "type": "integer"
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "description": "A run or a lifecycle change of an app, with the transitions recorded of it.",
+        "properties": {
+          "admission": {
+            "type": "string"
+          },
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "desired": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "entry": {
+            "type": "string"
+          },
+          "execution_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_state": {
+            "type": "string"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "previous_desired": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "previous_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recorded_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "release_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reserved": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "transitions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "desired": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "execution_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "exit_code": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "generation": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "outcome": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "previous_desired": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "previous_state": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "recorded_at": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "release_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reserved": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "run_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "state"
+              ]
+            }
+          },
+          "trigger_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "websocket": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "state"
+        ]
+      },
+      "EventPage": {
+        "type": "object",
+        "description": "A page of Event records. next is the cursor for the page after it, or null.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "all": {
+                "type": "integer"
+              },
+              "failed": {
+                "type": "integer"
+              },
+              "http": {
+                "type": "integer"
+              },
+              "invocations": {
+                "type": "integer"
+              },
+              "lifecycle": {
+                "type": "integer"
+              },
+              "manual": {
+                "type": "integer"
+              },
+              "schedule": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unknown": {
+                "type": "integer"
+              }
+            }
+          },
+          "coverage": {
+            "type": "object",
+            "properties": {
+              "recording_started_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "retained_since": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "missed_history_pending": {
+            "type": "boolean"
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retention_days": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "LogRecord": {
+        "type": "object",
+        "description": "A piece of a run's output. bytes is base64, with the values of the run's secrets masked.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The execution's id and the record's sequence."
+          },
+          "execution_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "sequence": {
+            "type": "integer"
+          },
+          "stream": {
+            "type": "string",
+            "description": "stdout or stderr."
+          },
+          "at_ms": {
+            "type": "integer",
+            "description": "Milliseconds into the run."
+          },
+          "received": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "gap_from": {
+            "description": "Set where output before this record was lost."
+          },
+          "byte_count": {
+            "type": "integer"
+          },
+          "bytes": {
+            "type": "string"
+          },
+          "release_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "execution_id",
+          "sequence",
+          "bytes"
+        ]
+      },
+      "LogPage": {
+        "type": "object",
+        "description": "A page of Log records. next is the cursor for the page after it, or null.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogRecord"
+            }
+          },
+          "collection": {
+            "type": "object",
+            "properties": {
+              "awaiting": {
+                "type": "integer"
+              },
+              "collecting": {
+                "type": "integer"
+              },
+              "complete": {
+                "type": "integer"
+              },
+              "executions": {
+                "type": "integer"
+              },
+              "fenced": {
+                "type": "integer"
+              },
+              "incomplete": {
+                "type": "integer"
+              },
+              "last_received": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "not_started": {
+                "type": "integer"
+              },
+              "source_gaps": {
+                "type": "integer"
+              },
+              "stale": {
+                "type": "integer"
+              },
+              "truncated_captures": {
+                "type": "integer"
+              },
+              "unavailable": {
+                "type": "integer"
+              }
+            }
+          },
+          "encoding": {
+            "type": "string"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retention": {
+            "type": "object",
+            "properties": {
+              "days": {
+                "type": "integer"
+              },
+              "execution_bytes": {
+                "type": "integer"
+              },
+              "execution_records": {
+                "type": "integer"
+              },
+              "workspace_bytes": {
+                "type": "integer"
+              },
+              "workspace_records": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "UsageMonth": {
+        "type": "object",
+        "description": "One UTC month of a workspace or a project.",
+        "properties": {
+          "period": {
+            "type": "string",
+            "description": "The month, which is also the cursor to it."
+          },
+          "gateway_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "gateway_requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "outbound_accounted_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "outbound_conservative_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "accounted_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "held_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "observed_outbound_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_period_records": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "period"
         ]
       }
     }

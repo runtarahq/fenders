@@ -23,7 +23,10 @@ async fn call(
         .unwrap();
     let status = response.status();
     let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-    (status, serde_json::from_slice(&body).unwrap())
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    // Whatever a test asks, the answer is one the contract describes.
+    super::contract::conforms(method, path, status, &body);
+    (status, body)
 }
 async fn key(l: &Lab, scope: Option<&str>, permissions: &[&str]) -> Value {
     let (status, value) = call(l, &l.token, "POST", &format!("/v1/tenants/{}/api-keys", l.tenant),
