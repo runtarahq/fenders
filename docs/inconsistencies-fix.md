@@ -1,7 +1,7 @@
 # Fixing the management API's inconsistencies
 
-A plan, and a record of how far it has got: phases 1, 2 and 3 are done,
-the rest is not. It answers an audit of the
+A plan, and a record of how far it has got: phases 1 to 4 are done, and
+phase 5 is not. It answers an audit of the
 management API (the operator's routes and the workspace API) made on
 2026-11-18 by reading `crates/fenders-control-plane` and probing a running
 control plane with no node attached. The node protocol, the run channel and
@@ -271,6 +271,36 @@ is deferred, write them for the responses as they are.
 
 Everything here changes what a client sees. Do it as one change set, to
 D1 to D3, and list each break in `STATUS.md` under a heading of its own.
+
+**Done**, a commit an item; the breaks are listed in `STATUS.md` under
+"What has changed under `/v1`". Where what was built differs from what is
+written below:
+
+- 4.2: a run's output keeps `has_more`. It is read forwards and followed,
+  so its `next` is always a position to read on from and cannot be null on
+  the last page; `has_more` is then the only thing that says whether to
+  read on at once.
+- 4.2: a cursor is the id of the last thing a page showed, as the lists
+  that already paged had it. One that names nothing gives an empty page,
+  not an error: a row a cursor names is never deleted. The store's own
+  readers still read a list whole (to a thousand); only the API pages.
+- 4.2: workspaces, projects and nodes were oldest first and are newest
+  first, as every list is. The live script found a workspace's default
+  project by being first; it finds it by `is_default`.
+- 4.3: two things are done where an answer leaves the API, for every
+  answer, not in each query: a row's `tenant_id` is shown as
+  `workspace_id`, and an operation loses what it keeps of its request.
+  The operations list and read select only what is shown. The six rows
+  the plan named have projections in SQL. The other answers (an app, a
+  run, a version, a release, an event) come of views written for them and
+  were left; they are not exact in the contract.
+- 4.3: the stored operation of a cancelled run is still a `stop` of an
+  execution, which a node's report completes by that id. It is shown as
+  `cancel-run` of the run wherever it is read.
+- 4.4: a diagnostic has a `code`, which the plan called a stable reason.
+  A reason the control plane does not know is `unrecognized`, not echoed.
+- 4.5: the revision of a deletion is a query parameter; `If-Match` was
+  the alternative and is not read.
 
 ### 4.1 One vocabulary (D1)
 

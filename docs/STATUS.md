@@ -140,9 +140,11 @@ was decided on as `expected_revision`.
   what those tests are answered, with no node attached, so a field is
   called required only where it identifies or dates a thing, and a few
   parts no test produces (an app's connection entries, a component's
-  imports) are described only as objects. Fields the contract does not
-  name may be present, and some will go: see
-  [inconsistencies-fix.md](inconsistencies-fix.md).
+  imports) are described only as objects. A workspace, a project, an
+  artifact, a connection, a node, the egress policy, an operation and a
+  diagnostic are described exactly: a field the contract does not name is
+  not answered. The rest may carry fields it does not name; do not depend
+  on one.
 - The node's control protocol has no written, versioned specification: the
   `fenders-node-protocol` crate and the control plane's `/internal` routes are
   the reference ([EMBEDDING-NODE.md](EMBEDDING-NODE.md)).
