@@ -2,9 +2,6 @@
 # needs a release of a dependency that does not exist; take an entry out when
 # it does. CI fails on any advisory not listed here.
 #
-# None at present. `rsa` 0.9 (RUSTSEC-2023-0071, a timing side channel in its
-# private-key operation) is not listed: the workspace builds a copy with that
-# operation taken out (runtime/vendor/rsa-verify-only), which `cargo audit`,
-# reading registry packages only, does not see either way.
+# None at present.
 [advisories]
 ignore = []

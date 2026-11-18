@@ -128,7 +128,6 @@ fn the_lockfile_holds_no_release_with_an_advisory_this_audit_found() {
         ("wasmtime", [50, 0, 1]),
         ("rustls", [0, 23, 46]),
         ("libsqlite3-sys", [0, 39, 0]),
-        ("crypto-bigint", [0, 6, 0]),
     ] {
         let found = locked(name);
         assert!(!found.is_empty(), "{name}");
@@ -136,10 +135,10 @@ fn the_lockfile_holds_no_release_with_an_advisory_this_audit_found() {
             assert!(at_least(&version, fixed), "{name} {version}");
         }
     }
-    // The two crates the workspace replaces come from its own tree, not the
-    // registry: rsa without its private-key operation, and an empty crate
-    // for SQLx's SQLite driver.
-    for name in ["rsa", "sqlx-sqlite"] {
+    // SQLx's SQLite and MySQL drivers, never built here, are empty crates
+    // from the workspace's own tree: the first would hold SQLite back, the
+    // second lists `rsa`.
+    for name in ["sqlx-sqlite", "sqlx-mysql"] {
         assert_eq!(
             locked(name)
                 .iter()
@@ -149,13 +148,15 @@ fn the_lockfile_holds_no_release_with_an_advisory_this_audit_found() {
             "{name}"
         );
     }
+    // What only signing people in and mailing them needed is not built at
+    // all: an identity-provider client, an SMTP client, and the RSA under
+    // the first.
+    for gone in ["openidconnect", "lettre", "rsa", "oauth2", "crypto-bigint"] {
+        assert!(locked(gone).is_empty(), "{gone}");
+    }
     // Nothing is listed as an advisory that cannot be acted on.
     let listed = include_str!("../../../.cargo/audit.toml");
     assert!(listed.lines().any(|line| line.trim() == "ignore = []"));
-    let rsa = include_str!("../../../runtime/vendor/rsa-verify-only/src/algorithms/rsa.rs");
-    let decrypt = &rsa[rsa.find("pub fn rsa_decrypt<").unwrap()..];
-    let body = &decrypt[..decrypt.find("\n}\n").unwrap()];
-    assert!(body.trim_end().ends_with("Err(Error::Decryption)") && !body.contains("modpow"));
 }
 
 #[test]
