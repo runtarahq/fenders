@@ -1154,6 +1154,91 @@
             }
           }
         }
+      },
+      "delete": {
+        "operationId": "delete__workspaces_workspace_projects_project_apps_app",
+        "summary": "Delete an app",
+        "description": "Stops the app, takes back its connections and hides it; its history is kept. The revision is sent in a JSON body. The operation is pending until its executions have ended. Required permission: apps:write.",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "app",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Persist this value for retries of the same intent. Different arguments with the same key return 409."
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Operation is still pending; poll it and the resource.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppDelete"
+              }
+            }
+          }
+        }
       }
     },
     "/workspaces/{workspace}/projects/{project}/apps/{app}/versions": {
@@ -3606,6 +3691,295 @@
           }
         }
       }
+    },
+    "/workspaces/{workspace}/projects/{project}/apps/{app}/http-sample": {
+      "post": {
+        "operationId": "post__workspaces_workspace_projects_project_apps_app_http_sample",
+        "summary": "Send one request to an HTTP app",
+        "description": "Makes one request of the app through the gateway, as a client of its URL would, and reports what came back. It is admitted, counted and charged as any request of the app is. The answer is 200 whatever the app or the gateway said; read outcome. Required permission: runs:write.",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "app",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What became of the request.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpSampleResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HttpSample"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspace}/projects/{project}/app-submissions/{key}": {
+      "get": {
+        "operationId": "get__workspaces_workspace_projects_project_app_submissions_key",
+        "summary": "Find a deployment by its request's key",
+        "description": "The operation of POST …/apps/deploy made with this key. Asks after a request whose answer was lost. 404 does not show that the request failed: it may still be in flight. Required permission: read.",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "The Idempotency-Key the request was made with, percent-encoded as a path segment: a key with a slash or a space in it is found as %2F and %20."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspace}/projects/{project}/apps/{app}/submissions/{key}": {
+      "get": {
+        "operationId": "get__workspaces_workspace_projects_project_apps_app_submissions_key",
+        "summary": "Find a change to an app by its request's key",
+        "description": "The operation of a change to this app (a run, a version, a release, its triggers, connections, lifecycle or deletion) made with this key. Asks after a request whose answer was lost. 404 does not show that the request failed: it may still be in flight. Required permission: read.",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "app",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "The Idempotency-Key the request was made with, percent-encoded as a path segment: a key with a slash or a space in it is found as %2F and %20."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspace}/projects/{project}/endpoint-submissions/{key}": {
+      "get": {
+        "operationId": "get__workspaces_workspace_projects_project_endpoint_submissions_key",
+        "summary": "Find a connection change by its request's key",
+        "description": "The operation of creating or revoking a connection made with this key. Asks after a request whose answer was lost. 404 does not show that the request failed: it may still be in flight. Required permission: read.",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "The Idempotency-Key the request was made with, percent-encoded as a path segment: a key with a slash or a space in it is found as %2F and %20."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4157,6 +4531,119 @@
         "required": [
           "expression",
           "timezone"
+        ]
+      },
+      "AppDelete": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "expected_revision"
+        ]
+      },
+      "HttpSample": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One request to make of the app through the gateway. An empty object asks for GET /.",
+        "properties": {
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "HEAD",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE",
+              "OPTIONS"
+            ],
+            "default": "GET"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 2048,
+            "default": "/",
+            "description": "Origin form: it starts with one slash and has no fragment."
+          },
+          "content_type": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "body": {
+            "type": "string",
+            "description": "At most 64 KiB; none for GET and HEAD."
+          }
+        },
+        "required": []
+      },
+      "HttpSampleResult": {
+        "type": "object",
+        "description": "What became of a sample request. outcome is response when the app answered, refused when the gateway did not hand it to the app, and unconfirmed when it was handed over and no answer came back.",
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "response",
+              "refused",
+              "unconfirmed"
+            ]
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "integer",
+            "description": "outcome=response: the app's status."
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "outcome=response: the app's headers."
+          },
+          "body": {
+            "type": "string",
+            "description": "outcome=response: the first 16 KiB of the body, base64."
+          },
+          "body_bytes": {
+            "type": "integer",
+            "description": "outcome=response: how much of the body was read, at most 1 MiB."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "outcome=response: whether body is less than the app sent."
+          },
+          "gateway_status": {
+            "type": "integer",
+            "description": "outcome=refused or unconfirmed: the status a client of the app would have been given."
+          },
+          "error": {
+            "type": "string",
+            "description": "outcome=refused or unconfirmed: why."
+          }
+        },
+        "required": [
+          "outcome",
+          "request_id",
+          "method",
+          "path",
+          "duration_ms"
         ]
       }
     }
