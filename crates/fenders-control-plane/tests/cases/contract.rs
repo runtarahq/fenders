@@ -316,7 +316,12 @@ fn the_contract_is_made_of_what_the_checker_knows() {
     // An operation has an id of its own, a summary, and a tag.
     let mut ids = BTreeSet::new();
     for (path, methods) in spec["paths"].as_object().unwrap() {
-        for (method, operation) in methods.as_object().unwrap() {
+        for (method, operation) in methods
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| *key != "servers")
+        {
             let id = operation["operationId"].as_str().unwrap();
             assert!(ids.insert(id), "{id} names two operations");
             assert!(
@@ -925,6 +930,24 @@ async fn every_operation_answers_as_the_contract_says() {
     .await;
     t.ok(&key, "GET", &format!("{p}/apps"), None).await;
 
+    // Whether it is up and can serve, asked with no credential.
+    for probe in ["/healthz", "/readyz"] {
+        let response = api::router(l.store.clone())
+            .oneshot(Request::builder().uri(probe).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(status, StatusCode::OK, "{probe}: {body}");
+        t.seen.push(Seen {
+            method: "get".into(),
+            path: probe.into(),
+            status,
+            body,
+        });
+    }
+
     // Refusals are answers too.
     t.send(&key, "GET", &format!("{p}/apps/{}", uid()), None)
         .await;
@@ -985,7 +1008,12 @@ async fn every_operation_answers_as_the_contract_says() {
     // And every operation was asked.
     let mut unreached = Vec::new();
     for (template, methods) in spec["paths"].as_object().unwrap() {
-        for method in methods.as_object().unwrap().keys() {
+        for method in methods
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| *key != "servers")
+        {
             if !reached.contains(&(method.clone(), template.clone())) {
                 unreached.push(format!("{method} {template}"));
             }

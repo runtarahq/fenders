@@ -204,10 +204,24 @@ A field it does not name may still be present: do not depend on one.
 - A tenant key calling an operator endpoint (`POST /v1/workspaces`,
   `GET /v1/nodes`) is answered `403`.
 - No credential is `401`; a revoked key is `401` at once.
-- Nothing is served but the API and its contract (`/api/openapi.json`).
+- Nothing is served but the API, its contract (`/api/openapi.json`), and
+  the two probes below.
 
 Each run is a VM of its own with its own cgroup and uid on the node, and
 reaches only the destinations its app was given.
+
+## Whether it is up
+
+Two routes take no credential, at the root and not under `/v1`, for whatever
+watches the control plane:
+
+| | |
+|---|---|
+| `GET /healthz` | `200 {"status": "ok"}` while the process answers. It does not ask the database: restart on this one. |
+| `GET /readyz` | `200 {"status": "ready"}` when it can serve; `503 {"status": "unavailable"}` when it cannot reach its database, or is held after a restore. Route traffic on this one. |
+
+Neither says why. That is the operator's to read, in
+`GET /v1/control-plane/status` and the log.
 
 ## The operator's routes, all of them
 

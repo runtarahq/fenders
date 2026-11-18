@@ -189,6 +189,11 @@ pub const OPERATOR_ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/control-plane/status"),
 ];
 
+/// What is answered without a credential: whether this process is up, and
+/// whether it can serve. They say nothing but that, so that whatever probes
+/// a control plane need hold nothing that opens it.
+pub const OPEN_ROUTES: &[(&str, &str)] = &[("GET", "/healthz"), ("GET", "/readyz")];
+
 /// Whether `path` is the route `pattern` describes.
 fn is_route(pattern: &str, path: &[&str]) -> bool {
     let mut pattern = pattern.trim_start_matches('/').split('/');
@@ -473,7 +478,12 @@ mod tests {
                     }
                 })
                 .collect();
-            for method in methods.as_object().unwrap().keys() {
+            for method in methods
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|key| *key != "servers")
+            {
                 routes.insert((method.to_uppercase(), pattern.join("/")));
             }
         }
@@ -485,6 +495,11 @@ mod tests {
         let routed: BTreeSet<_> = KEY_ROUTES
             .iter()
             .map(|(method, pattern, _)| public(method, pattern))
+            .chain(
+                OPEN_ROUTES
+                    .iter()
+                    .map(|(method, path)| public(method, path)),
+            )
             .chain(
                 OPERATOR_ROUTES
                     .iter()
@@ -527,8 +542,19 @@ mod tests {
                     }
                 })
                 .collect();
-            for (method, operation) in methods.as_object().unwrap() {
+            for (method, operation) in methods
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(key, _)| *key != "servers")
+            {
                 let route = (method.to_uppercase(), pattern.join("/"));
+                // What needs no credential says so, and is of neither kind.
+                if OPEN_ROUTES.contains(&(route.0.as_str(), route.1.as_str())) {
+                    assert_eq!(operation["security"], json!([]), "{route:?}");
+                    assert_eq!(operation["tags"], json!(["health"]), "{route:?}");
+                    continue;
+                }
                 let marked = operation["security"] == json!([{"operator":[]}]);
                 assert_eq!(marked, operators.contains(&route), "{route:?}");
                 let tag = if marked { "operator" } else { "workspace" };
@@ -551,9 +577,18 @@ mod tests {
         let spec: Value = serde_json::from_str(include_str!("../static/api/openapi.json")).unwrap();
         let reference = |name: &str| json!({"$ref": format!("#/components/responses/{name}")});
         for (path, methods) in spec["paths"].as_object().unwrap() {
-            for (method, operation) in methods.as_object().unwrap() {
+            for (method, operation) in methods
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(key, _)| *key != "servers")
+            {
                 let at = format!("{method} {path}");
                 let responses = &operation["responses"];
+                if operation["security"] == json!([]) {
+                    assert!(responses.get("401").is_none(), "{at}");
+                    continue;
+                }
                 assert_eq!(responses["401"], reference("Unauthorized"), "{at}");
                 assert_eq!(responses["default"], reference("Refused"), "{at}");
                 // Changes are what a workspace's rate counts.

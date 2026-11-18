@@ -248,6 +248,18 @@ impl Store {
     pub async fn transaction(&self, mutate: bool, recovery: bool) -> Result<Tx> {
         self.begin_transaction(mutate, recovery, false).await
     }
+    /// Whether this control plane can serve: it reaches its database, the
+    /// database is the one its encryption key is for, and it is not held
+    /// after a restore, when no change is admitted.
+    pub async fn ready(&self) -> bool {
+        let Ok(mut tx) = self.transaction(false, false).await else {
+            return false;
+        };
+        sqlx::query_scalar::<_, bool>("SELECT NOT active FROM recovery_barrier WHERE singleton")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap_or(false)
+    }
     pub fn background_monitor(&self) -> std::sync::Arc<crate::supervision::Monitor> {
         self.background.clone()
     }

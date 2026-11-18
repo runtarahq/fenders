@@ -221,6 +221,24 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         )
             .into_response());
     }
+    // Whether this process answers, and whether it can serve: asked by
+    // whatever watches it, which holds no credential. Nothing is said but
+    // the one word; why it is not ready is in the log and in
+    // `/v1/control-plane/status`, for the operator.
+    if method == "GET" && path == "/healthz" {
+        return Ok(Json(json!({"status":"ok"})).into_response());
+    }
+    if method == "GET" && path == "/readyz" {
+        return Ok(if store.ready().await {
+            Json(json!({"status":"ready"})).into_response()
+        } else {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"status":"unavailable"})),
+            )
+                .into_response()
+        });
+    }
     let segments: Vec<_> = path.trim_matches('/').split('/').collect();
     let operators = |method: &str| crate::customer_api::operators(method, &segments);
     // Whether the path is a route, a key's or the operator's, by `method`.

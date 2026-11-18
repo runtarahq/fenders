@@ -149,7 +149,8 @@ was decided on as `expected_revision`.
   `fenders-node-protocol` crate and the control plane's `/internal` routes are
   the reference ([EMBEDDING-NODE.md](EMBEDDING-NODE.md)).
 - There are no people in the API: no sign-in, sessions, users, roles,
-  invitations or mail, and nothing is served but the API and its contract.
+  invitations or mail, and nothing is served but the API, its contract and
+  two probes (`/healthz`, `/readyz`) that say only whether it is up.
   A credential is the operator's, or a tenant's key with a list of
   permissions; a product with users and roles issues keys that carry what
   it has decided, each with a `label` of its own that the audit trail

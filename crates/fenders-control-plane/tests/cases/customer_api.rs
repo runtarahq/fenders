@@ -2609,3 +2609,88 @@ async fn a_change_names_the_revision_it_was_decided_on() {
     assert_eq!(unguarded.1["instances"], 6);
     l.finish().await;
 }
+
+#[tokio::test]
+async fn whether_it_is_up_and_can_serve_is_asked_without_a_credential() {
+    let l = Lab::new().await;
+    let probe = |path: &'static str, token: Option<&'static str>| {
+        let l = &l;
+        async move {
+            let mut request = Request::builder().uri(path);
+            if let Some(token) = token {
+                request = request.header("Authorization", format!("Bearer {token}"));
+            }
+            let response = api::router(l.store.clone())
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                    .unwrap();
+            super::contract::conforms("GET", path, status, &body);
+            (status, headers, body)
+        }
+    };
+    // No credential, and one that opens nothing, are answered the same.
+    for token in [None, Some("fnd_tok_nothing")] {
+        let (status, headers, body) = probe("/healthz", token).await;
+        assert_eq!((status, &body), (StatusCode::OK, &json!({"status":"ok"})));
+        assert_eq!(headers["cache-control"], "no-store");
+        let (status, _, body) = probe("/readyz", token).await;
+        assert_eq!(
+            (status, &body),
+            (StatusCode::OK, &json!({"status":"ready"}))
+        );
+    }
+    // Nothing else is, and these are only at the root, only by GET.
+    for (method, path) in [
+        ("GET", "/v1/healthz"),
+        ("GET", "/health"),
+        ("POST", "/healthz"),
+        ("GET", "/v1/control-plane/status"),
+    ] {
+        let response = api::router(l.store.clone())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {path}"
+        );
+    }
+    // After a restore, until the operator activates it, no change is
+    // admitted: it is up, and not ready. It says only that.
+    sqlx::query("UPDATE recovery_barrier SET active=true")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let (status, _, body) = probe("/readyz", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body, json!({"status":"unavailable"}));
+    assert_eq!(probe("/healthz", None).await.0, StatusCode::OK);
+    sqlx::query("UPDATE recovery_barrier SET active=false")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(probe("/readyz", None).await.0, StatusCode::OK);
+    // A database that is not there: up, and not ready.
+    l.store.pool.close().await;
+    assert_eq!(probe("/healthz", None).await.0, StatusCode::OK);
+    assert_eq!(
+        probe("/readyz", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    sqlx::query(&format!("DROP SCHEMA {} CASCADE", l.schema))
+        .execute(&l.admin)
+        .await
+        .unwrap();
+}

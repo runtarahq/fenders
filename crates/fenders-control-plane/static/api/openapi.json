@@ -23,6 +23,10 @@
     {
       "name": "operator",
       "description": "The operator's own routes. No key is ever given one: a key that asks is answered 403."
+    },
+    {
+      "name": "health",
+      "description": "Whether the control plane is up and can serve. No credential, and at the root, not under /v1."
     }
   ],
   "paths": {
@@ -3620,6 +3624,125 @@
             "operator": []
           }
         ]
+      }
+    },
+    "/healthz": {
+      "servers": [
+        {
+          "url": "/"
+        }
+      ],
+      "get": {
+        "operationId": "get_healthz",
+        "summary": "The process answers",
+        "description": "Answered by the process alone, without its database: for whatever restarts it when it does not answer. No credential.",
+        "tags": [
+          "health"
+        ],
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The process answers.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "servers": [
+        {
+          "url": "/"
+        }
+      ],
+      "get": {
+        "operationId": "get_readyz",
+        "summary": "The control plane can serve",
+        "description": "Reads the database. 503 when it cannot be reached, is not this control plane's, or is held after a restore, when no change is admitted. Says no more than that: why is the operator's to read, in GET /control-plane/status and the log. No credential.",
+        "tags": [
+          "health"
+        ],
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The control plane can serve.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ready"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "It cannot serve now.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              }
+            }
+          }
+        }
       }
     }
   },
