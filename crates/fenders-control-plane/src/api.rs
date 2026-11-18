@@ -492,6 +492,15 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .create_project_keyed(&p, tenant, parse(&bytes)?, Some(key))
                 .await?
         }
+        ("PATCH", ["v1", "workspaces", tenant, "projects", project]) => {
+            store
+                .rename_project(&p, tenant, project, parse(&bytes)?, key)
+                .await?
+        }
+        ("DELETE", ["v1", "workspaces", tenant, "projects", project]) => {
+            no_body(&bytes)?;
+            store.delete_project(&p, tenant, project, key).await?
+        }
         ("GET", ["v1", "workspaces", tenant, "api-keys"]) => {
             store
                 .api_key_page(&p, tenant, list_page(&parts.uri)?)

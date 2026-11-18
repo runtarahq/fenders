@@ -444,7 +444,7 @@ impl Store {
             Self::require_workspace_active(tx, tenant).await?;
         }
         let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM projects WHERE tenant_id=$1 AND id=$2)",
+            "SELECT EXISTS (SELECT 1 FROM projects WHERE tenant_id=$1 AND id=$2 AND NOT deleted)",
         )
         .bind(tenant)
         .bind(project)
@@ -702,7 +702,7 @@ impl Store {
         let (before, limit) = page.bounds(1000)?;
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
-        let rows = sqlx::query_scalar::<_, Value>(&format!("SELECT {PROJECT} FROM projects p WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2) AND ($3::text IS NULL OR (p.created,p.id)<(SELECT c.created,c.id FROM projects c WHERE c.id=$3)) ORDER BY p.created DESC,p.id DESC LIMIT $4"))
+        let rows = sqlx::query_scalar::<_, Value>(&format!("SELECT {PROJECT} FROM projects p WHERE p.tenant_id=$1 AND NOT p.deleted AND ($2::text IS NULL OR p.id=$2) AND ($3::text IS NULL OR (p.created,p.id)<(SELECT c.created,c.id FROM projects c WHERE c.id=$3)) ORDER BY p.created DESC,p.id DESC LIMIT $4"))
             .bind(tenant).bind(&p.project_id).bind(before).bind(limit + 1).fetch_all(&mut *tx).await?;
         Ok(ListPage::page(rows, limit))
     }
@@ -742,6 +742,114 @@ impl Store {
             crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
         }
 
+        tx.commit().await?;
+        Ok(row)
+    }
+    /// A project that is gone is kept as a row, because what was done in it
+    /// (operations, usage, the audit trail) still names it.
+    pub(crate) const PROJECT_MIGRATION: &'static str =
+        "ALTER TABLE projects ADD COLUMN IF NOT EXISTS deleted boolean NOT NULL DEFAULT false";
+
+    /// Gives a project another name, and the slug made of it.
+    pub async fn rename_project(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        value: Named,
+        key: &str,
+    ) -> Result<Value> {
+        p.scope(tenant, None, true, false)?;
+        let (display_name, slug) = crate::workspaces::project_name(&value.name)?;
+        let request = json!({"kind":"project.rename","project":project,"name":value.name});
+        let mut tx = self.transaction(true, false).await?;
+        Self::project(&mut tx, p, tenant, project, true).await?;
+        if let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await? {
+            return Ok(row);
+        }
+        let row = sqlx::query_scalar::<_, Value>(&format!("UPDATE projects AS p SET name=$3,slug=$3,display_name=$4 WHERE p.tenant_id=$1 AND p.id=$2 AND NOT p.deleted RETURNING {PROJECT}"))
+            .bind(tenant)
+            .bind(project)
+            .bind(&slug)
+            .bind(&display_name)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(Error::missing)?;
+        Self::audit(
+            &mut tx,
+            p,
+            "project.rename",
+            project,
+            tenant,
+            json!({"name":display_name,"slug":slug}),
+        )
+        .await?;
+        crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+    /// Removes a project that holds nothing. What was done in it stays: its
+    /// operations, its usage, its part of the audit trail. Its name is
+    /// free for another.
+    pub async fn delete_project(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        key: &str,
+    ) -> Result<Value> {
+        p.scope(tenant, None, true, false)?;
+        let request = json!({"kind":"project.delete","project":project});
+        let mut tx = self.transaction(true, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        // Before the project is looked for: the retry of a deletion that
+        // was made finds its receipt, not a project that is gone.
+        identity(project)?;
+        if let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await? {
+            return Ok(row);
+        }
+        Self::project(&mut tx, p, tenant, project, true).await?;
+        let found: (bool, bool) = sqlx::query_as("SELECT p.is_default,
+            EXISTS(SELECT 1 FROM apps a WHERE a.tenant_id=p.tenant_id AND a.project_id=p.id AND NOT a.deleted)
+            OR EXISTS(SELECT 1 FROM artifacts a WHERE a.tenant_id=p.tenant_id AND a.project_id=p.id AND a.retired_at IS NULL)
+            OR EXISTS(SELECT 1 FROM secrets s WHERE s.tenant_id=p.tenant_id AND s.project_id=p.id)
+            OR EXISTS(SELECT 1 FROM external_endpoints e WHERE e.tenant_id=p.tenant_id AND e.project_id=p.id AND NOT e.deleted)
+            OR EXISTS(SELECT 1 FROM external_https_endpoints e WHERE e.tenant_id=p.tenant_id AND e.project_id=p.id AND NOT e.deleted)
+            OR EXISTS(SELECT 1 FROM executions e WHERE e.tenant_id=p.tenant_id AND e.project_id=p.id AND e.reserved)
+            FROM projects p WHERE p.tenant_id=$1 AND p.id=$2 FOR UPDATE OF p")
+            .bind(tenant)
+            .bind(project)
+            .fetch_one(&mut *tx)
+            .await?;
+        if found.0 {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "a workspace's default project is not deleted",
+            )
+            .coded("in_use"));
+        }
+        if found.1 {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "project still holds apps, artifacts, secrets, connections or runs; delete those first",
+            )
+            .coded("in_use"));
+        }
+        // Its names are given up, so that another project may take them.
+        sqlx::query("UPDATE projects SET deleted=true,name=id,slug=id,display_name=display_name||' (deleted '||id||')' WHERE tenant_id=$1 AND id=$2")
+            .bind(tenant)
+            .bind(project)
+            .execute(&mut *tx)
+            .await?;
+        // A key that was this project's opens nothing now.
+        sqlx::query("UPDATE credentials SET revoked=true WHERE tenant_id=$1 AND project_id=$2 AND NOT revoked")
+            .bind(tenant)
+            .bind(project)
+            .execute(&mut *tx)
+            .await?;
+        let row = json!({"id":project});
+        Self::audit(&mut tx, p, "project.delete", project, tenant, json!({})).await?;
+        crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
         tx.commit().await?;
         Ok(row)
     }
@@ -790,7 +898,10 @@ impl Store {
         limit: i64,
     ) -> Result<()> {
         let counted = match table {
-            "secrets" | "projects" | "apps" => format!("SELECT count(*) FROM {table} WHERE tenant_id=$1"),
+            "secrets" | "apps" => format!("SELECT count(*) FROM {table} WHERE tenant_id=$1"),
+            // A project that was deleted is kept, for what names it; it is
+            // not one of the workspace's projects any more.
+            "projects" => "SELECT count(*) FROM projects WHERE tenant_id=$1 AND NOT deleted".to_owned(),
             // Those that still open anything.
             "credentials" => "SELECT count(*) FROM credentials WHERE tenant_id=$1 AND NOT revoked AND expires>now()".to_owned(),
             _ => return Err(Error::internal()),

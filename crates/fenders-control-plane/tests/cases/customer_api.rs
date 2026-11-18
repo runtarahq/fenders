@@ -3336,3 +3336,201 @@ async fn an_artifact_that_is_no_apps_code_is_deleted_and_its_storage_returned() 
     assert_eq!(recorded, 1);
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_project_is_renamed_and_one_that_holds_nothing_is_deleted() {
+    let l = Lab::new().await;
+    let k = key(&l, None, &["read", "projects:write", "secrets:write"]).await;
+    let token = s(&k["token"]);
+    let projects = format!("/v1/workspaces/{}/projects", l.tenant);
+    let (status, made) = call(
+        &l,
+        token,
+        "POST",
+        &projects,
+        json!({"name":"Staging EU"}),
+        "make",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    let id = s(&made["id"]).to_owned();
+    let route = format!("{projects}/{id}");
+
+    // Another name, and the slug made of it.
+    let (status, renamed) = call(
+        &l,
+        token,
+        "PATCH",
+        &route,
+        json!({"name":"  Staging US  "}),
+        "rename",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(
+        (s(&renamed["name"]), s(&renamed["slug"])),
+        ("Staging US", "staging-us")
+    );
+    assert_eq!(renamed["id"], made["id"]);
+    assert_eq!(
+        call(
+            &l,
+            token,
+            "PATCH",
+            &route,
+            json!({"name":"  Staging US  "}),
+            "rename"
+        )
+        .await
+        .1,
+        renamed
+    );
+    // A name another project has, in any spelling of it, is that project's.
+    let taken = call(&l, token, "PATCH", &route, json!({"name":"APP"}), "taken").await;
+    assert_eq!(taken.0, StatusCode::CONFLICT, "{}", taken.1);
+    assert_eq!(taken.1["code"], "already_exists");
+    for (path, body, expected) in [
+        (route.clone(), json!({"name":"x"}), StatusCode::BAD_REQUEST),
+        (
+            route.clone(),
+            json!({"slug":"mine"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!("{projects}/{}", uid()),
+            json!({"name":"Nothing"}),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            call(&l, token, "PATCH", &path, body, &uid()).await.0,
+            expected,
+            "{path}"
+        );
+    }
+
+    // A project that holds something is not deleted, nor is the default.
+    let (_, secret) = call(
+        &l,
+        token,
+        "POST",
+        &format!("{route}/secrets"),
+        json!({"name":"held","value":"held-value"}),
+        "held",
+    )
+    .await;
+    let holding = bare(&l, token, "DELETE", &route, "holding").await;
+    assert_eq!(holding.0, StatusCode::CONFLICT, "{}", holding.1);
+    assert_eq!(holding.1["code"], "in_use");
+    let (_, listed) = call(&l, token, "GET", &projects, json!({}), "").await;
+    let default = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["is_default"] == true)
+        .unwrap()["id"]
+        .clone();
+    let refused = bare(
+        &l,
+        token,
+        "DELETE",
+        &format!("{projects}/{}", s(&default)),
+        "default",
+    )
+    .await;
+    assert_eq!(refused.0, StatusCode::CONFLICT, "{}", refused.1);
+
+    // Emptied, it goes. A key that was the project's opens nothing after.
+    let scoped = key(&l, Some(&id), &["read"]).await;
+    assert_eq!(
+        bare(
+            &l,
+            token,
+            "DELETE",
+            &format!("{route}/secrets/{}", s(&secret["id"])),
+            "empty"
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let gone = bare(&l, token, "DELETE", &route, "gone").await;
+    assert_eq!(gone.0, StatusCode::OK, "{}", gone.1);
+    assert_eq!(gone.1, json!({"id":id}));
+    assert_eq!(bare(&l, token, "DELETE", &route, "gone").await, gone);
+    assert_eq!(
+        bare(&l, token, "DELETE", &route, "again").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, listed) = call(&l, token, "GET", &projects, json!({}), "").await;
+    assert!(
+        !listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| project["id"] == id)
+    );
+    for (method, path) in [
+        ("GET", format!("{route}/apps")),
+        ("GET", format!("{route}/secrets")),
+        ("PATCH", route.clone()),
+    ] {
+        let status = call(
+            &l,
+            token,
+            method,
+            &path,
+            json!({"name":"Back again"}),
+            &uid(),
+        )
+        .await
+        .0;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+    assert_eq!(
+        call(&l, s(&scoped["token"]), "GET", "/v1/me", json!({}), "")
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    // Its name is free for another, and it no longer counts as one of the
+    // workspace's projects.
+    let (status, another) = call(
+        &l,
+        token,
+        "POST",
+        &projects,
+        json!({"name":"Staging US"}),
+        "another",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{another}");
+    assert_ne!(another["id"], made["id"]);
+    // What was done in it is still in the trail, under its id.
+    let (_, trail) = call(
+        &l,
+        &l.token,
+        "GET",
+        &format!("/v1/workspaces/{}/audit?action=project.delete", l.tenant),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(trail["items"][0]["resource_id"], id);
+    // A key of one project renames and deletes none: it cannot hold the permission.
+    let reader = key(&l, None, &["read"]).await;
+    assert_eq!(
+        call(
+            &l,
+            s(&reader["token"]),
+            "PATCH",
+            &format!("{projects}/{}", s(&another["id"])),
+            json!({"name":"No"}),
+            "no"
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    l.finish().await;
+}

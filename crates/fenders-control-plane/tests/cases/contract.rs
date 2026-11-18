@@ -963,6 +963,19 @@ async fn every_operation_answers_as_the_contract_says() {
     )
     .await;
 
+    // The project made at the start holds nothing: renamed, and deleted.
+    let projects = t.ok(&key, "GET", &format!("{w}/projects"), None).await;
+    let toured = projects["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["name"] == "Toured")
+        .unwrap();
+    let toured = format!("{w}/projects/{}", s(&toured["id"]));
+    t.ok(&key, "PATCH", &toured, Some(json!({"name":"Toured twice"})))
+        .await;
+    t.ok(&key, "DELETE", &toured, None).await;
+
     // Whether it is up and can serve, asked with no credential.
     for probe in ["/healthz", "/readyz"] {
         let response = api::router(l.store.clone())
