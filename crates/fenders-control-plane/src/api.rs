@@ -81,6 +81,14 @@ fn path_key(segment: &str) -> Result<String> {
         .map(|key| key.into_owned())
         .map_err(|_| Error::missing())
 }
+/// The store's name for a kind of thing a project holds. A connection is
+/// kept as an external endpoint; the rest are kept as they are asked for.
+fn stored(kind: &str) -> &str {
+    match kind {
+        "connections" => "external-endpoints",
+        kind => kind,
+    }
+}
 /// The key of a change that does not require one: none when none was sent.
 fn offered(key: &str) -> Option<&str> {
     (!key.is_empty()).then_some(key)
@@ -164,21 +172,16 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         )
             .into_response());
     }
-    let mut segments: Vec<_> = path.trim_matches('/').split('/').collect();
-    let public_api = segments.get(1) == Some(&"workspaces");
-    if public_api {
-        segments[1] = "tenants";
-        if segments.get(3) == Some(&"projects") && segments.get(5) == Some(&"connections") {
-            segments[5] = "external-endpoints";
-        }
-        // Before any credential is asked for: a path that is no route of
-        // the workspace API, by any method, is unknown to everyone.
-        if !METHODS
-            .iter()
-            .any(|method| crate::customer_api::permission(method, &segments).is_some())
-        {
-            return Err(Error::missing());
-        }
+    let segments: Vec<_> = path.trim_matches('/').split('/').collect();
+    let operators = |method: &str| crate::customer_api::operators(method, &segments);
+    // Whether the path is a route, a key's or the operator's, by `method`.
+    let exists = |method: &str| {
+        crate::customer_api::permission(method, &segments).is_some() || operators(method)
+    };
+    // Before any credential is asked for: under a workspace, a path that is
+    // no route by any method is unknown to everyone.
+    if segments.get(1) == Some(&"workspaces") && !METHODS.iter().any(|method| exists(method)) {
+        return Err(Error::missing());
     }
     // One way in: a bearer credential. Who a person is, and what they may
     // do, is the business of whatever is built on this API; it calls with a
@@ -191,14 +194,9 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         .ok_or_else(Error::unauthorized)?;
     let p = store.authenticate(token).await?;
     // A route that is one, asked with a method it does not take, is told
-    // which it takes. The operator's routes are under `/v1/tenants` alone,
-    // and a key is told nothing of them: its request for one that exists
+    // which it takes. A key is told nothing of the operator's routes: its request for one that exists
     // is refused below as it always was, and here it hears only of the
     // methods a key may be given.
-    let operators = |method: &str| !public_api && crate::customer_api::operators(method, &segments);
-    let exists = |method: &str| {
-        crate::customer_api::permission(method, &segments).is_some() || operators(method)
-    };
     if !exists(method) {
         let mut allow: Vec<&str> = METHODS
             .into_iter()
@@ -247,14 +245,14 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
     let is_upload = method == "POST"
         && matches!(
             segments.as_slice(),
-            ["v1", "tenants", _, "projects", _, "artifacts"]
+            ["v1", "workspaces", _, "projects", _, "artifacts"]
         );
     // An upload's body is held whole, up to 16 MiB of it. Before any of it
     // is read: the credential must be one that may upload there, the body
     // must say it fits, and its workspace and the control plane must have a
     // place for one more.
     let limit = if is_upload { MAX_UPLOAD } else { 64 * 1024 };
-    let _uploading = if let ["v1", "tenants", tenant, "projects", project, "artifacts"] =
+    let _uploading = if let ["v1", "workspaces", tenant, "projects", project, "artifacts"] =
         segments.as_slice()
         && is_upload
     {
@@ -307,18 +305,25 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
     if !is_upload && !bytes.is_empty() && media.as_deref() != Some("application/json") {
         return unsupported("a request body's Content-Type is application/json");
     }
-    if (public_api || p.api_permissions.is_some())
-        && matches!(
-            (method, segments.as_slice()),
-            (
-                "POST",
-                ["v1", "tenants", _, "projects", _, "apps", "deploy"]
-            ) | (
-                "PUT",
-                ["v1", "tenants", _, "projects", _, "apps", _, "connections"]
-            )
+    if matches!(
+        (method, segments.as_slice()),
+        (
+            "POST",
+            ["v1", "workspaces", _, "projects", _, "apps", "deploy"]
+        ) | (
+            "PUT",
+            [
+                "v1",
+                "workspaces",
+                _,
+                "projects",
+                _,
+                "apps",
+                _,
+                "connections"
+            ]
         )
-    {
+    ) {
         let value: Value = parse(&bytes)?;
         if value.get("endpoints").is_some() || value.get("https_origins").is_some() {
             return Err(Error::invalid(
@@ -332,7 +337,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -349,7 +354,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         }
         ("GET", ["v1", "me"]) => serde_json::to_value(&p).map_err(|_| Error::internal())?,
         ("GET", ["v1", "control-plane", "status"]) => store.background_status(&p)?,
-        ("GET", ["v1", "tenants"]) => store.tenants(&p).await?,
+        ("GET", ["v1", "workspaces"]) => store.tenants(&p).await?,
         ("GET", ["v1", "nodes"]) => store.nodes(&p).await?,
         ("GET", ["v1", "public-egress-policy"]) => store.public_egress_policy(&p).await?,
         ("PUT", ["v1", "public-egress-policy"]) => {
@@ -368,45 +373,40 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .node_mode_keyed(&p, node, parse(&bytes)?, offered(key))
                 .await?
         }
-        ("POST", ["v1", "tenants"]) => {
+        ("POST", ["v1", "workspaces"]) => {
             status = StatusCode::CREATED;
             store
                 .create_tenant_keyed(&p, parse(&bytes)?, Some(key))
                 .await?
         }
         // A tenant's allowance, and the size its apps take when they name none.
-        ("PATCH", ["v1", "tenants", tenant]) => {
+        ("PATCH", ["v1", "workspaces", tenant]) => {
             store
                 .update_allowance_keyed(&p, tenant, parse(&bytes)?, offered(key))
                 .await?
         }
         // Suspend a workspace, or resume it: the operator's, with a reason.
-        ("POST", ["v1", "tenants", tenant, "lifecycle"]) => {
+        ("POST", ["v1", "workspaces", tenant, "lifecycle"]) => {
             p.operator()?;
             let mut action =
                 parse::<crate::workspace_lifecycle::WorkspaceAction>(&bytes)?.keyed(key)?;
             action.id = (*tenant).to_owned();
             store.operator_workspace_action(&p.id, action).await?
         }
-        ("PATCH", ["v1", "tenants", tenant, "http-limits"]) => {
+        ("PATCH", ["v1", "workspaces", tenant, "http-limits"]) => {
             store
                 .update_http_limits_keyed(&p, tenant, parse(&bytes)?, offered(key))
                 .await?
         }
-        ("GET", ["v1", "tenants", tenant, "projects"]) => store.projects(&p, tenant).await?,
-        ("POST", ["v1", "tenants", tenant, "projects"]) => {
+        ("GET", ["v1", "workspaces", tenant, "projects"]) => store.projects(&p, tenant).await?,
+        ("POST", ["v1", "workspaces", tenant, "projects"]) => {
             status = StatusCode::CREATED;
             store
-                .create_project_keyed(
-                    &p,
-                    tenant,
-                    parse(&bytes)?,
-                    (public_api || p.api_permissions.is_some() || !key.is_empty()).then_some(key),
-                )
+                .create_project_keyed(&p, tenant, parse(&bytes)?, Some(key))
                 .await?
         }
-        ("GET", ["v1", "tenants", tenant, "api-keys"]) => store.api_keys(&p, tenant).await?,
-        ("POST", ["v1", "tenants", tenant, "api-keys"]) => {
+        ("GET", ["v1", "workspaces", tenant, "api-keys"]) => store.api_keys(&p, tenant).await?,
+        ("POST", ["v1", "workspaces", tenant, "api-keys"]) => {
             let issued = store
                 .create_api_key(&p, tenant, parse(&bytes)?, key)
                 .await?;
@@ -416,10 +416,10 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             }
             issued
         }
-        ("DELETE", ["v1", "tenants", tenant, "api-keys", id]) => {
+        ("DELETE", ["v1", "workspaces", tenant, "api-keys", id]) => {
             store.revoke_credential(&p, tenant, id).await?
         }
-        ("GET", ["v1", "tenants", tenant, "usage", "history"]) => {
+        ("GET", ["v1", "workspaces", tenant, "usage", "history"]) => {
             let page = axum::extract::Query::<crate::usage::HistoryPage>::try_from_uri(&parts.uri)
                 .map_err(|_| Error::invalid("invalid history query"))?
                 .0;
@@ -429,7 +429,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -442,18 +442,26 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .0;
             store.usage_history(&p, tenant, Some(project), page).await?
         }
-        ("GET", ["v1", "tenants", tenant, "usage"]) => store.usage(&p, tenant, None).await?,
-        ("GET", ["v1", "tenants", tenant, "projects", project, "usage"]) => {
+        ("GET", ["v1", "workspaces", tenant, "usage"]) => store.usage(&p, tenant, None).await?,
+        ("GET", ["v1", "workspaces", tenant, "projects", project, "usage"]) => {
             store.usage(&p, tenant, Some(project)).await?
         }
-        ("GET", ["v1", "tenants", tenant, "projects", project, "https-access"]) => {
-            store.https_access(&p, tenant, project).await?
-        }
+        (
+            "GET",
+            [
+                "v1",
+                "workspaces",
+                tenant,
+                "projects",
+                project,
+                "https-access",
+            ],
+        ) => store.https_access(&p, tenant, project).await?,
         (
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -465,14 +473,14 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .validate_https_access(&p, tenant, project, parse(&bytes)?)
                 .await?
         }
-        ("GET", ["v1", "tenants", tenant, "projects", project, "app-sizes"]) => {
+        ("GET", ["v1", "workspaces", tenant, "projects", project, "app-sizes"]) => {
             store.app_sizes(&p, tenant, project).await?
         }
         (
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -485,7 +493,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "PUT",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -502,7 +510,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -518,7 +526,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -536,7 +544,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -557,7 +565,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -570,7 +578,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "PUT",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -597,7 +605,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -610,7 +618,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -619,12 +627,12 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "websocket",
             ],
         ) => store.app_websocket(&p, tenant, project, app).await?,
-        ("PATCH", ["v1", "tenants", tenant, "projects", project, "apps", app]) => {
+        ("PATCH", ["v1", "workspaces", tenant, "projects", project, "apps", app]) => {
             store
                 .app_lifecycle(&p, tenant, project, app, parse(&bytes)?, key)
                 .await?
         }
-        ("DELETE", ["v1", "tenants", tenant, "projects", project, "apps", app]) => {
+        ("DELETE", ["v1", "workspaces", tenant, "projects", project, "apps", app]) => {
             store
                 .delete_app(&p, tenant, project, app, parse(&bytes)?, key)
                 .await?
@@ -633,7 +641,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -651,7 +659,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -665,7 +673,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -697,7 +705,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -712,7 +720,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -731,7 +739,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -753,13 +761,13 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 )
                 .await?
         }
-        ("POST", ["v1", "tenants", tenant, "projects", project, "apps"]) => {
+        ("POST", ["v1", "workspaces", tenant, "projects", project, "apps"]) => {
             status = StatusCode::CREATED;
             store
                 .create_app(&p, tenant, project, parse(&bytes)?, key)
                 .await?
         }
-        ("GET", ["v1", "tenants", tenant, "projects", project, "apps"]) => {
+        ("GET", ["v1", "workspaces", tenant, "projects", project, "apps"]) => {
             let page = axum::extract::Query::<crate::apps::AppPage>::try_from_uri(&parts.uri)
                 .map_err(|_| Error::invalid("invalid app page query"))?
                 .0;
@@ -769,7 +777,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -784,14 +792,14 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                     .0;
             store.app_events(&p, tenant, project, app, page).await?
         }
-        ("GET", ["v1", "tenants", tenant, "projects", project, "apps", app]) => {
+        ("GET", ["v1", "workspaces", tenant, "projects", project, "apps", app]) => {
             store.app(&p, tenant, project, app).await?
         }
         (
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -809,7 +817,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -827,7 +835,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -847,7 +855,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -857,7 +865,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 version,
             ],
         ) => store.app_version(&p, tenant, project, app, version).await?,
-        ("POST", ["v1", "tenants", tenant, "projects", project, "artifacts"]) => {
+        ("POST", ["v1", "workspaces", tenant, "projects", project, "artifacts"]) => {
             status = StatusCode::CREATED;
             store.upload(&p, tenant, project, &bytes).await?
         }
@@ -865,7 +873,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -882,7 +890,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -894,27 +902,21 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .preview_schedule(&p, tenant, project, parse(&bytes)?)
                 .await?
         }
-        ("POST", ["v1", "tenants", tenant, "projects", project, "secrets"]) => {
+        ("POST", ["v1", "workspaces", tenant, "projects", project, "secrets"]) => {
             status = StatusCode::CREATED;
             store
-                .create_secret_keyed(
-                    &p,
-                    tenant,
-                    project,
-                    parse(&bytes)?,
-                    (public_api || p.api_permissions.is_some() || !key.is_empty()).then_some(key),
-                )
+                .create_secret_keyed(&p, tenant, project, parse(&bytes)?, Some(key))
                 .await?
         }
         (
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
-                "external-endpoints",
+                "connections",
             ],
         ) => {
             status = StatusCode::CREATED;
@@ -926,7 +928,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -942,11 +944,11 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "DELETE",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
-                "external-endpoints",
+                "connections",
                 endpoint,
             ],
         ) => {
@@ -962,25 +964,33 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
-                kind @ ("artifacts" | "external-endpoints" | "secrets" | "operations"),
+                kind @ ("artifacts" | "connections" | "secrets" | "operations"),
             ],
-        ) => store.resources(&p, tenant, project, kind, None).await?,
+        ) => {
+            store
+                .resources(&p, tenant, project, stored(kind), None)
+                .await?
+        }
         (
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
-                kind @ ("artifacts" | "external-endpoints" | "secrets" | "operations"),
+                kind @ ("artifacts" | "connections" | "secrets" | "operations"),
                 id,
             ],
-        ) => store.resources(&p, tenant, project, kind, Some(id)).await?,
+        ) => {
+            store
+                .resources(&p, tenant, project, stored(kind), Some(id))
+                .await?
+        }
         _ => return Err(Error::missing()),
     };
     // 202 says one thing: the change was taken and is not yet made. It is

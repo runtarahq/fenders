@@ -250,7 +250,7 @@ impl View {
     }
     fn path(&self) -> String {
         format!(
-            "/v1/tenants/{}/projects/{}/apps/{}/logs",
+            "/v1/workspaces/{}/projects/{}/apps/{}/logs",
             self.tenant, self.project, self.app
         )
     }

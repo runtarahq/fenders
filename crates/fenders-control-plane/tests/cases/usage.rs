@@ -242,7 +242,7 @@ async fn usage_enforces_workspace_project_and_credential_scope() {
             .await
             .is_err()
     );
-    let uri = format!("/v1/tenants/{}/projects/{}/usage", l.tenant, l.project);
+    let uri = format!("/v1/workspaces/{}/projects/{}/usage", l.tenant, l.project);
     let response = api::router(l.store.clone())
         .oneshot(
             Request::builder()

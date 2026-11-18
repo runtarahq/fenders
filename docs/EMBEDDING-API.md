@@ -101,36 +101,38 @@ must be registered with `egress_budget_required` and started with
 
 ## 4. A tenant for each customer
 
-As the operator:
+A tenant is a **workspace** in the API, and that is its only name there:
+every route of one is under `/v1/workspaces/TENANT`, the operator's and the
+key's alike. As the operator:
 
 ```sh
 # A tenant, with what it may use at once and its monthly transfer.
-POST /v1/tenants
+POST /v1/workspaces
 {"name": "acme", "allowance": {"cpu_percent": 200, "memory_mib": 1024,
   "storage_bytes": 1073741824, "instances": 2, "transfer_bytes": 1073741824}}
 # -> {"id": "TENANT", …}; a default project is created with it.
 #    Keep the id: a name is a label, and two tenants may share one. Only
 #    the Idempotency-Key tells a retry from a request for another tenant.
 
-GET  /v1/tenants/TENANT/projects            # -> [{"id": "PROJECT", …}]
-POST /v1/tenants/TENANT/projects            {"name": "staging"}
-PATCH /v1/tenants/TENANT                    {"allowance": {…}}
-PATCH /v1/tenants/TENANT                    {"default_app_size": "medium"}   # for apps that name no size
+GET  /v1/workspaces/TENANT/projects            # -> [{"id": "PROJECT", …}]
+POST /v1/workspaces/TENANT/projects            {"name": "staging"}
+PATCH /v1/workspaces/TENANT                    {"allowance": {…}}
+PATCH /v1/workspaces/TENANT                    {"default_app_size": "medium"}   # for apps that name no size
 
 # A key for that tenant, optionally for one project.
-POST /v1/tenants/TENANT/api-keys
+POST /v1/workspaces/TENANT/api-keys
 {"name": "product", "permissions": ["read", "apps:write", "runs:write"],
  "ttl_seconds": 2592000}
 # -> 201 {"id": …, "token": "fnd_tok_…", "replayed": false}   the token is shown once
 #    A retry with the same Idempotency-Key issues nothing and is answered
 #    200 {"id": …, "token": null, "replayed": true}: the token is not kept.
 #    If the first answer was lost, revoke the key by its id and issue another.
-GET    /v1/tenants/TENANT/api-keys          # the tenant's keys, without their tokens
-DELETE /v1/tenants/TENANT/api-keys/KEY      # it stops working at once
+GET    /v1/workspaces/TENANT/api-keys          # the tenant's keys, without their tokens
+DELETE /v1/workspaces/TENANT/api-keys/KEY      # it stops working at once
 
 # Suspend a workspace, or resume it. expected_revision is the tenant's
-# lifecycle_revision, as GET /v1/tenants gives it to the operator.
-POST /v1/tenants/TENANT/lifecycle
+# lifecycle_revision, as GET /v1/workspaces gives it to the operator.
+POST /v1/workspaces/TENANT/lifecycle
 {"expected_revision": 1, "action": "suspend", "reason": "…"}
 ```
 
@@ -186,7 +188,7 @@ A field it does not name may still be present: do not depend on one.
 - A tenant key lists only its own workspace.
 - A tenant key asking for another tenant's apps, one of its apps, or to run
   one is answered `404`, as for something that does not exist.
-- A tenant key calling an operator endpoint (`POST /v1/tenants`,
+- A tenant key calling an operator endpoint (`POST /v1/workspaces`,
   `GET /v1/nodes`) is answered `403`.
 - No credential is `401`; a revoked key is `401` at once.
 - Nothing is served but the API and its contract (`/api/openapi.json`).
@@ -200,10 +202,10 @@ What no tenant's key is ever given, whatever it holds:
 
 | | |
 |---|---|
-| Tenants | `POST /v1/tenants` (`GET /v1/tenants` lists them all to the operator, and a key its own) |
-| What a tenant is allowed | `PATCH /v1/tenants/T` (allowance, default app size), `PATCH /v1/tenants/T/http-limits` |
-| Suspending one | `POST /v1/tenants/T/lifecycle` |
-| Its keys | `GET`, `POST /v1/tenants/T/api-keys`, `DELETE /v1/tenants/T/api-keys/KEY` |
+| Tenants | `POST /v1/workspaces` (`GET /v1/workspaces` lists them all to the operator, and a key its own) |
+| What a tenant is allowed | `PATCH /v1/workspaces/T` (allowance, default app size), `PATCH /v1/workspaces/T/http-limits` |
+| Suspending one | `POST /v1/workspaces/T/lifecycle` |
+| Its keys | `GET`, `POST /v1/workspaces/T/api-keys`, `DELETE /v1/workspaces/T/api-keys/KEY` |
 | Nodes | `GET`, `POST /v1/nodes`, `PATCH /v1/nodes/NODE` |
 | Public egress policy | `GET`, `PUT /v1/public-egress-policy` |
 | This control plane's loops | `GET /v1/control-plane/status` |
@@ -231,7 +233,7 @@ knows its own users and calls this API.
   Fenders does not interpret:
 
   ```sh
-  POST /v1/tenants/TENANT/api-keys
+  POST /v1/workspaces/TENANT/api-keys
   {"name": "console", "permissions": ["read", "runs:write"], "ttl_seconds": 900,
    "label": "user:4f2a alice@example.test"}
   ```

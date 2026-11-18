@@ -313,7 +313,7 @@ async fn app_log_authorization_filters_and_cursors_cannot_cross_scopes() {
     );
     let router = api::router(l.store.clone());
     let url = format!(
-        "/v1/tenants/{}/projects/{}/apps/{}/logs",
+        "/v1/workspaces/{}/projects/{}/apps/{}/logs",
         l.tenant, l.project, app
     );
     let req = |suffix: &str| {

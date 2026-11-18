@@ -10,7 +10,7 @@ async fn workspace_action(l: &Lab, input: &Value) -> (StatusCode, Value) {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/v1/tenants/{}/lifecycle", s(&tenant)))
+                .uri(format!("/v1/workspaces/{}/lifecycle", s(&tenant)))
                 .header("Authorization", format!("Bearer {}", l.token))
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
@@ -37,7 +37,7 @@ async fn suspension_is_atomic_and_concurrent_retries_share_the_audit_receipt() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/v1/tenants/{}/lifecycle", l.tenant))
+                .uri(format!("/v1/workspaces/{}/lifecycle", l.tenant))
                 .header("Authorization", format!("Bearer {}", s(&key["token"])))
                 .header("content-type", "application/json")
                 .body(Body::from(json!({"request_key":uid(),"action":"suspend","reason":"mine","expected_revision":1}).to_string()))
@@ -359,7 +359,7 @@ async fn the_operator_credential_is_the_files_and_replacing_the_file_ends_the_ol
 async fn lifecycle(l: &Lab, key: Option<&str>, body: Value) -> (StatusCode, Value) {
     let mut request = Request::builder()
         .method("POST")
-        .uri(format!("/v1/tenants/{}/lifecycle", l.tenant))
+        .uri(format!("/v1/workspaces/{}/lifecycle", l.tenant))
         .header("Authorization", format!("Bearer {}", l.token))
         .header("content-type", "application/json");
     if let Some(key) = key {

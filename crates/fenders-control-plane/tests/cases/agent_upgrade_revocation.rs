@@ -178,7 +178,7 @@ impl Revocation {
         assert!(n(&native["egress_budget_revision"]) > 0);
         let kernel = limits::kernel(&backend);
         let url = format!(
-            "{}/v1/tenants/{}/projects/{}/grants/{}/revoke",
+            "{}/v1/workspaces/{}/projects/{}/grants/{}/revoke",
             api.1, l.tenant, l.project, grant
         );
         let bytes = transferred.load(Ordering::SeqCst);

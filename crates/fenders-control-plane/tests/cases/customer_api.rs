@@ -29,14 +29,14 @@ async fn call(
     (status, body)
 }
 async fn key(l: &Lab, scope: Option<&str>, permissions: &[&str]) -> Value {
-    let (status, value) = call(l, &l.token, "POST", &format!("/v1/tenants/{}/api-keys", l.tenant),
+    let (status, value) = call(l, &l.token, "POST", &format!("/v1/workspaces/{}/api-keys", l.tenant),
         json!({"name":"automation","project_id":scope,"permissions":permissions,"ttl_seconds":3600}), &uid()).await;
     assert_eq!(status, StatusCode::CREATED, "{value}");
     value
 }
 
 #[tokio::test]
-async fn customer_api_keys_limit_aliases_and_revalidate_revocation() {
+async fn customer_api_keys_are_held_to_their_routes_and_revalidate_revocation() {
     let l = Lab::new().await;
     let k = key(&l, Some(&l.project), &["read", "runs:write"]).await;
     let token = s(&k["token"]);
@@ -53,10 +53,13 @@ async fn customer_api_keys_limit_aliases_and_revalidate_revocation() {
         ("GET", base.clone() + "/executions"),
         (
             "POST",
-            format!("/v1/tenants/{}/projects/{}/executions", l.tenant, l.project),
+            format!(
+                "/v1/workspaces/{}/projects/{}/executions",
+                l.tenant, l.project
+            ),
         ),
         ("GET", "/v1/nodes".into()),
-        ("POST", format!("/v1/tenants/{}/credentials", l.tenant)),
+        ("POST", format!("/v1/workspaces/{}/credentials", l.tenant)),
         ("POST", format!("/v1/workspaces/{}/api-keys", l.tenant)),
     ] {
         let status = call(&l, token, method, &path, json!({}), "deny").await.0;
@@ -129,7 +132,7 @@ async fn customer_api_keys_limit_aliases_and_revalidate_revocation() {
 #[tokio::test]
 async fn customer_api_key_and_project_retries_do_not_duplicate_or_reveal_keys() {
     let l = Lab::new().await;
-    let route = format!("/v1/tenants/{}/api-keys", l.tenant);
+    let route = format!("/v1/workspaces/{}/api-keys", l.tenant);
     let request = json!({"name":"pipeline","project_id":null,"permissions":["read","projects:write"],"ttl_seconds":3600});
     let (a, b) = tokio::join!(
         call(&l, &l.token, "POST", &route, request.clone(), "issue"),
@@ -421,7 +424,7 @@ async fn customer_api_connections_resolve_both_protocols_atomically_without_gran
     for route in [
         format!("{base}/apps/deploy"),
         format!(
-            "/v1/tenants/{}/projects/{}/apps/deploy",
+            "/v1/workspaces/{}/projects/{}/apps/deploy",
             l.tenant, l.project
         ),
     ] {
@@ -604,7 +607,7 @@ async fn a_run_is_cancelled_through_its_app_by_a_key_that_may_run() {
 #[tokio::test]
 async fn the_operator_has_its_own_routes_and_no_others() {
     let l = Lab::new().await;
-    let t = format!("/v1/tenants/{}", l.tenant);
+    let t = format!("/v1/workspaces/{}", l.tenant);
     let p = format!("{t}/projects/{}", l.project);
     let id = uid();
     for (method, path) in [
@@ -642,7 +645,7 @@ async fn the_operator_has_its_own_routes_and_no_others() {
     ];
     let holder = key(&l, None, &every).await;
     for (method, path) in [
-        ("POST", "/v1/tenants".to_owned()),
+        ("POST", "/v1/workspaces".to_owned()),
         ("PATCH", t.clone()),
         ("PATCH", format!("{t}/http-limits")),
         ("POST", format!("{t}/lifecycle")),
@@ -724,7 +727,7 @@ async fn a_tenants_keys_are_the_operators_to_issue() {
     }
     // Nor over the API, on the operator's route or the workspace's name for it.
     for path in [
-        format!("/v1/tenants/{}/api-keys", l.tenant),
+        format!("/v1/workspaces/{}/api-keys", l.tenant),
         format!("/v1/workspaces/{}/api-keys", l.tenant),
     ] {
         let (status, _) = call(&l, s(&key["token"]), "POST", &path, ask.clone(), &uid()).await;
@@ -738,7 +741,7 @@ async fn a_tenants_keys_are_the_operators_to_issue() {
         &l,
         &l.token,
         "POST",
-        &format!("/v1/tenants/{}/api-keys", l.tenant),
+        &format!("/v1/workspaces/{}/api-keys", l.tenant),
         ask.clone(),
         &uid(),
     )
@@ -811,7 +814,7 @@ async fn a_keys_label_is_recorded_with_what_it_does() {
             .any(|k| k["label"] == "user:4f2a alice@example.test")
     );
     // A change each key makes, and one the operator makes.
-    let path = format!("/v1/tenants/{}/projects/{}/secrets", l.tenant, l.project);
+    let path = format!("/v1/workspaces/{}/projects/{}/secrets", l.tenant, l.project);
     for (token, name) in [
         (s(&labelled["token"]), "by-labelled"),
         (s(&plain["token"]), "by-plain"),
@@ -873,7 +876,9 @@ async fn an_uploads_body_is_not_read_for_a_credential_that_may_not_upload_there(
             })));
             let mut request = Request::builder()
                 .method("POST")
-                .uri(format!("/v1/tenants/{tenant}/projects/{project}/artifacts"))
+                .uri(format!(
+                    "/v1/workspaces/{tenant}/projects/{project}/artifacts"
+                ))
                 .header("Authorization", format!("Bearer {token}"))
                 .header("Content-Type", "application/wasm");
             if let Some(declared) = declared {
@@ -994,7 +999,7 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
     assert_eq!(issue().await.unwrap_err().status, quota);
 
     // Changes in a minute: refused or not, each one counts, and reads do not.
-    let path = format!("/v1/tenants/{}/projects/{}/secrets", l.tenant, l.project);
+    let path = format!("/v1/workspaces/{}/projects/{}/secrets", l.tenant, l.project);
     let token = s(&editor["token"]);
     let mut last = (StatusCode::OK, json!({}));
     for _ in 0..600 {
@@ -1059,7 +1064,7 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
             "POST",
             &path,
             json!({"name":"x","value":"value"}),
-            ""
+            &uid()
         )
         .await
         .1["error"],
@@ -1105,8 +1110,8 @@ async fn a_workspaces_credentials_do_not_see_the_operators_notes_on_it() {
 async fn management_answers_carry_browser_security_headers() {
     let l = Lab::new().await;
     for (path, token) in [
-        ("/v1/tenants", Some(l.token.as_str())),
-        ("/v1/tenants", None),
+        ("/v1/workspaces", Some(l.token.as_str())),
+        ("/v1/workspaces", None),
         ("/api/openapi.json", None),
         ("/no/such/path", Some(l.token.as_str())),
     ] {
@@ -1243,8 +1248,22 @@ async fn a_retried_tenant_creation_makes_one_tenant() {
     let tenant = json!({"name":"acme","allowance":{"cpu_percent":200,"memory_mib":1024,"storage_bytes":1073741824,"instances":2,"transfer_bytes":1073741824}});
     // Two at once, as a client that timed out and tried again would send.
     let (a, b) = tokio::join!(
-        call(&l, &l.token, "POST", "/v1/tenants", tenant.clone(), "acme"),
-        call(&l, &l.token, "POST", "/v1/tenants", tenant.clone(), "acme")
+        call(
+            &l,
+            &l.token,
+            "POST",
+            "/v1/workspaces",
+            tenant.clone(),
+            "acme"
+        ),
+        call(
+            &l,
+            &l.token,
+            "POST",
+            "/v1/workspaces",
+            tenant.clone(),
+            "acme"
+        )
     );
     assert_eq!(a.0, StatusCode::CREATED, "{}", a.1);
     assert_eq!(a, b);
@@ -1259,14 +1278,14 @@ async fn a_retried_tenant_creation_makes_one_tenant() {
     // The key with other arguments is refused, and makes nothing.
     let mut other = tenant.clone();
     other["allowance"]["instances"] = json!(3);
-    let refused = call(&l, &l.token, "POST", "/v1/tenants", other, "acme").await;
+    let refused = call(&l, &l.token, "POST", "/v1/workspaces", other, "acme").await;
     assert_eq!(refused.0, StatusCode::CONFLICT, "{}", refused.1);
     // A name is a label, not an identity: another key makes another tenant of it.
     let second = call(
         &l,
         &l.token,
         "POST",
-        "/v1/tenants",
+        "/v1/workspaces",
         tenant.clone(),
         "acme-2",
     )
@@ -1275,7 +1294,7 @@ async fn a_retried_tenant_creation_makes_one_tenant() {
     assert_ne!(second.1["id"], a.1["id"]);
     assert_eq!(tenants_named(&l, "acme").await, 2);
     // Without a key nothing is made: a retry could not be told from a new request.
-    let keyless = call(&l, &l.token, "POST", "/v1/tenants", tenant, "").await;
+    let keyless = call(&l, &l.token, "POST", "/v1/workspaces", tenant, "").await;
     assert_eq!(keyless.0, StatusCode::BAD_REQUEST, "{}", keyless.1);
     assert_eq!(tenants_named(&l, "acme").await, 2);
     l.finish().await;
@@ -1360,7 +1379,7 @@ async fn the_operators_other_changes_honour_a_key_and_do_not_require_one() {
     };
     // An allowance: the retry is answered as the first call was, though the
     // tenant has changed since.
-    let tenant = format!("/v1/tenants/{}", l.tenant);
+    let tenant = format!("/v1/workspaces/{}", l.tenant);
     let allowance = json!({"allowance":{"cpu_percent":300,"memory_mib":2048,"instances":3,"storage_bytes":20000000000i64,"transfer_bytes":10000000}});
     let first = call(&l, &l.token, "PATCH", &tenant, allowance.clone(), "allow").await;
     assert_eq!(first.0, StatusCode::OK, "{}", first.1);
@@ -1393,7 +1412,7 @@ async fn the_operators_other_changes_honour_a_key_and_do_not_require_one() {
     );
 
     // HTTP limits.
-    let route = format!("/v1/tenants/{}/http-limits", l.tenant);
+    let route = format!("/v1/workspaces/{}/http-limits", l.tenant);
     let limits = json!({"concurrent_requests":8,"requests_per_minute":120});
     let a = call(&l, &l.token, "PATCH", &route, limits.clone(), "limits").await;
     let b = call(&l, &l.token, "PATCH", &route, limits.clone(), "limits").await;
@@ -1607,7 +1626,7 @@ async fn a_refusals_code_says_why_where_the_status_does_not() {
         (StatusCode::FORBIDDEN, "permission_denied".into())
     );
     let suspend = json!({"action":"suspend","reason":"Coded","expected_revision":1});
-    let lifecycle = format!("/v1/tenants/{}/lifecycle", l.tenant);
+    let lifecycle = format!("/v1/workspaces/{}/lifecycle", l.tenant);
     assert_eq!(
         call(&l, &l.token, "POST", &lifecycle, suspend, "k6")
             .await
@@ -1749,31 +1768,21 @@ async fn a_refusal_names_the_credential_wanted_and_the_methods_taken() {
     );
     // The operator is told of its own routes too, where a path has them.
     assert_eq!(
-        allowed("/v1/tenants".into(), l.token.clone(), "DELETE").await,
+        allowed("/v1/workspaces".into(), l.token.clone(), "DELETE").await,
         "GET, HEAD, POST"
     );
     assert_eq!(
         allowed("/v1/nodes".into(), l.token.clone(), "PUT").await,
         "GET, HEAD, POST"
     );
-    // The operator's routes are not under /v1/workspaces, by any method.
-    assert_eq!(
-        allowed("/v1/workspaces".into(), l.token.clone(), "POST").await,
-        "GET, HEAD"
-    );
-    let tenants: i64 = sqlx::query_scalar("SELECT count(*) FROM tenants")
-        .fetch_one(&l.store.pool)
-        .await
-        .unwrap();
-    assert_eq!(tenants, 1);
-    // A key is not told of them: of /v1/tenants it may only list, a route
+    // A key is not told of them: of /v1/workspaces it may only list, a route
     // of the operator's is refused it as ever, and /v1/nodes is nothing it
     // could use by any method.
-    let (status, headers, _) = answer(&l, Some(token), "POST", "/v1/tenants").await;
+    let (status, headers, _) = answer(&l, Some(token), "POST", "/v1/workspaces").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(headers.get("allow").is_none());
     assert_eq!(
-        allowed("/v1/tenants".into(), token.into(), "DELETE").await,
+        allowed("/v1/workspaces".into(), token.into(), "DELETE").await,
         "GET, HEAD"
     );
     for method in ["GET", "PUT"] {
@@ -1986,7 +1995,7 @@ async fn an_id_that_could_be_none_is_malformed_in_a_body_and_missing_in_a_path()
             &l,
             &l.token,
             "PATCH",
-            "/v1/tenants/abc/http-limits",
+            "/v1/workspaces/abc/http-limits",
             limits,
             ""
         )
@@ -2129,5 +2138,104 @@ async fn accepted_means_still_pending_and_nothing_else() {
         "{seen:?}"
     );
     assert!(seen.len() >= 8, "{seen:?}");
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn the_api_has_one_name_for_a_thing() {
+    let l = Lab::new().await;
+    let k = key(&l, None, &["read", "connections:write"]).await;
+    let token = s(&k["token"]);
+    let tenants = format!("/v1/tenants/{}", l.tenant);
+    let workspace = format!("/v1/workspaces/{}", l.tenant);
+    // A workspace was once also a tenant, and a connection an external
+    // endpoint. Those names are no routes now, to a key or the operator.
+    for (method, path) in [
+        ("GET", "/v1/tenants".to_owned()),
+        ("POST", "/v1/tenants".to_owned()),
+        ("GET", format!("{tenants}/projects")),
+        ("GET", format!("{tenants}/projects/{}/apps", l.project)),
+        ("GET", format!("{tenants}/api-keys")),
+        ("POST", format!("{tenants}/lifecycle")),
+        (
+            "GET",
+            format!("{workspace}/projects/{}/external-endpoints", l.project),
+        ),
+        (
+            "POST",
+            format!("{workspace}/projects/{}/external-endpoints", l.project),
+        ),
+    ] {
+        let as_operator = call(&l, &l.token, method, &path, json!({}), "k").await;
+        assert_eq!(as_operator.0, StatusCode::NOT_FOUND, "{method} {path}");
+        let as_key = call(&l, token, method, &path, json!({}), "k").await;
+        assert!(
+            matches!(as_key.0, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN),
+            "{method} {path}: {}",
+            as_key.0
+        );
+    }
+    // The operator's routes are where the workspace's are.
+    let workspaces = call(&l, &l.token, "GET", "/v1/workspaces", json!({}), "").await;
+    assert_eq!(workspaces.0, StatusCode::OK);
+    let keys = call(
+        &l,
+        &l.token,
+        "GET",
+        &format!("{workspace}/api-keys"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(keys.0, StatusCode::OK, "{}", keys.1);
+    let limits = json!({"concurrent_requests":8,"requests_per_minute":120});
+    let limited = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &format!("{workspace}/http-limits"),
+        limits.clone(),
+        "",
+    )
+    .await;
+    assert_eq!(limited.0, StatusCode::OK, "{}", limited.1);
+    // And a key is refused them there, as it was.
+    for (method, path, body) in [
+        ("GET", format!("{workspace}/api-keys"), json!({})),
+        ("PATCH", format!("{workspace}/http-limits"), limits),
+        ("POST", "/v1/workspaces".to_owned(), json!({})),
+        (
+            "PATCH",
+            workspace.clone(),
+            json!({"default_app_size":"large"}),
+        ),
+    ] {
+        let refused = call(&l, token, method, &path, body, "k").await;
+        assert_eq!(refused.0, StatusCode::FORBIDDEN, "{method} {path}");
+        assert_eq!(refused.1["code"], "permission_denied");
+    }
+    // A connection is a connection, to make and to read.
+    let connections = format!("{workspace}/projects/{}/connections", l.project);
+    let made = call(
+        &l,
+        token,
+        "POST",
+        &connections,
+        json!({"type":"https","name":"example","origin":"https://example.com"}),
+        "connect",
+    )
+    .await;
+    assert_eq!(made.0, StatusCode::CREATED, "{}", made.1);
+    let read = call(
+        &l,
+        token,
+        "GET",
+        &format!("{connections}/{}", s(&made.1["resource_id"])),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(read.0, StatusCode::OK, "{}", read.1);
+    assert_eq!(read.1["name"], "example");
     l.finish().await;
 }

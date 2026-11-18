@@ -178,7 +178,7 @@ async fn lifecycle_event_pages_enforce_roles_filters_cursors_and_retention() {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/apps/{app}/events",
+                    "/v1/workspaces/{}/projects/{}/apps/{app}/events",
                     l.tenant, l.project
                 ))
                 .header(

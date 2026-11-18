@@ -199,7 +199,7 @@ impl Suspension {
             .unwrap()["revision"]);
         let (operator, operator_url, actor, input) = if deletion {
             let url = format!(
-                "{}/v1/tenants/{tenant}/projects/{project}/apps/{app}",
+                "{}/v1/workspaces/{tenant}/projects/{project}/apps/{app}",
                 api.1
             );
             let actor = uid();
@@ -218,7 +218,7 @@ impl Suspension {
         } else {
             // A workspace's lifecycle is the operator's to change, on the
             // operator's own API: the workspace's key is refused it.
-            let operator_url = format!("{}/v1/tenants/{tenant}/lifecycle", api.1);
+            let operator_url = format!("{}/v1/workspaces/{tenant}/lifecycle", api.1);
             let actor = uid();
             let input = json!({"request_key":uid(),"action":"suspend","expected_revision":1,"reason":"Sealed handover acceptance fixture"});
             let wrong = post(
@@ -311,7 +311,7 @@ impl Suspension {
     }
     async fn deny_new_invocation(&self) {
         let url = format!(
-            "{}/v1/tenants/{}/projects/{}/apps/{}/runs",
+            "{}/v1/workspaces/{}/projects/{}/apps/{}/runs",
             self.customer_origin, self.tenant, self.project, self.app
         );
         let response = self
@@ -383,7 +383,7 @@ impl Suspension {
         if self.deletion {
             for action in ["pause", "resume"] {
                 let url = format!(
-                    "{}/v1/tenants/{}/projects/{}/executions/{}/{action}",
+                    "{}/v1/workspaces/{}/projects/{}/executions/{}/{action}",
                     self.customer_origin, self.tenant, self.project, self.execution
                 );
                 let refused = self

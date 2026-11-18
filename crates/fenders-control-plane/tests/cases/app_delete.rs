@@ -9,7 +9,7 @@ async fn request(l: &Lab, token: &str, app: &str, key: &str, revision: i64) -> (
             Request::builder()
                 .method("DELETE")
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/apps/{app}",
+                    "/v1/workspaces/{}/projects/{}/apps/{app}",
                     l.tenant, l.project
                 ))
                 .header("authorization", format!("Bearer {token}"))

@@ -73,7 +73,7 @@ output() { # APP RUN NAME
   jq -r '[.items[] | .bytes | @base64d] | join("")' "$out/$3.logs.json" > "$out/$3.txt"
 }
 
-scope=/tenants/$(jq -er .tenant "$state/scope.json")/projects/$(jq -er .project "$state/scope.json")
+scope=/workspaces/$(jq -er .tenant "$state/scope.json")/projects/$(jq -er .project "$state/scope.json")
 tag=$(date +%H%M%S)
 docker rm -f "$target" >/dev/null 2>&1 || true
 docker run -d --name "$target" -e POSTGRES_PASSWORD=target --tmpfs /var/lib/postgresql/data \
@@ -84,9 +84,9 @@ until docker exec "$target" pg_isready -q -U postgres -h "$address"; do sleep 1;
 
 command=$(upload "$repo/build/node/example-command.wasm")
 https=$(upload "$repo/build/node/example-public-https.wasm")
-endpoint=$(api POST "$scope/external-endpoints" \
+endpoint=$(api POST "$scope/connections" \
   "$(jq -n --arg n "live-db-$tag" --arg h "$address" '{name:$n,host:$h,port:5432}')" | jq -er .resource_id)
-origin=$(api POST "$scope/external-endpoints" \
+origin=$(api POST "$scope/connections" \
   "$(jq -n --arg n "live-web-$tag" '{name:$n,type:"https",origin:"https://example.com"}')" | jq -er .resource_id)
 # What PostgreSQL answers one byte to: an SSLRequest.
 probe=$(jq -n --arg denied "$address:5433" \

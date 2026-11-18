@@ -372,7 +372,7 @@ async fn tenant_credentials_roles_and_http_boundaries() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/v1/tenants")
+                .uri("/v1/workspaces")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -692,7 +692,7 @@ async fn customer_projects_settings_and_authorization() {
         api::router(l.store.clone()).oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri(format!("/v1/tenants/{}", l.tenant))
+                .uri(format!("/v1/workspaces/{}", l.tenant))
                 .header("Authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
@@ -720,7 +720,7 @@ async fn customer_projects_settings_and_authorization() {
             .oneshot(
                 Request::builder()
                     .method(method)
-                    .uri(format!("/v1/tenants/{}/settings", l.tenant))
+                    .uri(format!("/v1/workspaces/{}/settings", l.tenant))
                     .header("Authorization", format!("Bearer {}", l.token))
                     .header("content-type", "application/json")
                     .body(Body::from("{}"))
@@ -914,7 +914,7 @@ async fn app_manual_runs_require_explicit_events_and_track_observed_outcomes() {
             Request::builder()
                 .method("POST")
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/apps/{app}/runs",
+                    "/v1/workspaces/{}/projects/{}/apps/{app}/runs",
                     l.tenant, l.project
                 ))
                 .header(
@@ -2036,7 +2036,7 @@ async fn customer_apps_have_scoped_pages_and_nested_version_boundaries() {
                 Request::builder()
                     .method("POST")
                     .uri(format!(
-                        "/v1/tenants/{}/projects/{}/apps",
+                        "/v1/workspaces/{}/projects/{}/apps",
                         l.tenant, l.project
                     ))
                     .header(
@@ -2117,7 +2117,7 @@ async fn customer_apps_have_scoped_pages_and_nested_version_boundaries() {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/tenants/{}/projects/{}/apps?{query}",
+                        "/v1/workspaces/{}/projects/{}/apps?{query}",
                         l.tenant, l.project
                     ))
                     .header(
@@ -2383,7 +2383,7 @@ async fn component_validation_claims_are_scoped_atomic_and_durable() {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/artifacts/{}/inspection",
+                    "/v1/workspaces/{}/projects/{}/artifacts/{}/inspection",
                     l.tenant, l.project, l.artifact
                 ))
                 .header(
@@ -2674,7 +2674,7 @@ async fn schedule_preview_is_scoped_deterministic_and_read_only() {
         serde_json::from_value(json!({"expression":"30 1 * * *","timezone":"America/New_York","after":"2026-11-01T00:00:00Z"})).unwrap()
     };
     let response=api::router(l.store.clone()).oneshot(Request::builder().method("POST")
-        .uri(format!("/v1/tenants/{}/projects/{}/schedules/preview",l.tenant,l.project))
+        .uri(format!("/v1/workspaces/{}/projects/{}/schedules/preview",l.tenant,l.project))
         .header("Authorization",format!("Bearer {}",s(&token["token"])))
         .header("Content-Type", "application/json")
 .body(Body::from(json!({"expression":"30 1 * * *","timezone":"America/New_York","after":"2026-11-01T00:00:00Z"}).to_string())).unwrap()).await.unwrap();

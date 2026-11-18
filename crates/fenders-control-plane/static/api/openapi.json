@@ -3,7 +3,7 @@
   "info": {
     "title": "Fenders management API",
     "version": "0.1.0",
-    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/tenants/{tenant}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records. A change that answers with an operation is 202 while the operation is pending and 200 or 201 once it is not; nothing else is ever 202. HEAD is answered wherever GET is. A route asked with a method it does not take is 405 with Allow."
+    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/workspaces/{workspace}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records. A change that answers with an operation is 202 while the operation is pending and 200 or 201 once it is not; nothing else is ever 202. HEAD is answered wherever GET is. A route asked with a method it does not take is 405 with Allow."
   },
   "servers": [
     {
@@ -94,6 +94,60 @@
         },
         "tags": [
           "workspace"
+        ]
+      },
+      "post": {
+        "operationId": "post__workspaces",
+        "summary": "Create a workspace",
+        "description": "A workspace, with what it may use, and a default project in it. Operator only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The workspace; a retry is answered with it again.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceCreate"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
         ]
       }
     },
@@ -2921,70 +2975,14 @@
         ]
       }
     },
-    "/tenants": {
-      "post": {
-        "operationId": "post__tenants",
-        "summary": "Create a tenant",
-        "description": "A workspace, with what it may use, and a default project in it. Listed by GET /workspaces. Operator only.",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/IdempotencyKey"
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": "The tenant; a retry is answered with it again.",
-            "headers": {
-              "X-Request-Id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Workspace"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "429": {
-            "$ref": "#/components/responses/RateLimited"
-          },
-          "default": {
-            "$ref": "#/components/responses/Refused"
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/WorkspaceCreate"
-              }
-            }
-          }
-        },
-        "tags": [
-          "operator"
-        ],
-        "security": [
-          {
-            "operator": []
-          }
-        ]
-      }
-    },
-    "/tenants/{tenant}": {
+    "/workspaces/{workspace}": {
       "patch": {
-        "operationId": "patch__tenants_tenant",
-        "summary": "Change what a tenant is allowed",
+        "operationId": "patch__workspaces_workspace",
+        "summary": "Change what a workspace is allowed",
         "description": "Its allowance, the size its apps take when they name none, or both. An allowance below what is in use is 409. Operator only.",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Tenant"
+            "$ref": "#/components/parameters/Workspace"
           },
           {
             "name": "Idempotency-Key",
@@ -3044,14 +3042,14 @@
         ]
       }
     },
-    "/tenants/{tenant}/http-limits": {
+    "/workspaces/{workspace}/http-limits": {
       "patch": {
-        "operationId": "patch__tenants_tenant_http_limits",
-        "summary": "Change a tenant's HTTP limits",
+        "operationId": "patch__workspaces_workspace_http_limits",
+        "summary": "Change a workspace's HTTP limits",
         "description": "Operator only.",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Tenant"
+            "$ref": "#/components/parameters/Workspace"
           },
           {
             "name": "Idempotency-Key",
@@ -3111,14 +3109,14 @@
         ]
       }
     },
-    "/tenants/{tenant}/lifecycle": {
+    "/workspaces/{workspace}/lifecycle": {
       "post": {
-        "operationId": "post__tenants_tenant_lifecycle",
-        "summary": "Suspend or resume a tenant",
+        "operationId": "post__workspaces_workspace_lifecycle",
+        "summary": "Suspend or resume a workspace",
         "description": "A suspended workspace's runs are stopped and its keys may only read. Operator only.",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Tenant"
+            "$ref": "#/components/parameters/Workspace"
           },
           {
             "name": "Idempotency-Key",
@@ -3178,14 +3176,14 @@
         ]
       }
     },
-    "/tenants/{tenant}/api-keys": {
+    "/workspaces/{workspace}/api-keys": {
       "get": {
-        "operationId": "get__tenants_tenant_api_keys",
-        "summary": "List a tenant's keys",
+        "operationId": "get__workspaces_workspace_api_keys",
+        "summary": "List a workspace's keys",
         "description": "Without their tokens. Operator only.",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Tenant"
+            "$ref": "#/components/parameters/Workspace"
           }
         ],
         "responses": {
@@ -3232,12 +3230,12 @@
         ]
       },
       "post": {
-        "operationId": "post__tenants_tenant_api_keys",
+        "operationId": "post__workspaces_workspace_api_keys",
         "summary": "Issue a key",
-        "description": "For the tenant, or for one project of it. Operator only.",
+        "description": "For the workspace, or for one project of it. Operator only.",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Tenant"
+            "$ref": "#/components/parameters/Workspace"
           },
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -3304,14 +3302,14 @@
         ]
       }
     },
-    "/tenants/{tenant}/api-keys/{api_key}": {
+    "/workspaces/{workspace}/api-keys/{api_key}": {
       "delete": {
-        "operationId": "delete__tenants_tenant_api_keys_api_key",
+        "operationId": "delete__workspaces_workspace_api_keys_api_key",
         "summary": "Revoke a key",
         "description": "It stops working at once. Revoking one already revoked is answered the same. Operator only.",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Tenant"
+            "$ref": "#/components/parameters/Workspace"
           },
           {
             "$ref": "#/components/parameters/ApiKey"
@@ -3769,16 +3767,6 @@
           "type": "string",
           "pattern": "^[0-9a-f]{32}$"
         }
-      },
-      "Tenant": {
-        "name": "tenant",
-        "in": "path",
-        "required": true,
-        "schema": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{32}$"
-        },
-        "description": "A workspace's id, as the operator's routes name it."
       },
       "Node": {
         "name": "node",

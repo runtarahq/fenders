@@ -338,12 +338,7 @@ pub(crate) fn conforms(method: &str, path: &str, status: StatusCode, body: &Valu
     let spec = SPEC.get_or_init(spec);
     let method = method.to_lowercase();
     let path = path.split('?').next().unwrap();
-    // The names the control plane has for the workspace's routes are
-    // answered as the public ones are.
-    let public = path
-        .replacen("/v1/tenants/", "/v1/workspaces/", 1)
-        .replace("/external-endpoints", "/connections");
-    let found = operation(spec, &method, path).or_else(|| operation(spec, &method, &public));
+    let found = operation(spec, &method, path);
     let Some((template, operation)) = found else {
         return;
     };
@@ -484,11 +479,11 @@ async fn every_operation_answers_as_the_contract_says() {
         .ok(
             &operator,
             "POST",
-            "/v1/tenants",
+            "/v1/workspaces",
             Some(json!({"name":"other","allowance":allowance})),
         )
         .await;
-    let other = format!("/v1/tenants/{}", s(&other["id"]));
+    let other = format!("/v1/workspaces/{}", s(&other["id"]));
     t.ok(
         &operator,
         "PATCH",
@@ -510,7 +505,7 @@ async fn every_operation_answers_as_the_contract_says() {
         Some(json!({"action":"suspend","reason":"Toured","expected_revision":1})),
     )
     .await;
-    let tenant = format!("/v1/tenants/{}", l.tenant);
+    let tenant = format!("/v1/workspaces/{}", l.tenant);
     let issue = json!({"name":"tour","project_id":null,"permissions":["read","apps:write","runs:write","projects:write","connections:write","secrets:write"],"ttl_seconds":3600,"label":"tour"});
     // Issued, and then asked for again with the same key: two answers of
     // one operation, the second without a token.
@@ -904,7 +899,8 @@ async fn every_operation_answers_as_the_contract_says() {
     // Refusals are answers too.
     t.send(&key, "GET", &format!("{p}/apps/{}", uid()), None)
         .await;
-    t.send(&key, "POST", "/v1/tenants", Some(json!({}))).await;
+    t.send(&key, "POST", "/v1/workspaces", Some(json!({})))
+        .await;
     t.send("nothing", "GET", "/v1/me", None).await;
     t.send(&key, "PUT", &format!("{w}/projects"), Some(json!({})))
         .await;

@@ -221,7 +221,7 @@ async fn json_request(
 async fn upload(l: &Lab, client: &reqwest::Client, door: &FrontDoor, path: &Path) -> String {
     let response = client
         .post(format!(
-            "https://{}/v1/tenants/{}/projects/{}/artifacts",
+            "https://{}/v1/workspaces/{}/projects/{}/artifacts",
             door.addresses[0], l.tenant, l.project
         ))
         .bearer_auth(&l.token)
@@ -480,7 +480,7 @@ async fn mixed_versions_preserve_worker_dispatch_schema_and_rollback() {
     let worker_pid = worker.pid();
     let http_artifact = upload(&l, &client, &door, &build.join("example-http.wasm")).await;
     let dual_artifact = upload(&l, &client, &door, &build.join("example-dual.wasm")).await;
-    let base = format!("/v1/tenants/{}/projects/{}", l.tenant, l.project);
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
     let http = json_request(&l, &client, &door, "POST", &format!("{base}/apps/deploy"), "http-deploy",
         Some(json!({"name":"rollout-http","artifact_id":http_artifact,"configuration":{"size":"medium","keep_warm":true,"env":{"HTTP_HOLD_MS":"1000"}},"triggers":{"http":true,"manual":false}}))).await;
     let http_app = s(&http["resource_id"]);

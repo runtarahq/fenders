@@ -245,7 +245,7 @@ async fn monthly_history_is_scoped_paginated_and_keeps_observations_separate_fro
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/usage/history?limit=1",
+                    "/v1/workspaces/{}/projects/{}/usage/history?limit=1",
                     l.tenant, l.project
                 ))
                 .header(
@@ -265,7 +265,7 @@ async fn monthly_history_is_scoped_paginated_and_keeps_observations_separate_fro
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/usage/history?extra=1",
+                    "/v1/workspaces/{}/projects/{}/usage/history?extra=1",
                     l.tenant, l.project
                 ))
                 .header(

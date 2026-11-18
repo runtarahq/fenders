@@ -19,132 +19,167 @@ pub const PERMISSIONS: &[&str] = &[
 ];
 
 /// Every route a tenant's key may be given, with the permission it takes.
-/// `*` stands for one segment. Paths are in the control plane's own names:
-/// the public `/v1/workspaces` and `…/connections` are rewritten to them
-/// before a route is looked for.
+/// `*` stands for one segment. These are the paths as they are asked for:
+/// nothing is rewritten on the way to them.
 ///
 /// This table is the routes: the contract is held to it by a test, both
 /// ways, and a path that is not in it or in [`OPERATOR_ROUTES`] is answered
 /// `404` to everyone.
 pub const KEY_ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/v1/me", "read"),
-    ("GET", "/v1/tenants", "read"),
-    ("GET", "/v1/tenants/*/projects", "read"),
-    ("POST", "/v1/tenants/*/projects", "projects:write"),
-    ("GET", "/v1/tenants/*/usage", "read"),
-    ("GET", "/v1/tenants/*/usage/history", "read"),
-    ("GET", "/v1/tenants/*/projects/*/usage", "read"),
-    ("GET", "/v1/tenants/*/projects/*/usage/history", "read"),
-    ("GET", "/v1/tenants/*/projects/*/app-sizes", "read"),
-    ("GET", "/v1/tenants/*/projects/*/https-access", "read"),
+    ("GET", "/v1/workspaces", "read"),
+    ("GET", "/v1/workspaces/*/projects", "read"),
+    ("POST", "/v1/workspaces/*/projects", "projects:write"),
+    ("GET", "/v1/workspaces/*/usage", "read"),
+    ("GET", "/v1/workspaces/*/usage/history", "read"),
+    ("GET", "/v1/workspaces/*/projects/*/usage", "read"),
+    ("GET", "/v1/workspaces/*/projects/*/usage/history", "read"),
+    ("GET", "/v1/workspaces/*/projects/*/app-sizes", "read"),
+    ("GET", "/v1/workspaces/*/projects/*/https-access", "read"),
     (
         "POST",
-        "/v1/tenants/*/projects/*/https-access/validate",
+        "/v1/workspaces/*/projects/*/https-access/validate",
         "read",
     ),
-    ("POST", "/v1/tenants/*/projects/*/schedules/preview", "read"),
-    ("GET", "/v1/tenants/*/projects/*/apps", "read"),
-    ("POST", "/v1/tenants/*/projects/*/apps", "apps:write"),
-    ("POST", "/v1/tenants/*/projects/*/apps/deploy", "apps:write"),
-    ("GET", "/v1/tenants/*/projects/*/app-submissions/*", "read"),
-    ("GET", "/v1/tenants/*/projects/*/apps/*", "read"),
-    ("PATCH", "/v1/tenants/*/projects/*/apps/*", "apps:write"),
-    ("DELETE", "/v1/tenants/*/projects/*/apps/*", "apps:write"),
+    (
+        "POST",
+        "/v1/workspaces/*/projects/*/schedules/preview",
+        "read",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/apps", "read"),
+    ("POST", "/v1/workspaces/*/projects/*/apps", "apps:write"),
+    (
+        "POST",
+        "/v1/workspaces/*/projects/*/apps/deploy",
+        "apps:write",
+    ),
     (
         "GET",
-        "/v1/tenants/*/projects/*/apps/*/submissions/*",
+        "/v1/workspaces/*/projects/*/app-submissions/*",
         "read",
     ),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/versions", "read"),
-    (
-        "POST",
-        "/v1/tenants/*/projects/*/apps/*/versions",
-        "apps:write",
-    ),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/versions/*", "read"),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/releases", "read"),
-    (
-        "POST",
-        "/v1/tenants/*/projects/*/apps/*/releases",
-        "apps:write",
-    ),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/releases/*", "read"),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/runs", "read"),
-    ("POST", "/v1/tenants/*/projects/*/apps/*/runs", "runs:write"),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/runs/*", "read"),
-    (
-        "POST",
-        "/v1/tenants/*/projects/*/apps/*/runs/*/cancel",
-        "runs:write",
-    ),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/triggers", "read"),
-    (
-        "PUT",
-        "/v1/tenants/*/projects/*/apps/*/triggers",
-        "apps:write",
-    ),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/connections", "read"),
-    (
-        "PUT",
-        "/v1/tenants/*/projects/*/apps/*/connections",
-        "apps:write",
-    ),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/http", "read"),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/websocket", "read"),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/logs", "read"),
-    ("GET", "/v1/tenants/*/projects/*/apps/*/events", "read"),
-    (
-        "POST",
-        "/v1/tenants/*/projects/*/apps/*/http-sample",
-        "runs:write",
-    ),
-    ("GET", "/v1/tenants/*/projects/*/artifacts", "read"),
-    ("POST", "/v1/tenants/*/projects/*/artifacts", "apps:write"),
-    ("GET", "/v1/tenants/*/projects/*/artifacts/*", "read"),
+    ("GET", "/v1/workspaces/*/projects/*/apps/*", "read"),
+    ("PATCH", "/v1/workspaces/*/projects/*/apps/*", "apps:write"),
+    ("DELETE", "/v1/workspaces/*/projects/*/apps/*", "apps:write"),
     (
         "GET",
-        "/v1/tenants/*/projects/*/artifacts/*/inspection",
+        "/v1/workspaces/*/projects/*/apps/*/submissions/*",
         "read",
     ),
-    ("GET", "/v1/tenants/*/projects/*/external-endpoints", "read"),
+    ("GET", "/v1/workspaces/*/projects/*/apps/*/versions", "read"),
     (
         "POST",
-        "/v1/tenants/*/projects/*/external-endpoints",
+        "/v1/workspaces/*/projects/*/apps/*/versions",
+        "apps:write",
+    ),
+    (
+        "GET",
+        "/v1/workspaces/*/projects/*/apps/*/versions/*",
+        "read",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/apps/*/releases", "read"),
+    (
+        "POST",
+        "/v1/workspaces/*/projects/*/apps/*/releases",
+        "apps:write",
+    ),
+    (
+        "GET",
+        "/v1/workspaces/*/projects/*/apps/*/releases/*",
+        "read",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/apps/*/runs", "read"),
+    (
+        "POST",
+        "/v1/workspaces/*/projects/*/apps/*/runs",
+        "runs:write",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/apps/*/runs/*", "read"),
+    (
+        "POST",
+        "/v1/workspaces/*/projects/*/apps/*/runs/*/cancel",
+        "runs:write",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/apps/*/triggers", "read"),
+    (
+        "PUT",
+        "/v1/workspaces/*/projects/*/apps/*/triggers",
+        "apps:write",
+    ),
+    (
+        "GET",
+        "/v1/workspaces/*/projects/*/apps/*/connections",
+        "read",
+    ),
+    (
+        "PUT",
+        "/v1/workspaces/*/projects/*/apps/*/connections",
+        "apps:write",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/apps/*/http", "read"),
+    (
+        "GET",
+        "/v1/workspaces/*/projects/*/apps/*/websocket",
+        "read",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/apps/*/logs", "read"),
+    ("GET", "/v1/workspaces/*/projects/*/apps/*/events", "read"),
+    (
+        "POST",
+        "/v1/workspaces/*/projects/*/apps/*/http-sample",
+        "runs:write",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/artifacts", "read"),
+    (
+        "POST",
+        "/v1/workspaces/*/projects/*/artifacts",
+        "apps:write",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/artifacts/*", "read"),
+    (
+        "GET",
+        "/v1/workspaces/*/projects/*/artifacts/*/inspection",
+        "read",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/connections", "read"),
+    (
+        "POST",
+        "/v1/workspaces/*/projects/*/connections",
         "connections:write",
     ),
-    (
-        "GET",
-        "/v1/tenants/*/projects/*/external-endpoints/*",
-        "read",
-    ),
+    ("GET", "/v1/workspaces/*/projects/*/connections/*", "read"),
     (
         "DELETE",
-        "/v1/tenants/*/projects/*/external-endpoints/*",
+        "/v1/workspaces/*/projects/*/connections/*",
         "connections:write",
     ),
     (
         "GET",
-        "/v1/tenants/*/projects/*/endpoint-submissions/*",
+        "/v1/workspaces/*/projects/*/endpoint-submissions/*",
         "read",
     ),
-    ("GET", "/v1/tenants/*/projects/*/secrets", "read"),
-    ("POST", "/v1/tenants/*/projects/*/secrets", "secrets:write"),
-    ("GET", "/v1/tenants/*/projects/*/secrets/*", "read"),
-    ("GET", "/v1/tenants/*/projects/*/operations", "read"),
-    ("GET", "/v1/tenants/*/projects/*/operations/*", "read"),
+    ("GET", "/v1/workspaces/*/projects/*/secrets", "read"),
+    (
+        "POST",
+        "/v1/workspaces/*/projects/*/secrets",
+        "secrets:write",
+    ),
+    ("GET", "/v1/workspaces/*/projects/*/secrets/*", "read"),
+    ("GET", "/v1/workspaces/*/projects/*/operations", "read"),
+    ("GET", "/v1/workspaces/*/projects/*/operations/*", "read"),
 ];
 
 /// The operator's own routes: what no tenant's key is ever given. Tenants
 /// and their keys, what a tenant is allowed, suspending one, the nodes, the
 /// public egress policy, and how this control plane's own loops are doing.
 pub const OPERATOR_ROUTES: &[(&str, &str)] = &[
-    ("POST", "/v1/tenants"),
-    ("PATCH", "/v1/tenants/*"),
-    ("PATCH", "/v1/tenants/*/http-limits"),
-    ("POST", "/v1/tenants/*/lifecycle"),
-    ("GET", "/v1/tenants/*/api-keys"),
-    ("POST", "/v1/tenants/*/api-keys"),
-    ("DELETE", "/v1/tenants/*/api-keys/*"),
+    ("POST", "/v1/workspaces"),
+    ("PATCH", "/v1/workspaces/*"),
+    ("PATCH", "/v1/workspaces/*/http-limits"),
+    ("POST", "/v1/workspaces/*/lifecycle"),
+    ("GET", "/v1/workspaces/*/api-keys"),
+    ("POST", "/v1/workspaces/*/api-keys"),
+    ("DELETE", "/v1/workspaces/*/api-keys/*"),
     ("GET", "/v1/nodes"),
     ("POST", "/v1/nodes"),
     ("PATCH", "/v1/nodes/*"),
@@ -404,17 +439,13 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    /// A route as the contract writes it: a method, and a path under `/v1`
-    /// in the public names, with `*` for each parameter.
+    /// A route as the contract writes it: a method, and a path under
+    /// `/v1`, with `*` for each parameter.
     fn public(method: &str, pattern: &str) -> (String, String) {
-        let mut segments: Vec<&str> = pattern.trim_start_matches("/v1/").split('/').collect();
-        if segments[0] == "tenants" {
-            segments[0] = "workspaces";
-        }
-        if segments.get(4) == Some(&"external-endpoints") {
-            segments[4] = "connections";
-        }
-        (method.to_owned(), format!("/{}", segments.join("/")))
+        (
+            method.to_owned(),
+            pattern.trim_start_matches("/v1").to_owned(),
+        )
     }
     fn documented() -> BTreeSet<(String, String)> {
         let spec: Value = serde_json::from_str(include_str!("../static/api/openapi.json")).unwrap();
@@ -439,17 +470,14 @@ mod tests {
 
     #[test]
     fn the_contract_and_the_router_describe_the_same_routes() {
-        // The operator's routes are under the names the control plane has
-        // for them, and nowhere else.
         let routed: BTreeSet<_> = KEY_ROUTES
             .iter()
             .map(|(method, pattern, _)| public(method, pattern))
-            .chain(OPERATOR_ROUTES.iter().map(|(method, pattern)| {
-                (
-                    method.to_string(),
-                    pattern.trim_start_matches("/v1").to_owned(),
-                )
-            }))
+            .chain(
+                OPERATOR_ROUTES
+                    .iter()
+                    .map(|(method, pattern)| public(method, pattern)),
+            )
             .collect();
         let documented = documented();
         let undocumented: Vec<_> = routed.difference(&documented).collect();
@@ -584,15 +612,32 @@ mod tests {
             assert!(seen.insert((method, pattern)), "twice: {method} {pattern}");
         }
         // A pattern is its own path, and no longer or shorter one.
-        let path = ["v1", "tenants", "t", "projects", "p", "apps", "a"];
+        let path = ["v1", "workspaces", "w", "projects", "p", "apps", "a"];
         assert_eq!(permission("GET", &path), Some("read"));
         assert_eq!(permission("PATCH", &path), Some("apps:write"));
         assert_eq!(permission("PUT", &path), None);
         assert_eq!(permission("GET", &path[..6]), Some("read"));
         assert_eq!(permission("GET", &path[..5]), None);
         assert_eq!(permission("GET", &[&path[..], &["nothing"]].concat()), None);
-        assert!(operators("POST", &["v1", "tenants"]));
-        assert!(!operators("POST", &["v1", "tenants", "t"]));
-        assert!(!operators("GET", &["v1", "tenants"]));
+        assert!(operators("POST", &["v1", "workspaces"]));
+        assert!(!operators("POST", &["v1", "workspaces", "w"]));
+        assert!(!operators("GET", &["v1", "workspaces"]));
+        // The names the control plane once answered to are no routes.
+        assert_eq!(permission("GET", &["v1", "tenants"]), None);
+        assert!(!operators("POST", &["v1", "tenants"]));
+        assert_eq!(
+            permission(
+                "GET",
+                &[
+                    "v1",
+                    "workspaces",
+                    "w",
+                    "projects",
+                    "p",
+                    "external-endpoints"
+                ]
+            ),
+            None
+        );
     }
 }

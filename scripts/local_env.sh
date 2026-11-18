@@ -117,8 +117,8 @@ up() {
 
   # One workspace, project and node, made once.
   if [[ ! -f $state/scope.json ]]; then
-    tenant=$(api POST /tenants '{"name":"local","allowance":{"cpu_percent":800,"memory_mib":4096,"storage_bytes":4294967296,"instances":8,"transfer_bytes":4294967296}}' | jq -er .id)
-    project=$(api POST "/tenants/$tenant/projects" '{"name":"main"}' | jq -er .id)
+    tenant=$(api POST /workspaces '{"name":"local","allowance":{"cpu_percent":800,"memory_mib":4096,"storage_bytes":4294967296,"instances":8,"transfer_bytes":4294967296}}' | jq -er .id)
+    project=$(api POST "/workspaces/$tenant/projects" '{"name":"main"}' | jq -er .id)
     node=$(api POST /nodes "$(jq -n --arg pin "$(jq -er .node "$state/pins.json")" \
       --arg endpoint "https://127.0.0.1:$node_port" \
       '{name:"this-machine",cert_sha256:$pin,endpoint:$endpoint,backend:"wasm",architecture:"x86_64",
@@ -171,7 +171,7 @@ status() {
 }
 
 run() {
-  scope=/tenants/$(jq -er .tenant "$state/scope.json")/projects/$(jq -er .project "$state/scope.json")
+  scope=/workspaces/$(jq -er .tenant "$state/scope.json")/projects/$(jq -er .project "$state/scope.json")
   artifact=$(curl -sS --fail-with-body --cacert "$state/pki/ca.pem" -X POST \
     -H "Authorization: Bearer $(cat "$state/control/operator.token")" \
     -H "Idempotency-Key: local-artifact-$RANDOM-$RANDOM" -H 'Content-Type: application/wasm' \

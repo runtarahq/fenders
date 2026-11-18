@@ -91,7 +91,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             fenders_control_plane::model::identity(&project)?;
             (
                 "POST".to_owned(),
-                format!("/v1/tenants/{tenant}/projects/{project}/artifacts"),
+                format!("/v1/workspaces/{tenant}/projects/{project}/artifacts"),
                 std::fs::read(wasm)?,
                 None,
             )

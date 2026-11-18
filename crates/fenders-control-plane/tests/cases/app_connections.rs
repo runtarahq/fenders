@@ -579,7 +579,7 @@ async fn connection_edits_are_scoped_atomic_revisioned_and_durable() {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/apps/{app}/connections",
+                    "/v1/workspaces/{}/projects/{}/apps/{app}/connections",
                     l.tenant, l.project
                 ))
                 .header("authorization", format!("Bearer {}", s(&token["token"])))

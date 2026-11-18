@@ -252,7 +252,7 @@ async fn overlap(l: Lab) {
         .await
         .unwrap();
     let path = format!(
-        "/v1/tenants/{}/projects/{}/external-endpoints",
+        "/v1/workspaces/{}/projects/{}/connections",
         l.tenant, l.project
     );
     // Only permission metadata is created; no connection to this address occurs.
@@ -434,7 +434,7 @@ async fn real_daemon_reports_recovery_failures_resumes_and_resets_observations_o
     assert_eq!(initial["process_id"], failed["process_id"]);
     assert_eq!(
         client
-            .post(format!("{origin}/v1/tenants/{}/projects", l.tenant))
+            .post(format!("{origin}/v1/workspaces/{}/projects", l.tenant))
             .bearer_auth(&l.token)
             .header("Content-Type", "application/json")
             .body(json!({"name":"recovery-refused"}).to_string())

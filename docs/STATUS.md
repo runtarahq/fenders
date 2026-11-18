@@ -67,6 +67,18 @@ as both control plane and node.
 | Worker host qualification | There is no harness that qualifies a new host for production |
 | A user interface | None is included. `Store::with_assets` lets a wrapping binary serve its own |
 
+## What has changed under `/v1`
+
+`/v1` is not yet stable: nothing is released, and these changes were made in
+place. Each breaks a client written against what was there before.
+
+- **One name for a thing.** A workspace's routes are under `/v1/workspaces`,
+  the operator's among them: creating one is `POST /v1/workspaces`, and its
+  keys, limits and lifecycle are under `/v1/workspaces/W`. `/v1/tenants/…`
+  is no longer answered. A connection is `…/connections`;
+  `…/external-endpoints` is no longer answered. The operator's changes
+  require an `Idempotency-Key` wherever a key's do.
+
 ## Limits
 
 ### Embedding and tenancy
@@ -105,7 +117,7 @@ as both control plane and node.
   it has decided, each with a `label` of its own that the audit trail
   records with every change the key makes.
 - Only the operator's credential issues, lists and revokes a tenant's keys,
-  and suspends or resumes a workspace (`POST /v1/tenants/TENANT/lifecycle`).
+  and suspends or resumes a workspace (`POST /v1/workspaces/TENANT/lifecycle`).
   Its routes are listed in [EMBEDDING-API.md](EMBEDDING-API.md); every
   other route is one a key may be given. The routes that started a workload
   without an app, granted network access or made an ingress route directly,
