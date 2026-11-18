@@ -90,6 +90,7 @@ fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 }
 async fn dispatch(State(state): State<ApiState>, req: Request) -> Result<Response> {
     let request_id = crate::model::uid();
+    let head = req.method() == axum::http::Method::HEAD;
     let mut response = match dispatch_inner(State(state), req).await {
         Ok(response) => response,
         Err(error) => {
@@ -110,6 +111,13 @@ async fn dispatch(State(state): State<ApiState>, req: Request) -> Result<Respons
             {
                 response.headers_mut().insert(name, value);
             }
+            // What was wanted, as a client that negotiates would ask.
+            if status == StatusCode::UNAUTHORIZED {
+                response.headers_mut().insert(
+                    header::WWW_AUTHENTICATE,
+                    header::HeaderValue::from_static("Bearer"),
+                );
+            }
             // A rate that does not say when it turns is one of things in
             // progress (uploads, lookups): there is room in a moment.
             if status == StatusCode::TOO_MANY_REQUESTS
@@ -122,6 +130,10 @@ async fn dispatch(State(state): State<ApiState>, req: Request) -> Result<Respons
             response
         }
     };
+    // HEAD is GET without what it would have said.
+    if head {
+        *response.body_mut() = axum::body::Body::empty();
+    }
     let headers = response.headers_mut();
     headers.insert(
         "X-Request-Id",
@@ -137,7 +149,11 @@ async fn dispatch(State(state): State<ApiState>, req: Request) -> Result<Respons
 async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<Response> {
     let store = &state.store;
     let (parts, body) = req.into_parts();
-    let method = parts.method.as_str();
+    // Wherever GET is answered, so is HEAD, as GET.
+    let method = match parts.method.as_str() {
+        "HEAD" => "GET",
+        method => method,
+    };
     let path = parts.uri.path();
     // The contract, and nothing else that is not the API: the control plane
     // hosts no pages.
@@ -155,7 +171,12 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         if segments.get(3) == Some(&"projects") && segments.get(5) == Some(&"connections") {
             segments[5] = "external-endpoints";
         }
-        if crate::customer_api::permission(method, &segments).is_none() {
+        // Before any credential is asked for: a path that is no route of
+        // the workspace API, by any method, is unknown to everyone.
+        if !METHODS
+            .iter()
+            .any(|method| crate::customer_api::permission(method, &segments).is_some())
+        {
             return Err(Error::missing());
         }
     }
@@ -169,12 +190,37 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(Error::unauthorized)?;
     let p = store.authenticate(token).await?;
+    // A route that is one, asked with a method it does not take, is told
+    // which it takes. The operator's routes are under `/v1/tenants` alone,
+    // and a key is told nothing of them: its request for one that exists
+    // is refused below as it always was, and here it hears only of the
+    // methods a key may be given.
+    let operators = |method: &str| !public_api && crate::customer_api::operators(method, &segments);
+    let exists = |method: &str| {
+        crate::customer_api::permission(method, &segments).is_some() || operators(method)
+    };
+    if !exists(method) {
+        let mut allow: Vec<&str> = METHODS
+            .into_iter()
+            .filter(|method| {
+                crate::customer_api::permission(method, &segments).is_some()
+                    || (p.api_permissions.is_none() && operators(method))
+            })
+            .collect();
+        if !allow.is_empty() {
+            if allow.contains(&"GET") {
+                allow.insert(1, "HEAD");
+            }
+            return Err(
+                Error::new(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+                    .with_header(header::ALLOW, allow.join(", ")),
+            );
+        }
+    }
     crate::customer_api::authorize(&p, method, &segments)?;
     // Every route is one a tenant's key may be given, or one of the
     // operator's own. There is no third kind.
-    if crate::customer_api::permission(method, &segments).is_none()
-        && !crate::customer_api::operators(method, &segments)
-    {
+    if !exists(method) {
         return Err(Error::missing());
     }
     // Every mutation leaves an audit record, and most a receipt, for good. A
@@ -1459,6 +1505,8 @@ async fn gateway_dispatch_tracked(
 
 /// Mutating management requests a workspace's credentials may make in a
 /// minute, counted in memory as the gateway's are.
+/// The methods a route may take, in the order `Allow` names them.
+const METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 const MUTATIONS_A_MINUTE: i64 = 600;
 
 /// How long a management request's body may take to arrive.

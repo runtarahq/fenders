@@ -1679,3 +1679,136 @@ async fn an_exhausted_allowance_is_a_conflict_and_not_a_rate() {
     assert_eq!(refused.code(), "quota_exhausted");
     l.finish().await;
 }
+
+/// One request, with the headers of its answer.
+async fn answer(
+    l: &Lab,
+    token: Option<&str>,
+    method: &str,
+    path: &str,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut request = Request::builder().method(method).uri(path);
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {token}"));
+    }
+    let response = api::router(l.store.clone())
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let (status, headers) = (response.status(), response.headers().clone());
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    (status, headers, body.to_vec())
+}
+
+#[tokio::test]
+async fn a_refusal_names_the_credential_wanted_and_the_methods_taken() {
+    let l = Lab::new().await;
+    let k = key(&l, None, &["read"]).await;
+    let token = s(&k["token"]);
+    let projects = format!("/v1/workspaces/{}/projects", l.tenant);
+    let app = format!("{projects}/{}/apps/{}", l.project, uid());
+
+    // No credential, and one that opens nothing: a bearer token is wanted.
+    for token in [None, Some("fnd_tok_nothing")] {
+        let (status, headers, _) = answer(&l, token, "GET", "/v1/me").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(headers["www-authenticate"], "Bearer");
+    }
+
+    // A path that is one, asked with a method it does not take.
+    let allowed = |path: String, token: String, method: &'static str| {
+        let l = &l;
+        async move {
+            let (status, headers, body) = answer(l, Some(&token), method, &path).await;
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+            assert_eq!(body["code"], "method_not_allowed");
+            headers["allow"].to_str().unwrap().to_owned()
+        }
+    };
+    assert_eq!(
+        allowed(projects.clone(), token.into(), "DELETE").await,
+        "GET, HEAD, POST"
+    );
+    assert_eq!(
+        allowed(app.clone(), token.into(), "PUT").await,
+        "GET, HEAD, PATCH, DELETE"
+    );
+    assert_eq!(
+        allowed(format!("{app}/triggers"), token.into(), "POST").await,
+        "GET, HEAD, PUT"
+    );
+    assert_eq!(
+        allowed("/v1/me".into(), token.into(), "POST").await,
+        "GET, HEAD"
+    );
+    // The operator is told of its own routes too, where a path has them.
+    assert_eq!(
+        allowed("/v1/tenants".into(), l.token.clone(), "DELETE").await,
+        "GET, HEAD, POST"
+    );
+    assert_eq!(
+        allowed("/v1/nodes".into(), l.token.clone(), "PUT").await,
+        "GET, HEAD, POST"
+    );
+    // The operator's routes are not under /v1/workspaces, by any method.
+    assert_eq!(
+        allowed("/v1/workspaces".into(), l.token.clone(), "POST").await,
+        "GET, HEAD"
+    );
+    let tenants: i64 = sqlx::query_scalar("SELECT count(*) FROM tenants")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(tenants, 1);
+    // A key is not told of them: of /v1/tenants it may only list, a route
+    // of the operator's is refused it as ever, and /v1/nodes is nothing it
+    // could use by any method.
+    let (status, headers, _) = answer(&l, Some(token), "POST", "/v1/tenants").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(headers.get("allow").is_none());
+    assert_eq!(
+        allowed("/v1/tenants".into(), token.into(), "DELETE").await,
+        "GET, HEAD"
+    );
+    for method in ["GET", "PUT"] {
+        let (status, headers, _) = answer(&l, Some(token), method, "/v1/nodes").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method}");
+        assert!(headers.get("allow").is_none());
+    }
+    // A path that is none stays unknown to everyone, by any method.
+    for token in [token, l.token.as_str()] {
+        let (status, headers, _) = answer(&l, Some(token), "DELETE", "/v1/nothing").await;
+        assert!(
+            matches!(status, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN),
+            "{status}"
+        );
+        assert!(headers.get("allow").is_none());
+    }
+
+    // HEAD is GET without the body, to a key as to the operator.
+    for (token, path) in [
+        (token, projects.as_str()),
+        (token, "/v1/me"),
+        (l.token.as_str(), "/v1/nodes"),
+    ] {
+        let (status, headers, body) = answer(&l, Some(token), "HEAD", path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert!(body.is_empty());
+        assert_eq!(headers["cache-control"], "no-store");
+    }
+    // And is refused as GET would be.
+    let (status, _, body) = answer(&l, Some(token), "HEAD", "/v1/nodes").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.is_empty());
+    // A change by HEAD is not one.
+    let (status, _, _) = answer(
+        &l,
+        Some(token),
+        "HEAD",
+        &format!("{app}/runs/{}/cancel", uid()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    l.finish().await;
+}
