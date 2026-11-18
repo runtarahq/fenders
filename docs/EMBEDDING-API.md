@@ -116,7 +116,7 @@ POST /v1/workspaces
 
 GET  /v1/workspaces/TENANT/projects            # -> {"items": [{"id": "PROJECT", …}], "next": null}
 POST /v1/workspaces/TENANT/projects            {"name": "staging"}
-PATCH /v1/workspaces/TENANT                    {"allowance": {…}}
+PATCH /v1/workspaces/TENANT                    {"allowance": {…}}          # may add "expected_revision": its allowance_revision
 PATCH /v1/workspaces/TENANT                    {"default_app_size": "medium"}   # for apps that name no size
 
 # A key for that tenant, optionally for one project.
@@ -168,6 +168,12 @@ GET  $S/apps/APP/logs        # its output, secrets masked
 Schedules and the HTTP trigger are `triggers`; secrets, connections to
 external TCP endpoints and HTTPS origins, releases, events and usage are in
 the contract.
+
+A change names the revision it was decided on as `expected_revision`, and
+is `409 revision_conflict` if the thing has changed since. Which revision is
+the thing's own: an app's `revision` for the app and its versions, releases,
+connections and deletion (`DELETE $S/apps/APP?expected_revision=N`, with no
+body); the `revision` of `GET $S/apps/APP/triggers` for its triggers.
 
 A change to an app, a run or a connection answers with an **operation**:
 `{"id", "kind", "resource_id", "state", "error"}`. It is `202` while `state`

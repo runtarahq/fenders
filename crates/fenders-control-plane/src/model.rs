@@ -121,6 +121,10 @@ pub struct UpdateAllowance {
     /// The size an app of this tenant takes when it names none.
     #[serde(default)]
     pub default_app_size: Option<String>,
+    /// The `allowance_revision` the change was decided on. Given, a change
+    /// to an allowance that has changed since is refused.
+    #[serde(default)]
+    pub expected_revision: Option<i64>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

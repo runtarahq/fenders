@@ -914,13 +914,8 @@ async fn every_operation_answers_as_the_contract_says() {
         None,
     )
     .await;
-    t.ok(
-        &key,
-        "DELETE",
-        &app,
-        Some(json!({"expected_revision":revision(&l, &app).await})),
-    )
-    .await;
+    let delete = format!("{app}?expected_revision={}", revision(&l, &app).await);
+    t.ok(&key, "DELETE", &delete, None).await;
     t.ok(
         &key,
         "DELETE",

@@ -116,6 +116,12 @@ fn present(value: &mut Value) {
         _ => {}
     }
 }
+/// Which revision of an app a deletion is of: the one its caller read.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppDeletion {
+    expected_revision: i64,
+}
 /// The page of a list a request asks for: `limit`, 1 to 100, and `before`,
 /// the cursor a page before gave. Anything else in the query is refused.
 fn list_page(uri: &axum::http::Uri) -> Result<crate::store::ListPage> {
@@ -432,7 +438,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         ("POST", ["v1", "workspaces", tenant, "lifecycle"]) => {
             p.operator()?;
             let mut action =
-                parse::<crate::workspace_lifecycle::WorkspaceAction>(&bytes)?.keyed(key)?;
+                parse::<crate::workspace_lifecycle::WorkspaceAction>(&bytes)?.keyed(key);
             action.id = (*tenant).to_owned();
             store.operator_workspace_action(&p.id, action).await?
         }
@@ -684,8 +690,25 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .await?
         }
         ("DELETE", ["v1", "workspaces", tenant, "projects", project, "apps", app]) => {
+            // A deletion says which revision it deletes in its query: a
+            // DELETE has no body, and one that is sent is not read as one.
+            if !bytes.is_empty() {
+                return Err(Error::invalid(
+                    "a deletion takes no body: send ?expected_revision=",
+                ));
+            }
+            let expected = axum::extract::Query::<AppDeletion>::try_from_uri(&parts.uri)
+                .map_err(|_| Error::invalid("a deletion takes expected_revision"))?
+                .0;
             store
-                .delete_app(&p, tenant, project, app, parse(&bytes)?, key)
+                .delete_app(
+                    &p,
+                    tenant,
+                    project,
+                    app,
+                    json!({"expected_revision":expected.expected_revision}),
+                    key,
+                )
                 .await?
         }
         (

@@ -107,6 +107,13 @@ place. Each breaks a client written against what was there before.
   with its labels and targets for a screen, is gone, as are the sentences
   that sent a reader to Fenders support: the product built on this says
   what its own users should do.
+- **A deletion has no body.** `DELETE …/apps/APP` takes the app's revision
+  as `?expected_revision=`; a body is `400`.
+- **A suspension's key is its header.** `request_key` in the body of
+  `POST …/lifecycle` is `400`; the key is `Idempotency-Key`.
+
+Not a break: `PATCH /v1/workspaces/W` may name the `allowance_revision` it
+was decided on as `expected_revision`.
 
 ## Limits
 

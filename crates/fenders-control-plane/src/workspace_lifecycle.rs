@@ -33,28 +33,19 @@ pub(crate) struct WorkspaceAction {
     /// The workspace: from the request's path, never its body.
     #[serde(skip_deserializing)]
     pub(crate) id: String,
-    /// The Idempotency-Key header's. Read from the body too, as it was
-    /// once sent, until that is removed.
-    #[serde(default)]
+    /// The Idempotency-Key header's: never the body's, which once carried
+    /// it. It is kept here because the request is known by it.
+    #[serde(skip_deserializing)]
     request_key: Option<String>,
     expected_revision: i64,
     action: String,
     reason: String,
 }
 impl WorkspaceAction {
-    /// The action under the key its request was made with: the header's,
-    /// or the body's when there is no header. Both, and different, is a
-    /// request that does not know which it is.
-    pub(crate) fn keyed(mut self, header: &str) -> Result<Self> {
-        if !header.is_empty() {
-            if self.request_key.as_deref().is_some_and(|key| key != header) {
-                return Err(Error::invalid(
-                    "request_key differs from the Idempotency-Key header; send the header alone",
-                ));
-            }
-            self.request_key = Some(header.to_owned());
-        }
-        Ok(self)
+    /// The action under the key its request was made with.
+    pub(crate) fn keyed(mut self, header: &str) -> Self {
+        self.request_key = Some(header.to_owned());
+        self
     }
 }
 impl Store {

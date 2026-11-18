@@ -2101,13 +2101,33 @@ async fn accepted_means_still_pending_and_nothing_else() {
         StatusCode::OK,
     )
     .await;
-    change(
-        "DELETE",
-        format!("{base}/apps/{app}"),
-        json!({"expected_revision":revision().await}),
-        StatusCode::OK,
-    )
-    .await;
+    // A deletion says its revision in its query, and has no body.
+    let delete = format!("{base}/apps/{app}?expected_revision={}", revision().await);
+    let deleted = uid();
+    for attempt in ["first", "retry"] {
+        let response = api::router(l.store.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&delete)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Idempotency-Key", &deleted)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let op: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        let expected = if op["state"] == "pending" {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(status, expected, "{attempt} DELETE {delete}: {op}");
+        seen.insert((s(&op["kind"]).to_owned(), s(&op["state"]).to_owned()));
+    }
     // Revoking a connection takes no body.
     let revoke = format!("{base}/connections/{}", s(&connection["resource_id"]));
     let revoked = uid();
@@ -2469,5 +2489,123 @@ async fn every_list_is_pages_of_items_newest_first() {
     assert_eq!(mine["items"].as_array().unwrap().len(), 1);
     assert_eq!(mine["items"][0]["id"], l.tenant);
     assert!(mine["next"].is_null());
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_change_names_the_revision_it_was_decided_on() {
+    let l = Lab::new().await;
+    let app = l.command_app().await;
+    let k = key(&l, None, &["read", "apps:write"]).await;
+    let token = s(&k["token"]);
+    let route = format!(
+        "/v1/workspaces/{}/projects/{}/apps/{app}",
+        l.tenant, l.project
+    );
+    let (_, read) = call(&l, token, "GET", &route, json!({}), "").await;
+    let revision = read["revision"].as_i64().unwrap();
+    let delete = |query: String, body: Option<Value>| {
+        let (l, route) = (&l, route.clone());
+        async move {
+            let mut request = Request::builder()
+                .method("DELETE")
+                .uri(format!("{route}{query}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Idempotency-Key", uid());
+            let body = match body {
+                Some(body) => {
+                    request = request.header("Content-Type", "application/json");
+                    Body::from(body.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = api::router(l.store.clone())
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                    .unwrap();
+            (status, body)
+        }
+    };
+    // A deletion has no body: the revision it is of is in its query. One
+    // in a body, as it once was sent, is not read.
+    let in_body = delete(String::new(), Some(json!({"expected_revision":revision}))).await;
+    assert_eq!(in_body.0, StatusCode::BAD_REQUEST, "{}", in_body.1);
+    for query in [
+        "",
+        "?expected_revision=",
+        "?expected_revision=soon",
+        "?revision=1",
+    ] {
+        assert_eq!(
+            delete(query.to_owned(), None).await.0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+    let stale = delete(format!("?expected_revision={}", revision + 1), None).await;
+    assert_eq!(stale.0, StatusCode::CONFLICT);
+    assert_eq!(stale.1["code"], "revision_conflict");
+    let (_, still) = call(&l, token, "GET", &route, json!({}), "").await;
+    assert_eq!(still["revision"], revision);
+    let deleted = delete(format!("?expected_revision={revision}"), None).await;
+    assert!(deleted.0.is_success(), "{}", deleted.1);
+    assert_eq!(deleted.1["kind"], "delete-app");
+    assert_eq!(
+        call(&l, token, "GET", &route, json!({}), "").await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // A workspace's allowance has a revision too, which the operator's
+    // change may name: then one decided on an allowance since changed is
+    // refused, where without it the later change silently wins.
+    let workspace = format!("/v1/workspaces/{}", l.tenant);
+    let (_, listed) = call(&l, &l.token, "GET", "/v1/workspaces", json!({}), "").await;
+    let current = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["id"] == l.tenant)
+        .unwrap()["allowance_revision"]
+        .as_i64()
+        .unwrap();
+    let allowance = |instances: i64| json!({"cpu_percent":400,"memory_mib":4096,"instances":instances,"storage_bytes":20000000000i64,"transfer_bytes":10000000});
+    let first = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &workspace,
+        json!({"allowance":allowance(5),"expected_revision":current}),
+        "",
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(first.1["allowance_revision"], current + 1);
+    let stale = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &workspace,
+        json!({"allowance":allowance(6),"expected_revision":current}),
+        "",
+    )
+    .await;
+    assert_eq!(stale.0, StatusCode::CONFLICT, "{}", stale.1);
+    assert_eq!(stale.1["code"], "revision_conflict");
+    // Without one the change is made, as it was.
+    let unguarded = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &workspace,
+        json!({"allowance":allowance(6)}),
+        "",
+    )
+    .await;
+    assert_eq!(unguarded.0, StatusCode::OK, "{}", unguarded.1);
+    assert_eq!(unguarded.1["instances"], 6);
     l.finish().await;
 }

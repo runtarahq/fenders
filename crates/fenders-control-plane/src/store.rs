@@ -563,7 +563,12 @@ impl Store {
         {
             return Err(Error::invalid("default app size is small, medium or large"));
         }
-        let request = json!({"kind":"tenant.update","tenant":tenant,"allowance":value.allowance,"default_app_size":value.default_app_size});
+        let mut request = json!({"kind":"tenant.update","tenant":tenant,"allowance":value.allowance,"default_app_size":value.default_app_size});
+        // Named only when given, so that a retry made before this could be
+        // given is still the request it was.
+        if let Some(expected) = value.expected_revision {
+            request["expected_revision"] = json!(expected);
+        }
         let mut tx = self.transaction(true, false).await?;
         Self::live_principal(&mut tx, p).await?;
         if let Some(key) = key
@@ -571,6 +576,20 @@ impl Store {
                 crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
         {
             return Ok(row);
+        }
+        if let Some(expected) = value.expected_revision {
+            let current: Option<i64> =
+                sqlx::query_scalar("SELECT allowance_revision FROM tenants WHERE id=$1 FOR UPDATE")
+                    .bind(tenant)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if current.ok_or_else(Error::missing)? != expected {
+                return Err(Error::new(
+                    StatusCode::CONFLICT,
+                    "workspace allowance changed; read it again before changing it",
+                )
+                .coded("revision_conflict"));
+            }
         }
         if let Some(size) = &value.default_app_size {
             let changed = sqlx::query("UPDATE tenants SET default_app_size=$2 WHERE id=$1")

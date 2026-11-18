@@ -3,7 +3,7 @@
   "info": {
     "title": "Fenders management API",
     "version": "0.1.0",
-    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/workspaces/{workspace}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records. A change that answers with an operation is 202 while the operation is pending and 200 or 201 once it is not; nothing else is ever 202. HEAD is answered wherever GET is. A route asked with a method it does not take is 405 with Allow. Every list answers {items, next}, newest first, and takes limit (1 to 100) and before; a run's output alone is read forwards, with after."
+    "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/workspaces/{workspace}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records. A change that answers with an operation is 202 while the operation is pending and 200 or 201 once it is not; nothing else is ever 202. HEAD is answered wherever GET is. A route asked with a method it does not take is 405 with Allow. Every list answers {items, next}, newest first, and takes limit (1 to 100) and before; a run's output alone is read forwards, with after. A change names the revision it was decided on as expected_revision, and is 409 revision_conflict if the thing has changed since: an app's revision for the app, its versions, releases, connections and deletion; the triggers' own for the triggers; a workspace's lifecycle_revision and allowance_revision for the operator's changes to it."
   },
   "servers": [
     {
@@ -952,7 +952,7 @@
       "delete": {
         "operationId": "delete__workspaces_workspace_projects_project_apps_app",
         "summary": "Delete an app",
-        "description": "Stops the app, takes back its connections and hides it; its history is kept. The revision is sent in a JSON body. The operation is pending until its executions have ended. Required permission: apps:write.",
+        "description": "Stops the app, takes back its connections and hides it; its history is kept. The operation is pending until its executions have ended. Required permission: apps:write.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Workspace"
@@ -965,6 +965,16 @@
           },
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "expected_revision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "The app's revision, as GET of the app gave it. A deletion has no body."
           }
         ],
         "responses": {
@@ -1006,16 +1016,6 @@
           },
           "default": {
             "$ref": "#/components/responses/Refused"
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AppDelete"
-              }
-            }
           }
         },
         "tags": [
@@ -4183,7 +4183,8 @@
           },
           "expected_revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "description": "The app's revision, as GET of the app gives it. It advances with every change to the app."
           }
         },
         "required": [
@@ -4201,7 +4202,8 @@
           },
           "expected_revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "description": "The app's revision, as GET of the app gives it. It advances with every change to the app."
           }
         },
         "required": [
@@ -4222,7 +4224,8 @@
           },
           "expected_revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "description": "The app's revision, as GET of the app gives it. It advances with every change to the app."
           }
         },
         "required": [
@@ -4245,7 +4248,8 @@
           },
           "expected_revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "description": "The triggers' own revision, as GET …/triggers gives it: not the app's."
           }
         },
         "required": [
@@ -4258,7 +4262,8 @@
         "properties": {
           "expected_revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "description": "The app's revision, as GET of the app gives it. It advances with every change to the app."
           },
           "connections": {
             "type": "array",
@@ -4396,19 +4401,6 @@
         "required": [
           "expression",
           "timezone"
-        ]
-      },
-      "AppDelete": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "expected_revision": {
-            "type": "integer",
-            "minimum": 1
-          }
-        },
-        "required": [
-          "expected_revision"
         ]
       },
       "HttpSample": {
@@ -4583,6 +4575,11 @@
               "medium",
               "large"
             ]
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The workspace's allowance_revision, as GET /workspaces gives it to the operator. Not required; given, a change decided on an allowance that has changed since is 409."
           }
         },
         "required": []
@@ -4714,14 +4711,7 @@
           "expected_revision": {
             "type": "integer",
             "minimum": 1,
-            "description": "The workspace's lifecycle_revision."
-          },
-          "request_key": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "deprecated": true,
-            "description": "The Idempotency-Key, as it was once sent. Send the header."
+            "description": "The workspace's lifecycle_revision, as GET /workspaces gives it to the operator."
           }
         },
         "required": [
@@ -5376,7 +5366,8 @@
         "properties": {
           "expected_revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "description": "The policy's revision, as GET gives it."
           },
           "enabled": {
             "type": "boolean"
@@ -6933,7 +6924,8 @@
             ]
           },
           "revision": {
-            "type": "integer"
+            "type": "integer",
+            "description": "What a change to the app names as expected_revision."
           },
           "schedule": {
             "anyOf": [
@@ -7718,7 +7710,8 @@
             "type": "boolean"
           },
           "revision": {
-            "type": "integer"
+            "type": "integer",
+            "description": "What a change to the triggers names as expected_revision. It is the triggers' own, not the app's."
           },
           "schedule": {
             "anyOf": [
@@ -7958,7 +7951,8 @@
             }
           },
           "revision": {
-            "type": "integer"
+            "type": "integer",
+            "description": "The app's revision: what a change to its connections names as expected_revision."
           }
         },
         "required": [
