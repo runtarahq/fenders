@@ -1,7 +1,7 @@
 # Fixing the management API's inconsistencies
 
-A plan, and a record of how far it has got: phases 1 and 2 are done, the
-rest is not. It answers an audit of the
+A plan, and a record of how far it has got: phases 1, 2 and 3 are done,
+the rest is not. It answers an audit of the
 management API (the operator's routes and the workspace API) made on
 2026-11-18 by reading `crates/fenders-control-plane` and probing a running
 control plane with no node attached. The node protocol, the run channel and
@@ -187,6 +187,31 @@ mutation rate both answer `429`.
 
 `static/api/openapi.json` is written by hand. This phase makes it complete
 and makes tests hold it to the code.
+
+**Done**, a commit an item. The tests are in `customer_api.rs` (the routes,
+both ways, and the contract's own structure) and
+`tests/cases/contract.rs` (the answers). Where what was built differs from
+what is written below:
+
+- 3.3 was written before phase 4, for the answers as they are. A schema
+  names what phase 4 keeps: what 4.3 removes (`tenant_id`, an operation's
+  `request_key` and `request_hash`, `display_name`) is not named and is
+  still allowed, so 4.3 does not break the contract. 4.1 and 4.2 do, and
+  change it with the code. The schemas were written from the answers the
+  tests are given, which `FENDERS_CONTRACT_DUMP=FILE` collects; a field is
+  required only where it identifies or dates a thing.
+- 3.5: the answers are checked by a checker in the test, not the
+  `jsonschema` crate, which would have brought some thirty crates with it.
+  It knows the keywords the contract uses and fails on any other, in an
+  answer's schema or a request's. Every answer the API tests' shared helper
+  is given is checked, as well as the tour's.
+- 3.4: besides the two the plan named, a deletion and a change of an app's
+  connections answered `202` whatever had happened, and revoking a
+  connection could answer `200` while pending. All go by the one rule now.
+- An API key's id in a path is `{api_key}`, and the request schemas are
+  named for the request (`ProjectCreate`, not `Project`), to free the names
+  for the things.
+- No OpenAPI linter was run on the contract.
 
 ### 3.1 Routes the contract does not have
 

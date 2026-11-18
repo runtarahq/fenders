@@ -167,6 +167,18 @@ Schedules and the HTTP trigger are `triggers`; secrets, connections to
 external TCP endpoints and HTTPS origins, releases, events and usage are in
 the contract.
 
+A change to an app, a run or a connection answers with an **operation**:
+`{"id", "kind", "resource_id", "state", "error"}`. It is `202` while `state`
+is `pending` and `200` or `201` once it is `succeeded` or `failed`; nothing
+else is ever `202`. Read `GET $S/operations/OPERATION` until it is no longer
+pending, or the resource it names. If the answer was lost, ask after it by
+the key it was made with: `GET $S/app-submissions/KEY` for a deployment,
+`GET $S/apps/APP/submissions/KEY` for a change to an app,
+`GET $S/endpoint-submissions/KEY` for a connection (the key percent-encoded).
+
+The contract gives every answer a schema, and the tests hold the API to it.
+A field it does not name may still be present: do not depend on one.
+
 ## 6. The boundaries you can rely on, and check
 
 `scripts/verify_embedding_live.sh` asserts each of these on a real node:
