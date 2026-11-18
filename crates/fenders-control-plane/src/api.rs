@@ -73,6 +73,10 @@ pub fn gateway(state: ApiState) -> Router {
     Router::new().fallback(gateway_dispatch).with_state(state)
 }
 
+/// The key of a change that does not require one: none when none was sent.
+fn offered(key: &str) -> Option<&str> {
+    (!key.is_empty()).then_some(key)
+}
 fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|_| Error::invalid("invalid or missing fields"))
 }
@@ -253,9 +257,15 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         }
         ("POST", ["v1", "nodes"]) => {
             status = StatusCode::CREATED;
-            store.register_node(&p, parse(&bytes)?).await?
+            store
+                .register_node_keyed(&p, parse(&bytes)?, Some(key))
+                .await?
         }
-        ("PATCH", ["v1", "nodes", node]) => store.node_mode(&p, node, parse(&bytes)?).await?,
+        ("PATCH", ["v1", "nodes", node]) => {
+            store
+                .node_mode_keyed(&p, node, parse(&bytes)?, offered(key))
+                .await?
+        }
         ("POST", ["v1", "tenants"]) => {
             status = StatusCode::CREATED;
             store

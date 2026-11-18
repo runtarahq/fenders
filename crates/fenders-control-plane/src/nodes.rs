@@ -10,6 +10,16 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 impl Store {
     pub async fn register_node(&self, p: &Principal, value: Value) -> Result<Value> {
+        self.register_node_keyed(p, value, None).await
+    }
+    /// With a key, a retry is answered with the node the first call
+    /// registered, not refused as a second node of its name.
+    pub async fn register_node_keyed(
+        &self,
+        p: &Principal,
+        value: Value,
+        key: Option<&str>,
+    ) -> Result<Value> {
         p.operator()?;
         fields(
             &value,
@@ -77,7 +87,14 @@ impl Store {
                 "budgeted placement requires an approved launcher",
             ));
         }
+        let request = json!({"kind":"node.register","value":value});
         let mut tx = self.transaction(true, false).await?;
+        if let Some(key) = key
+            && let Some(row) =
+                crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
         let row=one(&mut tx,"INSERT INTO nodes(id,name,cert_sha256,endpoint,backend,architecture,runtime,cpu_percent,memory_mib,instances,egress_budget_launcher,egress_budget_required) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",args![uid(),value["name"],pin,endpoint.as_str().trim_end_matches('/'),value["backend"],value["architecture"],value["runtime"],value["cpu_percent"],value["memory_mib"],value["instances"],value["egress_budget_launcher"],budget]).await?;
         Self::audit_system(
             &mut tx,
@@ -88,6 +105,10 @@ impl Store {
             json!({}),
         )
         .await?;
+        if let Some(key) = key {
+            crate::customer_api::save_operator_receipt(&mut tx, &p.id, key, None, &request, &row)
+                .await?;
+        }
         tx.commit().await?;
         Ok(row)
     }
@@ -99,6 +120,18 @@ impl Store {
         ))
     }
     pub async fn node_mode(&self, p: &Principal, node: &str, value: Value) -> Result<Value> {
+        self.node_mode_keyed(p, node, value, None).await
+    }
+    /// A key is not required: the change says what the node is to be, and
+    /// saying it twice changes nothing more. With one, a retry is answered
+    /// as the first call was and leaves no second audit record.
+    pub async fn node_mode_keyed(
+        &self,
+        p: &Principal,
+        node: &str,
+        value: Value,
+        key: Option<&str>,
+    ) -> Result<Value> {
         p.operator()?;
         identity(node)?;
         fields(
@@ -128,7 +161,14 @@ impl Store {
                 "expected node flags and approved launcher digests",
             ));
         }
+        let request = json!({"kind":"node.mode","node":node,"value":value});
         let mut tx = self.transaction(true, false).await?;
+        if let Some(key) = key
+            && let Some(row) =
+                crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
         let old = one(
             &mut tx,
             "SELECT * FROM nodes WHERE id=$1 FOR UPDATE",
@@ -180,9 +220,15 @@ impl Store {
             value.clone(),
         )
         .await?;
-        tx.commit().await?;
         let mut result = value;
         result["id"] = json!(node);
+        if let Some(key) = key {
+            crate::customer_api::save_operator_receipt(
+                &mut tx, &p.id, key, None, &request, &result,
+            )
+            .await?;
+        }
+        tx.commit().await?;
         Ok(result)
     }
     pub async fn node_identity(&self, pin: &str) -> Result<Value> {

@@ -1241,3 +1241,67 @@ async fn a_retried_tenant_creation_makes_one_tenant() {
     assert_eq!(tenants_named(&l, "acme").await, 2);
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_retried_node_registration_is_answered_with_the_node() {
+    let l = Lab::new().await;
+    let node = json!({"name":"node-1","cert_sha256":"a".repeat(64),"endpoint":"https://node-1.internal:9443","backend":"wasm","architecture":"x86_64","runtime":"wasmtime-50.0.0-fenders-v1","cpu_percent":200,"memory_mib":1024,"instances":4});
+    let first = call(&l, &l.token, "POST", "/v1/nodes", node.clone(), "node-1").await;
+    assert_eq!(first.0, StatusCode::CREATED, "{}", first.1);
+    // The guide's own example: the same request with the same key.
+    let again = call(&l, &l.token, "POST", "/v1/nodes", node.clone(), "node-1").await;
+    assert_eq!(again, first);
+    // A second node of the name is still refused, and so is the key reused.
+    let duplicate = call(&l, &l.token, "POST", "/v1/nodes", node.clone(), "node-1b").await;
+    assert_eq!(duplicate.0, StatusCode::CONFLICT, "{}", duplicate.1);
+    let mut other = node.clone();
+    other["instances"] = json!(8);
+    let reused = call(&l, &l.token, "POST", "/v1/nodes", other, "node-1").await;
+    assert_eq!(reused.0, StatusCode::CONFLICT, "{}", reused.1);
+    assert_eq!(
+        call(&l, &l.token, "POST", "/v1/nodes", node, "").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM nodes")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(nodes, 1);
+
+    // A node's mode needs no key; with one, a retry leaves one record.
+    let route = format!("/v1/nodes/{}", s(&first.1["id"]));
+    let drain = json!({"draining":true});
+    let a = call(&l, &l.token, "PATCH", &route, drain.clone(), "drain").await;
+    let b = call(&l, &l.token, "PATCH", &route, drain.clone(), "drain").await;
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(a, b);
+    let audits = "SELECT count(*) FROM audit WHERE action='node.mode'";
+    let recorded: i64 = sqlx::query_scalar(audits)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(recorded, 1);
+    assert_eq!(
+        call(
+            &l,
+            &l.token,
+            "PATCH",
+            &route,
+            json!({"draining":false}),
+            "drain"
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        call(&l, &l.token, "PATCH", &route, drain, "").await.0,
+        StatusCode::OK
+    );
+    let recorded: i64 = sqlx::query_scalar(audits)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(recorded, 2);
+    l.finish().await;
+}
