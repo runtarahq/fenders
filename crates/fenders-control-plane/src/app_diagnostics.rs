@@ -101,7 +101,7 @@ fn diagnostic(reason: Option<&str>, state: &str) -> Option<Value> {
         ),
         "allowance-exhausted" => (
             "Workspace allowance is currently exhausted.",
-            "Review reservations and usage. Stop unneeded workloads or ask your workspace owner to review the allowance. Pending work is still subject to its admission or startup deadline.",
+            "Review reservations and usage. Stop unneeded workloads or ask the operator to review the allowance. Pending work is still subject to its admission or startup deadline.",
             &[("usage", "Review workspace usage")],
         ),
         "starting-http" | "waking-http" => (
@@ -171,7 +171,7 @@ fn diagnostic(reason: Option<&str>, state: &str) -> Option<Value> {
         ),
         "outbound-allowance-denied" => (
             "An outbound write exceeded this execution's available transfer allowance.",
-            "The host refused at least one write during this failed command. A whole write may exceed the remaining allowance even when some bytes are available. Review workspace usage and ask your workspace owner to review the allowance. After resolving it, check for earlier external effects before explicitly running again. Increasing allowance does not replay this command.",
+            "The host refused at least one write during this failed command. A whole write may exceed the remaining allowance even when some bytes are available. Review workspace usage and ask the operator to review the allowance. After resolving it, check for earlier external effects before explicitly running again. Increasing allowance does not replay this command.",
             &[
                 ("usage", "Review workspace usage"),
                 ("logs", "Inspect command output"),

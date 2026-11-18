@@ -108,10 +108,22 @@ impl Stop {
         initially_paused: bool,
     ) -> Self {
         let (principal, credential) = l.credential("editor", Some(&l.project)).await;
-        let created = l.store.create_workload(&principal, &l.tenant, &l.project,
-            json!({"spec":{"artifact_id":artifact,"mode":"http","cpu_percent":50,"lifetime_seconds":180}}),
-            &uid(), false).await.unwrap();
-        let execution = s(&created["resource_id"]).to_owned();
+        let deployed = l
+            .store
+            .deploy_app(
+                &principal,
+                &l.tenant,
+                &l.project,
+                fenders_control_plane::apps::AppSubmission {
+                    value: json!({"name":format!("stop-{}", &uid()[..8]),"artifact_id":artifact,"triggers":{"manual":false,"http":true}}),
+                    key: &uid(),
+                    domain: "apps.test",
+                },
+            )
+            .await
+            .unwrap();
+        l.store.schedule().await.unwrap();
+        let execution = s(&l.http(s(&deployed["resource_id"])).await["execution_id"]).to_owned();
         let backend = running(l, worker, &execution).await;
         let identity = ownership(&backend);
         let row = l.execution(&execution).await;

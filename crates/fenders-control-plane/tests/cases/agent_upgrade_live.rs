@@ -1744,10 +1744,7 @@ async fn agent_upgrade_and_rollback_preserve_vms_connections_and_http() {
                     );
                 }
                 let identity = ownership(&probe);
-                l.store
-                    .action(&l.operator, &l.tenant, &l.project, id, "stop", &uid())
-                    .await
-                    .unwrap();
+                l.stop(id, &uid()).await.unwrap();
                 let deadline = Instant::now() + Duration::from_secs(10);
                 loop {
                     let reserved: bool =
@@ -1826,29 +1823,6 @@ async fn agent_upgrade_and_rollback_preserve_vms_connections_and_http() {
                     )
                     .await
                     .unwrap();
-                for (action, state) in [("pause", "paused"), ("resume", "running")] {
-                    l.store
-                        .action(&l.operator, &l.tenant, &l.project, id, action, &uid())
-                        .await
-                        .unwrap();
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    loop {
-                        let observed: String =
-                            sqlx::query_scalar("SELECT state FROM executions WHERE id=$1")
-                                .bind(id)
-                                .fetch_one(&l.store.pool)
-                                .await
-                                .unwrap();
-                        if observed == state {
-                            break;
-                        }
-                        assert!(
-                            Instant::now() < deadline,
-                            "retained runtime did not acknowledge {action}"
-                        );
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                }
                 l.store
                     .node_mode(
                         &l.operator,
@@ -1891,10 +1865,7 @@ async fn agent_upgrade_and_rollback_preserve_vms_connections_and_http() {
                         "live_candidate_execution":true,"activation_contract_retained":true}),
                     );
                 }
-                l.store
-                    .action(&l.operator, &l.tenant, &l.project, id, "stop", &uid())
-                    .await
-                    .unwrap();
+                l.stop(id, &uid()).await.unwrap();
                 let deadline = Instant::now() + Duration::from_secs(10);
                 loop {
                     let reserved: bool =
@@ -2039,19 +2010,8 @@ async fn agent_upgrade_and_rollback_preserve_vms_connections_and_http() {
     drop(_traffic);
     let samples = samples.lock().unwrap().clone();
     let failures = samples.iter().filter(|s| s["ok"] != true).count();
-    // Confirm preserved permissions are still revocable after rollback.
-    let grant: String = sqlx::query_scalar(
-        "SELECT id FROM network_grants WHERE execution_id=$1 AND endpoint_id=$2 AND state='active'",
-    )
-    .bind(command_id)
-    .bind(s(&endpoint["id"]))
-    .fetch_one(&l.store.pool)
-    .await
-    .unwrap();
-    l.store
-        .revoke_grant(&l.operator, &l.tenant, &l.project, &grant, &uid())
-        .await
-        .unwrap();
+    // Confirm a run that kept its connection through rollback still stops.
+    l.stop(command_id, &uid()).await.unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let status = json_file(&pg_backend.join("status.json"));
@@ -2125,10 +2085,7 @@ async fn agent_upgrade_and_rollback_preserve_vms_connections_and_http() {
     }] = json!(workspace_suspension.as_ref().map(|s| s.report()));
     evidence(&output.join("results.json"), &result);
     if !require_logs {
-        l.store
-            .action(&l.operator, &l.tenant, &l.project, http_id, "stop", &uid())
-            .await
-            .unwrap();
+        l.stop(http_id, &uid()).await.unwrap();
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -2219,11 +2176,13 @@ async fn agent_upgrade_and_rollback_preserve_vms_connections_and_http() {
         assert_eq!(original["desired"], "stopped");
         assert_eq!(original["generation"], 2);
         assert_eq!(original["reserved"], false);
-        let state: String = sqlx::query_scalar("SELECT state FROM network_grants WHERE id=$1")
-            .bind(&grant)
-            .fetch_one(&l.store.pool)
-            .await
-            .unwrap();
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM network_grants WHERE execution_id=$1 ORDER BY state DESC LIMIT 1",
+        )
+        .bind(command_id)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
         assert_eq!(state, "revoked");
         let reserved: i64 = sqlx::query_scalar("SELECT count(*) FROM executions WHERE reserved")
             .fetch_one(&l.store.pool)

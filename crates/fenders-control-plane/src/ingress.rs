@@ -241,37 +241,6 @@ impl Meter {
     }
 }
 impl Store {
-    pub async fn create_route(
-        &self,
-        p: &Principal,
-        tenant: &str,
-        project: &str,
-        value: Value,
-        domain: &str,
-    ) -> Result<Value> {
-        fields(
-            &value,
-            &["name", "deployment_id"],
-            &["name", "deployment_id"],
-        )?;
-        named(&value["name"])?;
-        id(&value["deployment_id"])?;
-        let resource = uid();
-        let hostname = format!("{}-{}.{}", s(&value["name"]), &resource[..12], domain);
-        let mut tx = self.transaction(true, false).await?;
-        Self::project(&mut tx, p, tenant, project, true).await?;
-        one(
-            &mut tx,
-            "SELECT id FROM deployments WHERE tenant_id=$1 AND project_id=$2 AND id=$3",
-            args![tenant, project, value["deployment_id"]],
-        )
-        .await?;
-        Self::independent_deployment(&mut tx, &value["deployment_id"]).await?;
-        let row=one(&mut tx,"INSERT INTO routes(id,tenant_id,project_id,hostname,deployment_id) VALUES($1,$2,$3,$4,$5) RETURNING *",args![resource,tenant,project,hostname,value["deployment_id"]]).await?;
-        Self::audit(&mut tx, p, "route.create", &resource, tenant, json!({})).await?;
-        tx.commit().await?;
-        Ok(row)
-    }
     pub(crate) async fn expire_ingress(tx: &mut Tx) -> Result<()> {
         exec(tx,"DELETE FROM app_http_runs WHERE id IN (SELECT id FROM app_http_runs WHERE finished_at IS NOT NULL AND created<now()-interval '30 days' ORDER BY created,id LIMIT 512)",args![]).await?;
         for row in rows(

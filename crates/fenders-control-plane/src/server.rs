@@ -50,21 +50,6 @@ struct Args {
     gateway_cert: Option<PathBuf>,
     #[arg(long)]
     gateway_key: Option<PathBuf>,
-    #[arg(long)]
-    browser_auth: Option<PathBuf>,
-    /// Development only: sign customers in from Tailscale Serve's identity
-    /// headers instead of an OIDC provider. Requires a loopback --host.
-    #[arg(long, conflicts_with = "browser_auth")]
-    tailscale_identity: Option<PathBuf>,
-    /// Private-release self-service workspace policy; absent disables admission.
-    #[arg(long)]
-    onboarding: Option<PathBuf>,
-    /// SMTP configuration for customer workspace invitations.
-    #[arg(long)]
-    invitation_email: Option<PathBuf>,
-    /// Check mandatory STARTTLS and authentication without sending email.
-    #[arg(long, requires = "invitation_email")]
-    check_invitation_email: bool,
     /// Operator DNS-over-TLS and denied management range configuration.
     #[arg(long)]
     public_egress: Option<PathBuf>,
@@ -76,18 +61,9 @@ struct Args {
     check_public_egress: Vec<String>,
 }
 /// The control plane's whole program: parse the command line, serve until a
-/// signal. `assets` are files for the management listener to serve beside
-/// the API; the shipped binary passes none. A product with a console wraps
-/// this in a binary of its own.
-pub async fn run(assets: &'static [api::Asset]) -> Result<(), Box<dyn std::error::Error>> {
+/// signal.
+pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    if args.check_invitation_email {
-        let config: crate::invitation_email::InvitationEmailConfig =
-            serde_json::from_slice(&std::fs::read(args.invitation_email.as_ref().unwrap())?)?;
-        config.check().await?;
-        println!("SMTP STARTTLS and authentication verified; no email sent");
-        return Ok(());
-    }
     let public_egress = args
         .public_egress
         .as_deref()
@@ -132,10 +108,7 @@ pub async fn run(assets: &'static [api::Asset]) -> Result<(), Box<dyn std::error
         })
     };
     let dsn = database_url(args.database_url_file.as_deref())?;
-    let mut store = Store::connect(&dsn, &args.state)
-        .await?
-        .refusing_unserved()
-        .with_assets(assets);
+    let mut store = Store::connect(&dsn, &args.state).await?;
     if let Some(endpoint) = &args.run_channel_endpoint {
         let tls = tls
             .as_ref()
@@ -153,25 +126,6 @@ pub async fn run(assets: &'static [api::Asset]) -> Result<(), Box<dyn std::error
     }
     if let Some(config) = public_egress {
         store = store.with_public_egress(config)?;
-    }
-    if let Some(path) = args.browser_auth {
-        let config = serde_json::from_slice(&std::fs::read(path)?)?;
-        store = store.with_browser_auth(config, args.dev_http)?;
-    }
-    if let Some(path) = args.tailscale_identity {
-        // Anything that reaches the listener can send the identity headers, so
-        // only Tailscale Serve on this host may be able to.
-        if !args.host.is_loopback() || args.dev_http {
-            return Err("--tailscale-identity requires TLS on a loopback --host".into());
-        }
-        eprintln!("DEVELOPMENT sign-in: customers are identified by Tailscale Serve headers");
-        store = store.with_tailscale_identity(serde_json::from_slice(&std::fs::read(path)?)?)?;
-    }
-    if let Some(path) = args.onboarding {
-        store = store.with_onboarding(serde_json::from_slice(&std::fs::read(path)?)?)?;
-    }
-    if let Some(path) = args.invitation_email {
-        store = store.with_invitation_email(serde_json::from_slice(&std::fs::read(path)?)?)?;
     }
     store.migrate().await?;
     let credential = store.bootstrap().await?;
@@ -204,16 +158,6 @@ pub async fn run(assets: &'static [api::Asset]) -> Result<(), Box<dyn std::error
         move || {
             let pickup = pickup.clone();
             async move { pickup.listen_for_pickup().await }
-        },
-    )?;
-    let mail = store.clone();
-    background.periodic(
-        Component::InvitationEmail,
-        delay,
-        std::time::Duration::from_secs(5),
-        move || {
-            let mail = mail.clone();
-            async move { mail.deliver_invitation_email().await }
         },
     )?;
     let state = api::ApiState {

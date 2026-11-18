@@ -176,52 +176,6 @@ async fn http_publication_drain_and_stable_endpoint_are_observation_based() {
     l.report(&node, &old, "running", 2).await;
     assert_eq!(l.http(&app).await["state"], "serving");
 
-    // The low-level APIs cannot bypass this app's lifecycle or create another route.
-    assert_eq!(
-        l.store
-            .action(
-                &l.operator,
-                &l.tenant,
-                &l.project,
-                s(&old["id"]),
-                "stop",
-                "bypass"
-            )
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
-        l.store
-            .update_deployment(
-                &l.operator,
-                &l.tenant,
-                &l.project,
-                s(&old["deployment_id"]),
-                json!({"expected_revision":old["revision"],"desired":"stopped"}),
-                "bypass-deploy"
-            )
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
-        l.store
-            .create_route(
-                &l.operator,
-                &l.tenant,
-                &l.project,
-                json!({"name":"extra","deployment_id":old["deployment_id"]}),
-                "apps.test"
-            )
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::CONFLICT
-    );
-
     // A fresh release of the same code still exercises replacement and preserves identity.
     let next = l.release(&app, &version, "replacement").await;
     assert_eq!(next["state"], "pending");

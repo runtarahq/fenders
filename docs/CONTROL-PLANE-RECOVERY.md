@@ -60,11 +60,8 @@ target/release/fenders-backup restore \
 ```
 
 Check the backup ID and `mode: fenced`. Database restoration and fencing commit
-in one transaction. Old API credentials are revoked, browser sessions/logins are
-removed, pending invitations are withdrawn and their unsent mail cancelled,
-nodes are disabled and draining, and apps/deployments are stopped. Memberships
-are restored as they were at the snapshot: one removed since then is a member
-again, and must be removed again.
+in one transaction. Old API credentials are revoked, nodes are disabled and
+draining, and apps/deployments are stopped.
 Reserved executions become unreachable with advanced generations and retain
 quota. Pending operations fail explicitly; commands are never replayed.
 HTTP serving and scheduled dispatch are disabled. Public HTTPS policy is disabled
@@ -125,8 +122,7 @@ target/release/fenders-keys rotate \
 ```
 
 Here `services-stopped` means the control-plane processes, not managed databases.
-Rotation covers project secrets, browser CSRF values and pending OIDC nonce/PKCE
-values. It preserves plaintext and resource identities; it does not change the
+Rotation covers project secrets. It preserves plaintext and resource identities; it does not change the
 external database password, certificates, host identities or archive encryption key.
 A failed database transaction rolls back the complete inventory.
 

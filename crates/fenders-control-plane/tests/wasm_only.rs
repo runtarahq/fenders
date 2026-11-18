@@ -65,12 +65,7 @@ async fn external_endpoints_are_scoped_idempotent_and_do_not_provision() {
     let legacy = json!({"name":"external-pg","host":"192.0.2.2","port":5432,"database":"demo","username_secret_id":username["id"],"password_secret_id":password["id"]});
     let value = json!({"name":"tcp-echo","host":"192.0.2.2","port":6379});
     let credential = store
-        .issue_credential(
-            &operator,
-            tenant,
-            serde_json::from_value(json!({"name":"editor","role":"editor","project_id":project}))
-                .unwrap(),
-        )
+        .create_api_key(&operator, tenant, serde_json::from_value(json!({"name":"editor","project_id":project,"permissions":["read","apps:write","runs:write","connections:write","secrets:write"],"ttl_seconds":86400})).unwrap(), &uid())
         .await
         .unwrap();
     let editor = store.authenticate(s(&credential["token"])).await.unwrap();
@@ -106,12 +101,7 @@ async fn external_endpoints_are_scoped_idempotent_and_do_not_provision() {
     assert!(!list.to_string().contains("not-an-actual-database-password"));
     assert!(!list.to_string().contains("test-user"));
     let viewer_credential = store
-        .issue_credential(
-            &operator,
-            tenant,
-            serde_json::from_value(json!({"name":"viewer","role":"viewer","project_id":project}))
-                .unwrap(),
-        )
+        .create_api_key(&operator, tenant, serde_json::from_value(json!({"name":"viewer","project_id":project,"permissions":["read"],"ttl_seconds":86400})).unwrap(), &uid())
         .await
         .unwrap();
     let viewer = store

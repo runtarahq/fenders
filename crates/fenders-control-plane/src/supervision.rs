@@ -22,14 +22,12 @@ use tokio::{
 pub enum Component {
     Scheduler,
     PickupListener,
-    InvitationEmail,
 }
 impl Component {
     fn name(self) -> &'static str {
         match self {
             Self::Scheduler => "scheduler",
             Self::PickupListener => "pickup_listener",
-            Self::InvitationEmail => "invitation_email",
         }
     }
 }

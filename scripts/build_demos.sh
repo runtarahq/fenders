@@ -18,6 +18,6 @@ docker run --rm --platform linux/amd64 --network none \
   fenders-demo-build:rust-1.90.0 bash -c 'cargo +1.97.0 build --locked --offline --release --target wasm32-wasip2 && cp /target/wasm32-wasip2/release/hello-command.wasm /out/hello-command-v1.wasm && cp /target/wasm32-wasip2/release/fenders_demo_components.wasm /out/hello-http-v1.wasm'
 for task_demo in hello-command-v1 hello-http-v1; do
   task_source="$task_output/$task_demo.wasm"
-  task_dest="$task_root/crates/fenders-control-plane/demos/$task_demo.wasm"
+  task_dest="$task_root/crates/fenders-component/fixtures/$task_demo.wasm"
   if [[ ${1:---check} == --write ]]; then cp "$task_source" "$task_dest"; else cmp "$task_source" "$task_dest"; fi
 done

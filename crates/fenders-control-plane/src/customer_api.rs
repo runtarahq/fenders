@@ -62,9 +62,14 @@ pub fn permission(method: &str, path: &[&str]) -> Option<&'static str> {
                 | ["apps", "deploy"]
                 | ["apps", _, "versions" | "releases"],
             )
-            | ("PATCH", ["apps", _])
+            | ("PATCH" | "DELETE", ["apps", _])
             | ("PUT", ["apps", _, "triggers" | "connections"]) => Some("apps:write"),
-            ("POST", ["apps", _, "runs"]) => Some("runs:write"),
+            // A sample request is one made of the app, as a run is.
+            ("POST", ["apps", _, "runs" | "http-sample"])
+            | ("POST", ["apps", _, "runs", _, "cancel"]) => Some("runs:write"),
+            // What became of a request a key made: its own to read.
+            ("GET", ["app-submissions" | "endpoint-submissions", _])
+            | ("GET", ["apps", _, "submissions", _]) => Some("read"),
             ("POST", ["schedules", "preview"] | ["https-access", "validate"]) => Some("read"),
             ("POST", ["external-endpoints"]) | ("DELETE", ["external-endpoints", _]) => {
                 Some("connections:write")
@@ -76,6 +81,24 @@ pub fn permission(method: &str, path: &[&str]) -> Option<&'static str> {
     }
 }
 
+/// The operator's own routes: what no tenant's key is ever given. Tenants
+/// and their keys, what a tenant is allowed, suspending one, the nodes, the
+/// public egress policy, and how this control plane's own loops are doing.
+pub fn operators(method: &str, path: &[&str]) -> bool {
+    matches!(
+        (method, path),
+        ("POST", ["v1", "tenants"])
+            | ("PATCH", ["v1", "tenants", _])
+            | ("PATCH", ["v1", "tenants", _, "http-limits"])
+            | ("POST", ["v1", "tenants", _, "lifecycle"])
+            | ("GET" | "POST", ["v1", "tenants", _, "api-keys"])
+            | ("DELETE", ["v1", "tenants", _, "api-keys", _])
+            | ("GET" | "POST", ["v1", "nodes"])
+            | ("PATCH", ["v1", "nodes", _])
+            | ("GET" | "PUT", ["v1", "public-egress-policy"])
+            | ("GET", ["v1", "control-plane", "status"])
+    )
+}
 pub fn authorize(p: &Principal, method: &str, path: &[&str]) -> Result<()> {
     if let Some(permissions) = &p.api_permissions {
         let required = permission(method, path).ok_or_else(|| {
@@ -98,10 +121,20 @@ pub struct CreateApiKey {
     pub project_id: Option<String>,
     pub permissions: Vec<String>,
     pub ttl_seconds: u32,
+    /// Whatever its issuer wants recorded with what the key does: the user
+    /// of a console it was issued for, a pipeline, a ticket. Opaque here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+/// A label is one line of at most 128 bytes: text to find later, not data.
+fn label_fits(label: &str) -> bool {
+    (1..=128).contains(&label.len()) && !label.chars().any(char::is_control)
 }
 
 pub(crate) const MIGRATION: &str = "
 ALTER TABLE credentials ADD COLUMN IF NOT EXISTS api_permissions jsonb;
+ALTER TABLE credentials ADD COLUMN IF NOT EXISTS label text;
+ALTER TABLE audit ADD COLUMN IF NOT EXISTS actor_label text;
 ALTER TABLE credentials ADD COLUMN IF NOT EXISTS created_by text;
 ALTER TABLE credentials ADD COLUMN IF NOT EXISTS prefix text;
 ALTER TABLE credentials ADD COLUMN IF NOT EXISTS last_used timestamptz;
@@ -154,7 +187,7 @@ impl Store {
         p.scope(tenant, None, false, true)?;
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
-        let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'prefix',prefix,'created_by',created_by,'expires',expires,'revoked',revoked,'created',created,'last_used',last_used) FROM credentials WHERE tenant_id=$1 AND api_permissions IS NOT NULL ORDER BY created DESC,id")
+        let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'label',label,'prefix',prefix,'created_by',created_by,'expires',expires,'revoked',revoked,'created',created,'last_used',last_used) FROM credentials WHERE tenant_id=$1 AND api_permissions IS NOT NULL ORDER BY created DESC,id")
             .bind(tenant).fetch_all(&mut *tx).await?;
         Ok(json!({"items":rows}))
     }
@@ -170,6 +203,10 @@ impl Store {
         value.permissions.sort();
         value.permissions.dedup();
         if !(60..=2592000).contains(&value.ttl_seconds)
+            || value
+                .label
+                .as_deref()
+                .is_some_and(|label| !label_fits(label))
             || value.permissions.is_empty()
             || value
                 .permissions
@@ -179,7 +216,7 @@ impl Store {
                 && value.permissions.iter().any(|v| v == "projects:write"))
         {
             return Err(Error::invalid(
-                "invalid API key permissions, project scope or lifetime (maximum 30 days)",
+                "invalid API key permissions, project scope, label or lifetime (maximum 30 days)",
             ));
         }
         let mut tx = self.transaction(true, false).await?;
@@ -201,13 +238,9 @@ impl Store {
         let id = uid();
         let secret = crate::store::token("fnd_tok_")?;
         let prefix = &secret[..16];
-        let role = if value.permissions.iter().any(|v| v.ends_with(":write")) {
-            "editor"
-        } else {
-            "viewer"
-        };
-        let row: Value = sqlx::query_scalar("INSERT INTO credentials(id,token_hash,tenant_id,project_id,name,role,expires,api_permissions,created_by,prefix) VALUES($1,$2,$3,$4,$5,$6,LEAST(now()+make_interval(secs=>$7::double precision),COALESCE((SELECT expires FROM credentials WHERE id=$9 AND tenant_id IS NOT NULL),'infinity'::timestamptz)),$8,$9,$10) RETURNING jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'prefix',prefix,'expires',expires,'created',created,'created_by',created_by)")
-            .bind(&id).bind(digest(&secret)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(role).bind(value.ttl_seconds as f64).bind(json!(value.permissions)).bind(&p.id).bind(prefix).fetch_one(&mut *tx).await?;
+        let role = crate::model::Role::Key.as_str();
+        let row: Value = sqlx::query_scalar("INSERT INTO credentials(id,token_hash,tenant_id,project_id,name,role,expires,api_permissions,created_by,prefix,label) VALUES($1,$2,$3,$4,$5,$6,now()+make_interval(secs=>$7::double precision),$8,$9,$10,$11) RETURNING jsonb_build_object('id',id,'name',name,'project_id',project_id,'permissions',api_permissions,'prefix',prefix,'expires',expires,'created',created,'created_by',created_by,'label',label)")
+            .bind(&id).bind(digest(&secret)).bind(tenant).bind(&value.project_id).bind(&value.name).bind(role).bind(value.ttl_seconds as f64).bind(json!(value.permissions)).bind(&p.id).bind(prefix).bind(&value.label).fetch_one(&mut *tx).await?;
         save_receipt(&mut tx, tenant, key, &request, &row).await?;
         Self::audit(
             &mut tx,
@@ -215,7 +248,7 @@ impl Store {
             "api-key.create",
             &id,
             tenant,
-            json!({"permissions":value.permissions,"project_id":value.project_id}),
+            json!({"permissions":value.permissions,"project_id":value.project_id,"label":value.label}),
         )
         .await?;
         tx.commit().await?;
@@ -239,9 +272,6 @@ mod tests {
             }
             if segments.get(5) == Some(&"connections") {
                 segments[5] = "external-endpoints";
-            }
-            if segments.get(3) == Some(&"api-keys") {
-                continue;
             }
             for method in methods.as_object().unwrap().keys() {
                 assert!(

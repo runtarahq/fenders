@@ -106,13 +106,7 @@ impl Limits {
         let beta_size = assert_named_spec(&beta_config["spec"], http_size);
         let key = l
             .store
-            .issue_credential(
-                &l.operator,
-                s(&scope["tenant"]),
-                serde_json::from_value(json!({
-            "name":"upgrade-quota-check","role":"editor","project_id":scope["project"]}))
-                .unwrap(),
-            )
+            .create_api_key(&l.operator, s(&scope["tenant"]), serde_json::from_value(json!({"name":"upgrade-quota-check","project_id":scope["project"],"permissions":["read","apps:write","runs:write","connections:write","secrets:write"],"ttl_seconds":86400})).unwrap(), &uid())
             .await
             .unwrap();
         let beta = l.store.authenticate(s(&key["token"])).await.unwrap();
@@ -213,18 +207,6 @@ impl Limits {
                     "quota dimension did not apply independently"
                 );
             }
-            let spec = json!({"spec":{"artifact_id":self.scope["artifact"],"mode":"http","cpu_percent":self.beta_size["cpu_percent"],"guest_memory_mib":self.beta_size["guest_memory_mib"],"host_memory_mib":self.beta_size["vm_memory_mib"],"wasm_memory_mib":self.beta_size["wasm_linear_memory_mib"]}});
-            let first = uid();
-            let second = uid();
-            let (a, b) = tokio::join!(
-                l.store
-                    .create_workload(&self.beta, tenant, project, spec.clone(), &first, false),
-                l.store
-                    .create_workload(&self.beta, tenant, project, spec, &second, false)
-            );
-            for refused in [a, b] {
-                assert_eq!(refused.unwrap_err().status, StatusCode::TOO_MANY_REQUESTS);
-            }
             l.store
                 .update_allowance(
                     &l.operator,
@@ -300,10 +282,7 @@ impl Limits {
             backend(output, id).is_none(),
             "over-capacity probe acquired a backend"
         );
-        l.store
-            .action(&l.operator, &l.tenant, &l.project, id, "stop", &uid())
-            .await
-            .unwrap();
+        l.stop(id, &uid()).await.unwrap();
         assert_eq!(reservations(l).await, self.reservations);
         let memory = memory_checks(
             &fs::read(https_backend.join("output.log")).unwrap(),

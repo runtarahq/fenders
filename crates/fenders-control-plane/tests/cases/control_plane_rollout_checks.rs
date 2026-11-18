@@ -200,28 +200,14 @@ impl Tenant {
         let project = s(&project["id"]);
         let credential = l
             .store
-            .issue_credential(
-                &l.operator,
-                &tenant,
-                serde_json::from_value(
-                    json!({"name":"beta-editor","role":"editor","project_id":project}),
-                )
-                .unwrap(),
-            )
+            .create_api_key(&l.operator, &tenant, serde_json::from_value(json!({"name":"beta-editor","project_id":project,"permissions":["read","apps:write","runs:write","connections:write","secrets:write"],"ttl_seconds":86400})).unwrap(), &uid())
             .await
             .unwrap();
         let token = s(&credential["token"]).to_owned();
         let principal = l.store.authenticate(&token).await.unwrap();
         let revoked = l
             .store
-            .issue_credential(
-                &l.operator,
-                &tenant,
-                serde_json::from_value(
-                    json!({"name":"beta-withdrawn","role":"viewer","project_id":project}),
-                )
-                .unwrap(),
-            )
+            .create_api_key(&l.operator, &tenant, serde_json::from_value(json!({"name":"beta-withdrawn","project_id":project,"permissions":["read"],"ttl_seconds":86400})).unwrap(), &uid())
             .await
             .unwrap();
         l.store

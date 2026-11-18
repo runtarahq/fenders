@@ -1,0 +1,25 @@
+# Not SQLx's MySQL driver: an empty crate of its name and version.
+#
+# Fenders uses SQLx for PostgreSQL only, and SQLx's MySQL driver is never
+# built here. Cargo still resolves it into the lockfile, and with it `rsa`
+# 0.9, every release of which has an advisory against it (RUSTSEC-2023-0071).
+# The workspace patches the driver with this crate, which depends on nothing;
+# enabling SQLx's `mysql` feature would then fail to build, which is the
+# intent.
+[package]
+name = "sqlx-mysql"
+version = "0.8.6"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+any = []
+bigdecimal = []
+chrono = []
+json = []
+migrate = []
+offline = []
+rust_decimal = []
+time = []
+uuid = []

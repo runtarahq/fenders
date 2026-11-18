@@ -115,16 +115,6 @@ done
   exit 1
 }
 
-execution=$(api POST "$scope/executions" "$(jq -n --arg a "$artifact" '{spec:{artifact_id:$a,mode:"command"}}')" | jq -er .resource_id)
-for _ in $(seq 60); do
-  api GET "$scope/executions/$execution" > "$out/execution.json"
-  state=$(jq -r .state "$out/execution.json")
-  case $state in exited|failed|stopped|lost) break ;; esac
-  sleep 1
-done
-
-exit_code=$(jq -r '.observation.exit_code // empty' "$out/execution.json")
-
 # The customer path: deploy an app with a manual trigger (nothing is invoked),
 # then run it on request.
 api POST "$scope/apps/deploy" "$(jq -n --arg a "$artifact" \
@@ -135,13 +125,17 @@ for _ in $(seq 60); do
   [[ $(jq -r .state "$out/app.json") == ready ]] && break
   sleep 1
 done
-api POST "$scope/apps/$app/runs" '{}' > "$out/app-run-request.json"
-run=$(jq -er '.run.id // .run_id // .resource_id // .id' "$out/app-run-request.json")
-for _ in $(seq 60); do
-  api GET "$scope/apps/$app/runs/$run" > "$out/app-run.json"
-  run_state=$(jq -r .state "$out/app-run.json")
-  case $run_state in succeeded|failed|cancelled) break ;; esac
-  sleep 1
+# Twice: each run is a VM of its own, and each posts its own outcome.
+for n in first second; do
+  api POST "$scope/apps/$app/runs" '{}' > "$out/app-run-request.json"
+  run=$(jq -er '.run.id // .run_id // .resource_id // .id' "$out/app-run-request.json")
+  for _ in $(seq 60); do
+    api GET "$scope/apps/$app/runs/$run" > "$out/app-run.json"
+    run_state=$(jq -r .state "$out/app-run.json")
+    case $run_state in succeeded|failed|cancelled) break ;; esac
+    sleep 1
+  done
+  [[ $n == first ]] && { state=$run_state; exit_code=$(jq -r '.exit_code // empty' "$out/app-run.json"); }
 done
 
 jq -n --arg state "$state" --arg exit_code "$exit_code" --arg run_state "$run_state" \
@@ -149,9 +143,9 @@ jq -n --arg state "$state" --arg exit_code "$exit_code" --arg run_state "$run_st
   --arg started "$(grep -c 'agent: run started' "$out/node.log" || true)" \
   --arg posted "$(grep -c 'outcome="host"' "$out/node.log" || true)" \
   --arg refused "$(grep -c 'run refused' "$out/node.log" || true)" \
-  '{passed: ($state == "exited" and $exit_code == "0" and $run_state == "succeeded"
+  '{passed: ($state == "succeeded" and $exit_code == "0" and $run_state == "succeeded"
       and ($posted|tonumber) == 2 and ($refused|tonumber) == 0),
-    execution: {state: $state, exit_code: $exit_code},
+    first_run: {state: $state, exit_code: $exit_code},
     app_run: {state: $run_state, exit_code: $run[0].exit_code, source: $run[0].source},
     node: {runs_started: ($started|tonumber), outcomes_posted_to_run_channel: ($posted|tonumber),
       runs_refused: ($refused|tonumber)}}' \

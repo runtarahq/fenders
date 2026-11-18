@@ -56,14 +56,14 @@ as both control plane and node.
 | A shim asked to stop | Once its run is over, a shim holding the run's end for its launcher ends at once on SIGTERM | `scripts/verify_shim_stop_live.sh` |
 | The launcher from inside its VM | A test guest booted in place of the runtime: what a guest learns of a host file, threads and their exits, a pointer outside the guest, the socket rate; and from outside, that everything the launcher holds closes on exec and its own filter is on every thread | `scripts/verify_launcher_guest_live.sh` |
 | The shim alone | One component under `fenders-shim` against a stub run channel, with no node or control plane | `scripts/shim_standalone.sh` |
-| The control plane | Tenants, projects, members, invitations, API keys, secrets, uploads and inspection, apps and schedules, usage accounting, backup and restore | `make test` |
+| The control plane | Tenants, projects, API keys, secrets, uploads and inspection, apps and schedules, usage accounting, backup and restore | `make test` |
 | Confinement | Confined compilation and the artifact cache; the launcher's Landlock and seccomp; the shim's own (read-only filesystem, its run channel's port, a refusal list); per-run cgroups and uids | `make verify-confinement`, `scripts/verify_network_native.sh`, `cargo test -p fenders-node --test shim_confinement`, `scripts/verify_destinations_live.sh`, `scripts/verify_hypercalls_live.sh`, `scripts/verify_msr_filter_live.sh` |
 
 ## Does not work
 
 | Feature | State |
 |---|---|
-| Pause and resume | The node answers 501 and the API refuses the request (`unavailable.rs`); a run can only be stopped |
+| Pause and resume | The API has no such request; a run can only be stopped (`POST …/apps/APP/runs/RUN/cancel`) |
 | Worker host qualification | There is no harness that qualifies a new host for production |
 | A user interface | None is included. `Store::with_assets` lets a wrapping binary serve its own |
 
@@ -82,29 +82,26 @@ as both control plane and node.
   can do anything. It is valid for as long as it is that file's: to replace
   one that leaked, delete the file and start the control plane again, which
   writes a new one and revokes the old.
-- An API key or tenant credential lives at most 30 days. A host product
-  re-issues them with the operator credential. One issued with a tenant
-  credential lives no longer than that credential, and ends when it is
-  revoked; those a member issued end when the member is removed or stops
-  being an owner, or their account is disabled. Credentials issued before
-  this was recorded have no issuer and are revoked one by one.
+- A tenant's key lives at most 30 days. A host product re-issues it with
+  the operator credential.
 - The OpenAPI contract (`/api/openapi.json`) covers the workspace API. The
   operator calls are described in [EMBEDDING-API.md](EMBEDDING-API.md), not
   yet in the contract.
 - The node's control protocol has no written, versioned specification: the
   `fenders-node-protocol` crate and the control plane's `/internal` routes are
   the reference ([EMBEDDING-NODE.md](EMBEDDING-NODE.md)).
-- Browser sign-in (OIDC) and invitations remain in the control plane for a
-  product that brings a console; without `--browser-auth` they are off. The
-  provider's metadata and signing keys are held for five minutes, and
-  fetched again at most every ten seconds for a token signed with a key not
-  among them: a key the provider withdraws is trusted for up to five minutes
-  more. A session lasts eight hours from sign-in, and thirty minutes unused. At most 10,000 sign-ins are held between their start and
-  their callback; beyond that the oldest give way, so a sign-in is lost only
-  if that many more are started while it is under way.
-- `--tailscale-identity` is a **development-only** sign-in that trusts a
-  header. The control plane refuses it unless it listens on loopback. Never
-  use it in a deployment.
+- There are no people in the API: no sign-in, sessions, users, roles,
+  invitations or mail, and nothing is served but the API and its contract.
+  A credential is the operator's, or a tenant's key with a list of
+  permissions; a product with users and roles issues keys that carry what
+  it has decided, each with a `label` of its own that the audit trail
+  records with every change the key makes.
+- Only the operator's credential issues, lists and revokes a tenant's keys,
+  and suspends or resumes a workspace (`POST /v1/tenants/TENANT/lifecycle`).
+  Its routes are listed in [EMBEDDING-API.md](EMBEDDING-API.md); every
+  other route is one a key may be given. The routes that started a workload
+  without an app, granted network access or made an ingress route directly,
+  and a workspace's settings, are gone.
 
 ### Run output
 
@@ -121,7 +118,9 @@ as both control plane and node.
 - Following lags by about 200 ms and polls; nothing is pushed.
 - The output of a run that was stopped is not closed by its shim, so it reads
   as still being collected.
-- Identical workload executions can reuse a warm shim; app runs never do.
+- App runs never reuse a warm shim. The node's `--warm-runs` served
+  workloads started without an app, which the API no longer starts, so
+  nothing reaches it at present.
 
 ### Connections
 
@@ -240,11 +239,10 @@ as both control plane and node.
 ### Tests
 
 - Some live harnesses under `crates/fenders-control-plane/tests/cases/`
-  (`agent_upgrade_*`, `m2_*`, `m1_live`) were written for the node before
-  shims; they compile, cannot pass and are `#[ignore]`d. A few of them start
-  browser checks that are not in this repository.
+  (`agent_upgrade_*`) were written for the node before shims; they compile,
+  cannot pass and are `#[ignore]`d.
 - The control-plane suite is run with `--test-threads=4`; at full parallelism
   a varying handful fail under load and pass when rerun.
 - Code kept for features not yet rebuilt on shims (the `freeze` and `settle`
-  actions of `egress_budget.rs`, pause and resume in `workloads.rs`, lease
+  actions of `egress_budget.rs`, pausing in the node, lease
   validation in the node) is exercised only against stand-ins.

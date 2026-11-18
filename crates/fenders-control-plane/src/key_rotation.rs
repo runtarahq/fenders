@@ -71,12 +71,7 @@ pub(crate) fn check_identity(barrier: &Value, key_id: &str) -> Result<()> {
 
 // This inventory covers every persisted Fernet value. Cursors held by clients
 // are intentionally invalidated; they are not database records or credentials.
-const COLUMNS: &[(&str, &str, &str, bool)] = &[
-    ("secrets", "id", "ciphertext", true),
-    ("browser_sessions", "id", "csrf_encrypted", false),
-    ("browser_logins", "state_hash", "nonce_encrypted", false),
-    ("browser_logins", "state_hash", "pkce_encrypted", false),
-];
+const COLUMNS: &[(&str, &str, &str, bool)] = &[("secrets", "id", "ciphertext", true)];
 
 pub(crate) async fn validate_or_reencrypt(
     tx: &mut Transaction<'_, Postgres>,

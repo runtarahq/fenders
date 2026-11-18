@@ -1022,41 +1022,6 @@ CREATE SEQUENCE audit_sequence_seq
 
 ALTER SEQUENCE audit_sequence_seq OWNED BY audit.sequence;
 
-CREATE TABLE browser_logins (
-    state_hash text NOT NULL,
-    browser_hash text NOT NULL,
-    context_hash text NOT NULL,
-    nonce_encrypted text NOT NULL,
-    pkce_encrypted text NOT NULL,
-    expires timestamp with time zone DEFAULT (now() + '00:05:00'::interval) NOT NULL,
-    created timestamp with time zone DEFAULT now() NOT NULL
-);
-
-CREATE TABLE browser_logout_events (
-    id text NOT NULL,
-    token_hash text NOT NULL,
-    issuer text NOT NULL,
-    client_id text NOT NULL,
-    subject text,
-    sid text,
-    issued bigint NOT NULL,
-    expires timestamp with time zone NOT NULL,
-    CONSTRAINT browser_logout_events_check CHECK (((subject IS NOT NULL) OR (sid IS NOT NULL)))
-);
-
-CREATE TABLE browser_sessions (
-    id text NOT NULL,
-    user_id text NOT NULL,
-    token_hash text NOT NULL,
-    csrf_hash text NOT NULL,
-    csrf_encrypted text NOT NULL,
-    expires timestamp with time zone NOT NULL,
-    created timestamp with time zone DEFAULT now() NOT NULL,
-    client_id text NOT NULL,
-    provider_sid text,
-    provider_iat bigint NOT NULL
-);
-
 CREATE VIEW compute_reservations AS
  SELECT tenant_id,
     project_id,
@@ -1076,18 +1041,7 @@ CREATE TABLE credentials (
     revoked boolean DEFAULT false NOT NULL,
     created timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT credentials_check CHECK (((role = 'operator'::text) = (tenant_id IS NULL))),
-    CONSTRAINT credentials_role_check CHECK ((role = ANY (ARRAY['operator'::text, 'owner'::text, 'editor'::text, 'viewer'::text])))
-);
-
-CREATE TABLE customer_users (
-    id text NOT NULL,
-    issuer text NOT NULL,
-    subject text NOT NULL,
-    disabled boolean DEFAULT false NOT NULL,
-    created timestamp with time zone DEFAULT now() NOT NULL,
-    revision bigint DEFAULT 1 NOT NULL,
-    updated timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT customer_users_revision_check CHECK ((revision > 0))
+    CONSTRAINT credentials_role_check CHECK ((role = ANY (ARRAY['operator'::text, 'key'::text])))
 );
 
 CREATE TABLE deployments (
@@ -1422,21 +1376,6 @@ CREATE TABLE usage_samples (
     memory_measured boolean DEFAULT false NOT NULL
 );
 
-CREATE TABLE workspace_memberships (
-    id text NOT NULL,
-    tenant_id text NOT NULL,
-    project_id text,
-    user_id text NOT NULL,
-    role text NOT NULL,
-    revoked boolean DEFAULT false NOT NULL,
-    revision bigint DEFAULT 1 NOT NULL,
-    created timestamp with time zone DEFAULT now() NOT NULL,
-    updated timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT workspace_memberships_check CHECK (((role <> 'owner'::text) OR (project_id IS NULL))),
-    CONSTRAINT workspace_memberships_revision_check CHECK ((revision > 0)),
-    CONSTRAINT workspace_memberships_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'editor'::text, 'viewer'::text])))
-);
-
 ALTER TABLE ONLY audit ALTER COLUMN sequence SET DEFAULT nextval('audit_sequence_seq'::regclass);
 
 ALTER TABLE ONLY execution_log_records ALTER COLUMN id SET DEFAULT nextval('execution_log_records_id_seq'::regclass);
@@ -1570,29 +1509,11 @@ ALTER TABLE ONLY artifacts
 ALTER TABLE ONLY audit
     ADD CONSTRAINT audit_pkey PRIMARY KEY (sequence);
 
-ALTER TABLE ONLY browser_logins
-    ADD CONSTRAINT browser_logins_pkey PRIMARY KEY (state_hash);
-
-ALTER TABLE ONLY browser_logout_events
-    ADD CONSTRAINT browser_logout_events_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY browser_sessions
-    ADD CONSTRAINT browser_sessions_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY browser_sessions
-    ADD CONSTRAINT browser_sessions_token_hash_key UNIQUE (token_hash);
-
 ALTER TABLE ONLY credentials
     ADD CONSTRAINT credentials_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY credentials
     ADD CONSTRAINT credentials_token_hash_key UNIQUE (token_hash);
-
-ALTER TABLE ONLY customer_users
-    ADD CONSTRAINT customer_users_issuer_subject_key UNIQUE (issuer, subject);
-
-ALTER TABLE ONLY customer_users
-    ADD CONSTRAINT customer_users_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY deployments
     ADD CONSTRAINT deployments_pkey PRIMARY KEY (id);
@@ -1744,12 +1665,6 @@ ALTER TABLE ONLY usage_compaction_queue
 ALTER TABLE ONLY usage_samples
     ADD CONSTRAINT usage_samples_pkey PRIMARY KEY (execution_id, generation, sequence);
 
-ALTER TABLE ONLY workspace_memberships
-    ADD CONSTRAINT workspace_memberships_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY workspace_memberships
-    ADD CONSTRAINT workspace_memberships_tenant_id_user_id_project_id_key UNIQUE NULLS NOT DISTINCT (tenant_id, user_id, project_id);
-
 CREATE UNIQUE INDEX app_active_endpoint_connection ON app_endpoint_connections USING btree (app_id, endpoint_id) WHERE (state = 'active'::text);
 
 CREATE UNIQUE INDEX app_active_https_connection ON app_https_connections USING btree (app_id, origin) WHERE (state = 'active'::text);
@@ -1786,19 +1701,7 @@ CREATE INDEX artifact_validation_queue ON artifact_validations USING btree (avai
 
 CREATE INDEX audit_ingress_admission ON audit USING btree (tenant_id, created) WHERE (action = 'ingress.admit'::text);
 
-CREATE INDEX browser_login_expiry ON browser_logins USING btree (expires);
-
-CREATE INDEX browser_logout_expiry ON browser_logout_events USING btree (expires);
-
-CREATE INDEX browser_logout_scope ON browser_logout_events USING btree (issuer, client_id);
-
-CREATE INDEX browser_provider_session ON browser_sessions USING btree (client_id, provider_sid);
-
-CREATE INDEX browser_session_user ON browser_sessions USING btree (user_id, created);
-
 CREATE INDEX connection_executions ON app_execution_connections USING btree (connection_id, execution_id);
-
-CREATE INDEX customer_memberships_active ON workspace_memberships USING btree (user_id, tenant_id) WHERE (NOT revoked);
 
 CREATE INDEX deployment_artifact_reference ON deployments USING btree (((spec ->> 'artifact_id'::text)));
 
@@ -2014,9 +1917,6 @@ ALTER TABLE ONLY artifacts
 ALTER TABLE ONLY audit
     ADD CONSTRAINT audit_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id);
 
-ALTER TABLE ONLY browser_sessions
-    ADD CONSTRAINT browser_sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES customer_users(id);
-
 ALTER TABLE ONLY credentials
     ADD CONSTRAINT credentials_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id);
 
@@ -2139,16 +2039,6 @@ ALTER TABLE ONLY usage_samples
 
 ALTER TABLE ONLY usage_samples
     ADD CONSTRAINT usage_samples_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id);
-
-ALTER TABLE ONLY workspace_memberships
-    ADD CONSTRAINT workspace_memberships_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id);
-
-ALTER TABLE ONLY workspace_memberships
-    ADD CONSTRAINT workspace_memberships_tenant_id_project_id_fkey FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, id);
-
-ALTER TABLE ONLY workspace_memberships
-    ADD CONSTRAINT workspace_memberships_user_id_fkey FOREIGN KEY (user_id) REFERENCES customer_users(id);
-
 
 CREATE OR REPLACE VIEW transfer_allowance_accounting AS
     SELECT tenant_id,project_id,period,bytes::numeric used_bytes,0::numeric held_bytes FROM traffic_usage

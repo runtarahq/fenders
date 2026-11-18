@@ -109,13 +109,19 @@ POST /v1/tenants
 GET  /v1/tenants/TENANT/projects            # -> [{"id": "PROJECT", …}]
 POST /v1/tenants/TENANT/projects            {"name": "staging"}
 PATCH /v1/tenants/TENANT                    {"allowance": {…}}
+PATCH /v1/tenants/TENANT                    {"default_app_size": "medium"}   # for apps that name no size
 
 # A key for that tenant, optionally for one project.
 POST /v1/tenants/TENANT/api-keys
 {"name": "product", "permissions": ["read", "apps:write", "runs:write"],
  "ttl_seconds": 2592000}
 # -> {"id": …, "token": "fnd_tok_…"}   the token is shown once
+GET    /v1/tenants/TENANT/api-keys          # the tenant's keys, without their tokens
 DELETE /v1/tenants/TENANT/api-keys/KEY      # it stops working at once
+
+# Suspend a workspace, or resume it.
+POST /v1/tenants/TENANT/lifecycle
+{"request_key": "…", "expected_revision": 1, "action": "suspend", "reason": "…"}
 ```
 
 Permissions: `read`, `apps:write`, `runs:write`, `projects:write`,
@@ -128,7 +134,7 @@ its limit is refused, and nothing it does can take from another tenant.
 ## 5. What a tenant key does
 
 The workspace API, under `/v1/workspaces/TENANT/…`. Its contract is served
-by the control plane at `/api/openapi.json`, with a readable page at `/api`.
+by the control plane at `/api/openapi.json`.
 In short:
 
 ```sh
@@ -143,6 +149,7 @@ GET  $S/apps/APP             # "state": "ready"
 
 POST $S/apps/APP/runs        {}                 # deploying never runs anything; this does
 GET  $S/apps/APP/runs/RUN    # "state": "succeeded" | "failed" | "cancelled", "exit_code"
+POST $S/apps/APP/runs/RUN/cancel               # stop one that has not ended (runs:write)
 GET  $S/apps/APP/logs        # its output, secrets masked
 ```
 
@@ -160,35 +167,54 @@ the contract.
 - A tenant key calling an operator endpoint (`POST /v1/tenants`,
   `GET /v1/nodes`) is answered `403`.
 - No credential is `401`; a revoked key is `401` at once.
-- No console is served: only `/api` and the API itself.
+- Nothing is served but the API and its contract (`/api/openapi.json`).
 
 Each run is a VM of its own with its own cgroup and uid on the node, and
 reaches only the destinations its app was given.
 
-## Bringing your own console
+## The operator's routes, all of them
 
-The control plane is also a library. A binary of yours can serve files
-beside the API from the same listener:
+What no tenant's key is ever given, whatever it holds:
 
-```rust
-static CONSOLE: [fenders_control_plane::api::Asset; 1] = [fenders_control_plane::api::Asset {
-    path: "/console/",
-    content_type: "text/html; charset=utf-8",
-    body: include_bytes!("../console/index.html"),
-}];
+| | |
+|---|---|
+| Tenants | `POST /v1/tenants` (`GET /v1/tenants` lists them all to the operator, and a key its own) |
+| What a tenant is allowed | `PATCH /v1/tenants/T` (allowance, default app size), `PATCH /v1/tenants/T/http-limits` |
+| Suspending one | `POST /v1/tenants/T/lifecycle` |
+| Its keys | `GET`, `POST /v1/tenants/T/api-keys`, `DELETE /v1/tenants/T/api-keys/KEY` |
+| Nodes | `GET`, `POST /v1/nodes`, `PATCH /v1/nodes/NODE` |
+| Public egress policy | `GET`, `PUT /v1/public-egress-policy` |
+| This control plane's loops | `GET /v1/control-plane/status` |
 
-#[tokio::main]
-async fn main() {
-    if let Err(error) = fenders_control_plane::server::run(&CONSOLE).await {
-        eprintln!("{error}");
-        std::process::exit(1);
-    }
-}
-```
+Everything else is the tenant API of section 5, which the operator
+credential may also call. There is no third set: a path in neither is
+answered `404` to everyone.
 
-For people signing in to such a console, `--browser-auth FILE` configures an
-OIDC provider; sessions then reach the same API with a cookie and a CSRF
-token. Without the flag, sign-in is off and only bearer credentials work.
+## Building a console on it
+
+Fenders has no people in it: no sign-in, no sessions, no users, roles or
+invitations, and it serves no pages. A console is a program of yours that
+knows its own users and calls this API.
+
+- Your backend holds the operator credential. It creates a tenant for a
+  customer and issues that tenant's keys.
+- What a user may do is yours to decide. Issue a key with exactly the
+  permissions you decided on, for the tenant or one project of it, and
+  give it a short `ttl_seconds`; re-issue as your sessions renew.
+- Say who the key is for in its `label`, one line of at most 128 bytes that
+  Fenders does not interpret:
+
+  ```sh
+  POST /v1/tenants/TENANT/api-keys
+  {"name": "console", "permissions": ["read", "runs:write"], "ttl_seconds": 900,
+   "label": "user:4f2a alice@example.test"}
+  ```
+
+  Every audit record of a change a key makes carries its label, and
+  `GET /v1/me` with the key returns it. That is how actions lead back to
+  your users.
+- A key cannot issue, list or revoke keys, whatever it holds: those are the
+  operator's.
 
 ## Limits
 

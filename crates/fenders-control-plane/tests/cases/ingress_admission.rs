@@ -4,29 +4,7 @@ use super::*;
 async fn a_workspaces_request_limits_are_its_plans_and_admission_is_audited_once_a_minute() {
     let l = Lab::new().await;
     let node = l.node("rate-worker").await;
-    let op = l
-        .store
-        .create_workload(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"web","spec":{"artifact_id":l.artifact}}),
-            "web",
-            true,
-        )
-        .await
-        .unwrap();
-    let route = l
-        .store
-        .create_route(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"web","deployment_id":op["resource_id"]}),
-            "apps.test",
-        )
-        .await
-        .unwrap();
+    let route = l.web_app("web", "apps.test").await;
     l.store.schedule().await.unwrap();
     let all = l
         .store
@@ -121,29 +99,7 @@ async fn a_workspaces_request_limits_are_its_plans_and_admission_is_audited_once
 async fn requests_that_cannot_be_admitted_are_refused_without_the_mutation_lock() {
     let l = Lab::new().await;
     let node = l.node("gate-worker").await;
-    let op = l
-        .store
-        .create_workload(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"web","spec":{"artifact_id":l.artifact}}),
-            "web",
-            true,
-        )
-        .await
-        .unwrap();
-    let route = l
-        .store
-        .create_route(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            json!({"name":"web","deployment_id":op["resource_id"]}),
-            "apps.test",
-        )
-        .await
-        .unwrap();
+    let route = l.web_app("web", "apps.test").await;
     l.store.schedule().await.unwrap();
     let all = l
         .store

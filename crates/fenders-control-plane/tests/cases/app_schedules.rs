@@ -712,15 +712,7 @@ async fn scheduled_allowance_waits_and_late_dispatch_failure_do_not_duplicate_re
         .unwrap();
     l.store.dispatch_schedule_runs().await.unwrap();
     assert_eq!(l.runs(&app).await["items"][0]["reason"], "missed-deadline");
-    l.store
-        .action(
-            &l.operator,
-            &l.tenant,
-            &l.project,
-            s(&external["resource_id"]),
-            "stop",
-            "stop-external",
-        )
+    l.stop(s(&external["resource_id"]), "stop-external")
         .await
         .unwrap();
     l.schedule_edit(&app, json!({"enabled":true}), "revision")

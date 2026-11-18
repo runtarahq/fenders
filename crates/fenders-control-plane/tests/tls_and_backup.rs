@@ -662,51 +662,12 @@ async fn real_database_backup_and_fenced_restore() {
             .await
             .unwrap();
     let key = root.path().join("key");
-    let customer = uid();
-    let membership = uid();
-    sqlx::query("INSERT INTO customer_users(id,issuer,subject) VALUES($1,'https://identity.test','restored-customer')").bind(&customer).execute(&source.pool).await.unwrap();
-    let disabled_customer = uid();
-    sqlx::query("INSERT INTO customer_users(id,issuer,subject) VALUES($1,'https://identity.test','suspended-customer')").bind(&disabled_customer).execute(&source.pool).await.unwrap();
-    let disabled_account = source
-        .update_customer_user(
-            &operator,
-            &disabled_customer,
-            json!({"disabled":true,"expected_revision":1}),
-        )
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO workspace_memberships(id,tenant_id,user_id,role) VALUES($1,$2,$3,'owner')",
-    )
-    .bind(&membership)
-    .bind(t)
-    .bind(&customer)
-    .execute(&source.pool)
-    .await
-    .unwrap();
     let source_cipher = fernet::Fernet::new(
         std::fs::read_to_string(root.path().join("source/encryption.key"))
             .unwrap()
             .trim(),
     )
     .unwrap();
-    sqlx::query("INSERT INTO browser_sessions(id,user_id,token_hash,csrf_hash,csrf_encrypted,expires,client_id,provider_iat) VALUES($1,$2,'fixture-session','fixture-csrf',$3,now()+interval '1 hour','backup',0)").bind(uid()).bind(&customer).bind(source_cipher.encrypt(b"fixture-csrf")).execute(&source.pool).await.unwrap();
-    // Invitations as the snapshot finds them: one open with its mail queued,
-    // one already accepted.
-    for (id, status, delivery) in [
-        ("i-open", "pending", "queued"),
-        ("i-done", "accepted", "sent"),
-    ] {
-        sqlx::query("INSERT INTO workspace_invitations(id,tenant_id,email,role,inviter_id,request_key,status) VALUES($1,$2,'invited@example.test','viewer',$3,$1,$4)")
-            .bind(id).bind(t).bind(&customer).bind(status).execute(&source.pool).await.unwrap();
-        sqlx::query("INSERT INTO invitation_outbox(invitation_id,state) VALUES($1,$2)")
-            .bind(id)
-            .bind(delivery)
-            .execute(&source.pool)
-            .await
-            .unwrap();
-    }
-    sqlx::query("INSERT INTO browser_logins(state_hash,browser_hash,context_hash,nonce_encrypted,pkce_encrypted) VALUES('fixture-state','fixture-browser','fixture-context',$1,$2)").bind(source_cipher.encrypt(b"fixture-nonce")).bind(source_cipher.encrypt(b"fixture-pkce")).execute(&source.pool).await.unwrap();
     sqlx::query("INSERT INTO usage_samples(execution_id,generation,sequence,tenant_id,cpu_usec,memory_bytes,cpu_measured,memory_measured,observed) SELECT $1,1,n,$2,CASE WHEN n=200 THEN 9999 ELSE n END,n,n<600,n<600,now()-interval '1 day'+n*interval '1 second' FROM generate_series(1,600) n").bind(&log_execution).bind(t).execute(&source.pool).await.unwrap();
     sqlx::query("INSERT INTO usage_compaction_queue(execution_id) VALUES($1)")
         .bind(&log_execution)
@@ -1060,46 +1021,6 @@ async fn real_database_backup_and_fenced_restore() {
         source_cipher.decrypt(&endpoint_ciphertext).unwrap()
     );
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT user_id FROM workspace_memberships WHERE id=$1")
-            .bind(&membership)
-            .fetch_one(&target.pool)
-            .await
-            .unwrap(),
-        customer
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT (SELECT count(*) FROM browser_sessions)+(SELECT count(*) FROM browser_logins)"
-        )
-        .fetch_one(&target.pool)
-        .await
-        .unwrap(),
-        0
-    );
-    // An invitation open at the snapshot is withdrawn and its mail is not
-    // sent; one already decided is as it was.
-    let invitations: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT i.id,i.status,o.state FROM workspace_invitations i JOIN invitation_outbox o ON o.invitation_id=i.id ORDER BY i.id",
-    )
-    .fetch_all(&target.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        invitations,
-        [
-            (
-                "i-done".to_owned(),
-                "accepted".to_owned(),
-                "sent".to_owned()
-            ),
-            (
-                "i-open".to_owned(),
-                "revoked".to_owned(),
-                "cancelled".to_owned()
-            ),
-        ]
-    );
-    assert_eq!(
         target
             .usage_history(&operator, t, Some(p), Default::default())
             .await
@@ -1109,25 +1030,6 @@ async fn real_database_backup_and_fenced_restore() {
             .last()
             .unwrap(),
         &old_accounting
-    );
-    assert_eq!(
-        target
-            .customer_user(&operator, &disabled_customer)
-            .await
-            .unwrap(),
-        disabled_account
-    );
-    assert_eq!(
-        target
-            .update_customer_user(
-                &operator,
-                &disabled_customer,
-                json!({"disabled":false,"expected_revision":2})
-            )
-            .await
-            .unwrap_err()
-            .status,
-        StatusCode::SERVICE_UNAVAILABLE
     );
     let saved_egress = target.usage(&operator, t, Some(p)).await.unwrap();
     assert_eq!(saved_egress["totals"]["egress_bytes"], 12345);
@@ -1688,37 +1590,40 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
         )
         .await
         .unwrap();
+    // An app with a URL, deployed as a tenant deploys one, once the node has
+    // inspected its component.
+    let job = store
+        .claim_component(node_id, json!({"boot_id":"fixture"}))
+        .await
+        .unwrap()["job"]
+        .clone();
+    store.component_result(node_id,a["id"].as_str().unwrap(),job["generation"].as_i64().unwrap(),json!({"boot_id":"fixture","inspection":{"format_version":1,"runtime":fenders_control_plane::artifacts::RUNTIME,"digest":a["digest"],"bytes":8,"command":false,"http":true,"imports":[],"exports":[]}})).await.unwrap();
     let op = store
-        .create_workload(
+        .deploy_app(
             &operator,
             tenant,
             project,
-            json!({"name":"web","spec":{"artifact_id":a["id"],"secret_env":{"TOKEN":secret["id"]}}}),
-            "web",
-            true,
+            fenders_control_plane::apps::AppSubmission {
+                value: json!({"name":"web","artifact_id":a["id"],"triggers":{"manual":false,"http":true},"configuration":{"secret_env":{"TOKEN":secret["id"]}}}),
+                key: "web",
+                domain: "apps.test",
+            },
         )
         .await
         .unwrap();
-    let route = store
-        .create_route(
-            &operator,
-            tenant,
-            project,
-            json!({"name":"web","deployment_id":op["resource_id"]}),
-            "apps.test",
-        )
-        .await
-        .unwrap();
+    let web = op["resource_id"].as_str().unwrap().to_owned();
+    let route =
+        json!({"hostname":fenders_control_plane::app_http::hostname(&web, "apps.test").unwrap()});
     store.schedule().await.unwrap();
     let executions = store
         .resources(&operator, tenant, project, "executions", None)
         .await
         .unwrap();
     store.heartbeat(node_id,json!({"boot_id":"fixture","confinement":fenders_control_plane::model::HOST_CONFINEMENT,"reports":[{"id":executions[0]["id"],"generation":1,"sequence":1,"state":"running","cpu_usec":0,"memory_bytes":0}]})).await.unwrap();
-    // An execution of no app takes its own requests; an app's take the app's.
+    // An app's executions take the app's requests.
     fixture_shim(
         store.clone(),
-        executions[0]["id"].as_str().unwrap().to_owned(),
+        web.clone(),
         executions[0]["id"].as_str().unwrap().to_owned(),
         redacting.clone(),
         ingress_calls.clone(),
@@ -1773,12 +1678,7 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
         2
     );
     let viewer = store
-        .issue_credential(
-            &operator,
-            tenant,
-            serde_json::from_value(json!({"name":"viewer","role":"viewer","project_id":project}))
-                .unwrap(),
-        )
+        .create_api_key(&operator, tenant, serde_json::from_value(json!({"name":"viewer","project_id":project,"permissions":["read"],"ttl_seconds":86400})).unwrap(), &uid())
         .await
         .unwrap();
     let management = api::management(api::ApiState {
@@ -1802,12 +1702,6 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
         .execute(&store.pool)
         .await
         .unwrap();
-    let job = store
-        .claim_component(node_id, json!({"boot_id":"fixture"}))
-        .await
-        .unwrap()["job"]
-        .clone();
-    store.component_result(node_id,a["id"].as_str().unwrap(),job["generation"].as_i64().unwrap(),json!({"boot_id":"fixture","inspection":{"format_version":1,"runtime":fenders_control_plane::artifacts::RUNTIME,"digest":a["digest"],"bytes":8,"command":false,"http":true,"imports":[],"exports":[]}})).await.unwrap();
     let demand=store.deploy_app(&operator,tenant,project,fenders_control_plane::apps::AppSubmission{value:json!({"name":"demand-gateway","artifact_id":a["id"],"configuration":{"keep_warm":false},"triggers":{"http":true,"manual":false}}),key:"demand-gateway",domain:"apps.test"}).await.unwrap();
     let demand_id = demand["resource_id"].as_str().unwrap();
     store.schedule().await.unwrap();

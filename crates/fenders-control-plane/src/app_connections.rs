@@ -401,27 +401,6 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) async fn independent_grant_source(
-        tx: &mut Tx,
-        kind: &str,
-        source: &str,
-    ) -> Result<()> {
-        let managed = if kind == "deployment" {
-            one(
-                tx,
-                "SELECT EXISTS(SELECT 1 FROM app_http WHERE deployment_id=$1) managed",
-                args![source],
-            )
-            .await?
-        } else {
-            one(tx,"SELECT EXISTS(SELECT 1 FROM app_runs WHERE execution_id=$1 UNION ALL SELECT 1 FROM app_http_attempts WHERE execution_id=$1) managed",args![source]).await?
-        };
-        if managed["managed"] == true {
-            return Err(conflict("access is managed by an app; use app connections"));
-        }
-        Ok(())
-    }
-
     pub(crate) async fn reconcile_app_connections(tx: &mut Tx) -> Result<()> {
         exec(tx,"UPDATE app_https_connections c SET state='revoked',updated=now() WHERE state='revoking' AND NOT EXISTS(SELECT 1 FROM app_execution_https x JOIN executions e ON e.id=x.execution_id WHERE x.connection_id=c.id AND e.reserved)",args![]).await?;
         exec(tx,"UPDATE app_endpoint_connections c SET state='revoked',updated=now() WHERE state='revoking' AND NOT EXISTS(SELECT 1 FROM app_execution_connections x JOIN executions e ON e.id=x.execution_id WHERE x.connection_id=c.id AND e.reserved)",args![]).await?;

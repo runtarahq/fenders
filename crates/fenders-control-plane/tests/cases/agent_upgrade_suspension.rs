@@ -1,7 +1,7 @@
 //! Real tenant lifecycle actions while no manager owns a sealed worker. The
 //! other tenants retain their original VMs/authority. Credentials stay private.
 use super::*;
-use fenders_control_plane::{apps::AppSubmission, operator_api};
+use fenders_control_plane::apps::AppSubmission;
 
 pub(super) struct Suspension {
     tenant: String,
@@ -17,6 +17,7 @@ pub(super) struct Suspension {
     customer_origin: String,
     operator: reqwest::Client,
     operator_url: String,
+    operator_token: String,
     actor: String,
     input: Value,
     receipt: Option<Value>,
@@ -26,36 +27,19 @@ pub(super) struct Suspension {
     deletion: bool,
     app_revision: i64,
     closed_authority: Option<Value>,
-    _bridge: Option<Task<()>>,
 }
 
-fn operator_client(pki: &Path, name: &str) -> reqwest::Client {
-    let mut pem = fs::read(pki.join(format!("{name}.pem"))).unwrap();
-    pem.push(b'\n');
-    pem.extend(fs::read(pki.join(format!("{name}.key"))).unwrap());
-    reqwest::Client::builder()
-        .https_only(true)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .tls_built_in_root_certs(false)
-        .add_root_certificate(
-            reqwest::Certificate::from_pem(&fs::read(pki.join("ca.pem")).unwrap()).unwrap(),
-        )
-        .identity(reqwest::Identity::from_pem(&pem).unwrap())
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap()
-}
 async fn post(
     client: &reqwest::Client,
     url: &str,
+    token: &str,
     actor: &str,
     input: &Value,
 ) -> (StatusCode, Value) {
     let response = client
         .post(url)
-        .header("X-Fenders-Operator", actor)
+        .bearer_auth(token)
+        .header("Idempotency-Key", actor)
         .header("Content-Type", "application/json")
         .body(input.to_string())
         .send()
@@ -136,14 +120,7 @@ impl Suspension {
         let project = s(&project["id"]).to_owned();
         let credential = l
             .store
-            .issue_credential(
-                &l.operator,
-                &tenant,
-                serde_json::from_value(
-                    json!({"name":"suspension-customer","role":"editor","project_id":project}),
-                )
-                .unwrap(),
-            )
+            .create_api_key(&l.operator, &tenant, serde_json::from_value(json!({"name":"suspension-customer","project_id":project,"permissions":["read","apps:write","runs:write","connections:write","secrets:write"],"ttl_seconds":86400})).unwrap(), &uid())
             .await
             .unwrap();
         let principal = l.store.authenticate(s(&credential["token"])).await.unwrap();
@@ -220,7 +197,7 @@ impl Suspension {
             .app(&principal, &tenant, &project, &app)
             .await
             .unwrap()["revision"]);
-        let (operator, operator_url, actor, input, bridge) = if deletion {
+        let (operator, operator_url, actor, input) = if deletion {
             let url = format!(
                 "{}/v1/tenants/{tenant}/projects/{project}/apps/{app}",
                 api.1
@@ -237,54 +214,27 @@ impl Suspension {
                 .await
                 .unwrap();
             assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
-            (api.0.clone(), url, actor, input, None)
+            (api.0.clone(), url, actor, input)
         } else {
-            let pki_dir = worker.output.join("suspension-pki");
-            let pins = pki::create(
-                &pki_dir,
-                &BTreeMap::from([
-                    ("bridge".into(), vec!["127.0.0.1".into()]),
-                    ("operator".into(), vec!["operator.test".into()]),
-                    ("worker".into(), vec!["worker.test".into()]),
-                ]),
-            )
-            .unwrap();
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let operator_url = format!(
-                "https://{}/operator/v1/workspaces.action",
-                listener.local_addr().unwrap()
-            );
-            let tls = transport::server_config(
-                &pki_dir.join("bridge.pem"),
-                &pki_dir.join("bridge.key"),
-                Some(&pki_dir.join("ca.pem")),
-            )
-            .unwrap();
-            let router = operator_api::router_with_controls(
-                l.store.clone(),
-                s(&pins["operator"]).into(),
-                true,
-            )
-            .unwrap();
-            let bridge = Task(tokio::spawn(async move {
-                transport::serve_tls(listener, tls, router).await.unwrap()
-            }));
-            let operator = operator_client(&pki_dir, "operator");
+            // A workspace's lifecycle is the operator's to change, on the
+            // operator's own API: the workspace's key is refused it.
+            let operator_url = format!("{}/v1/tenants/{tenant}/lifecycle", api.1);
             let actor = uid();
-            let input = json!({"id":tenant,"request_key":uid(),"action":"suspend","expected_revision":1,"reason":"Sealed handover acceptance fixture"});
+            let input = json!({"request_key":uid(),"action":"suspend","expected_revision":1,"reason":"Sealed handover acceptance fixture"});
             let wrong = post(
-                &operator_client(&pki_dir, "worker"),
+                &api.0,
                 &operator_url,
+                s(&credential["token"]),
                 &actor,
                 &input,
             )
             .await;
-            assert_eq!(wrong.0, StatusCode::UNAUTHORIZED);
+            assert_eq!(wrong.0, StatusCode::FORBIDDEN);
             assert_eq!(
                 workspace(l, &tenant).await,
                 json!({"state":"active","revision":1})
             );
-            (operator, operator_url, actor, input, Some(bridge))
+            (api.0.clone(), operator_url, actor, input)
         };
         Self {
             tenant,
@@ -300,6 +250,7 @@ impl Suspension {
             customer_origin: api.1,
             operator,
             operator_url,
+            operator_token: l.token.clone(),
             actor,
             input,
             receipt: None,
@@ -311,12 +262,18 @@ impl Suspension {
             deletion,
             app_revision,
             closed_authority: None,
-            _bridge: bridge,
         }
     }
     async fn submit(&self) -> (StatusCode, Value) {
         if !self.deletion {
-            return post(&self.operator, &self.operator_url, &self.actor, &self.input).await;
+            return post(
+                &self.operator,
+                &self.operator_url,
+                &self.operator_token,
+                &self.actor,
+                &self.input,
+            )
+            .await;
         }
         let response = self
             .customer

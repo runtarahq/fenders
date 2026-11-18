@@ -445,21 +445,72 @@ impl Lab {
         )
         .unwrap()
     }
+    /// A run of an app made for it, started as a tenant starts one. No node
+    /// here inspects components: the lab says of its own what one would.
     async fn create(&self) -> String {
+        sqlx::query("ALTER TABLE artifact_validations DROP CONSTRAINT IF EXISTS artifact_validations_check2")
+            .execute(&self.store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE artifact_validations v SET state='valid',lease_until=NULL,updated=now(),inspection=jsonb_build_object('format_version',1,'runtime',$2::text,'digest',a.digest,'bytes',a.size,'http',true,'command',true,'imports','[]'::jsonb,'exports','[]'::jsonb) FROM artifacts a WHERE a.id=v.artifact_id AND a.id=$1 AND v.state<>'valid'")
+            .bind(&self.artifact)
+            .bind(fenders_control_plane::artifacts::RUNTIME)
+            .execute(&self.store.pool)
+            .await
+            .unwrap();
+        let (p, t, project) = (&self.op, &self.tenant, &self.project);
+        let name = format!("run-{}", &uid()[..12]);
         let op = self
             .store
-            .create_workload(
-                &self.op,
-                &self.tenant,
-                &self.project,
-                json!({"spec":{"artifact_id":self.artifact}}),
+            .create_app(
+                p,
+                t,
+                project,
+                json!({"name":name,"artifact_id":self.artifact}),
                 &uid(),
-                false,
             )
             .await
             .unwrap();
+        let app = s(&op["resource_id"]).to_owned();
+        let versions = self
+            .store
+            .app_versions(p, t, project, &app, None)
+            .await
+            .unwrap();
+        self.store
+            .update_app_triggers(
+                p,
+                t,
+                project,
+                &app,
+                json!({"manual":true,"expected_revision":1}),
+                &uid(),
+            )
+            .await
+            .unwrap();
+        self.store
+            .activate_app_release(
+                p,
+                t,
+                project,
+                &app,
+                json!({"version_id":versions["items"][0]["id"],"expected_revision":1}),
+                &uid(),
+            )
+            .await
+            .unwrap();
+        let op = self
+            .store
+            .run_app(p, t, project, &app, &uid())
+            .await
+            .unwrap();
+        let run = self
+            .store
+            .app_run(p, t, project, &app, s(&op["resource_id"]))
+            .await
+            .unwrap();
         self.store.schedule().await.unwrap();
-        s(&op["resource_id"]).into()
+        s(&run["execution_id"]).into()
     }
     async fn execution(&self, id: &str) -> Value {
         self.store
@@ -473,9 +524,16 @@ impl Lab {
             .await
             .unwrap()
     }
-    async fn action(&self, id: &str, action: &str) {
+    /// Stops a run through its app, as a tenant does.
+    async fn stop(&self, id: &str) {
+        let (app, run): (String, String) =
+            sqlx::query_as("SELECT app_id,id FROM customer_app_runs WHERE execution_id=$1")
+                .bind(id)
+                .fetch_one(&self.store.pool)
+                .await
+                .unwrap();
         self.store
-            .action(&self.op, &self.tenant, &self.project, id, action, &uid())
+            .cancel_app_run(&self.op, &self.tenant, &self.project, &app, &run, &uid())
             .await
             .unwrap();
     }
@@ -616,7 +674,7 @@ async fn stop_in_commit_gap_cleans_up_before_releasing_reservation() {
     let agent = l.agent(400, 4096);
     assert!(agent.step().await.is_err());
     drop(agent);
-    l.action(&id, "stop").await;
+    l.stop(&id).await;
     assert_eq!(l.execution(&id).await["reserved"], true);
     let agent = l.agent(400, 4096);
     agent.step().await.unwrap();
@@ -633,7 +691,8 @@ async fn stop_in_commit_gap_cleans_up_before_releasing_reservation() {
 async fn local_capacity_rejects_assignment_before_launch() {
     let l = Lab::new().await;
     let id = l.create().await;
-    let agent = l.agent(25, 4096);
+    // Less of a CPU than the smallest app takes.
+    let agent = l.agent(10, 4096);
     agent.step().await.unwrap();
     agent.step().await.unwrap();
     assert!(l.fixture.list().unwrap().is_empty());
@@ -837,31 +896,6 @@ async fn on_demand_http_idle_and_wake_survive_agent_restart_without_duplicate_wo
     l.store.ingress_finish(&q1, Some(0)).await.unwrap();
     l.store.ingress_finish(&q2, Some(0)).await.unwrap();
     drop(a);
-    l.finish().await;
-}
-#[tokio::test]
-async fn busy_pause_is_reported_once_and_new_stop_generation_clears_error() {
-    let l = Lab::new().await;
-    let id = l.create().await;
-    let agent = l.agent(400, 4096);
-    agent.step().await.unwrap();
-    agent.step().await.unwrap();
-    l.fixture.busy.store(true, Ordering::SeqCst);
-    l.action(&id, "pause").await;
-    agent.step().await.unwrap();
-    agent.step().await.unwrap();
-    assert_eq!(
-        agent.reports().unwrap()[0]["action_error"],
-        "application-busy"
-    );
-    l.action(&id, "stop").await;
-    agent.step().await.unwrap();
-    let report = agent.reports().unwrap();
-    assert!(report[0]["action_error"].is_null());
-    assert_eq!(report[0]["state"], "stopped");
-    agent.step().await.unwrap();
-    assert_eq!(l.execution(&id).await["reserved"], false);
-    drop(agent);
     l.finish().await;
 }
 #[tokio::test]

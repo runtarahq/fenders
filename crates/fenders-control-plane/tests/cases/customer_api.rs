@@ -26,7 +26,7 @@ async fn call(
     (status, serde_json::from_slice(&body).unwrap())
 }
 async fn key(l: &Lab, scope: Option<&str>, permissions: &[&str]) -> Value {
-    let (status, value) = call(l, &l.token, "POST", &format!("/v1/workspaces/{}/api-keys", l.tenant),
+    let (status, value) = call(l, &l.token, "POST", &format!("/v1/tenants/{}/api-keys", l.tenant),
         json!({"name":"automation","project_id":scope,"permissions":permissions,"ttl_seconds":3600}), &uid()).await;
     assert_eq!(status, StatusCode::CREATED, "{value}");
     value
@@ -126,7 +126,7 @@ async fn customer_api_keys_limit_aliases_and_revalidate_revocation() {
 #[tokio::test]
 async fn customer_api_key_and_project_retries_do_not_duplicate_or_reveal_keys() {
     let l = Lab::new().await;
-    let route = format!("/v1/workspaces/{}/api-keys", l.tenant);
+    let route = format!("/v1/tenants/{}/api-keys", l.tenant);
     let request = json!({"name":"pipeline","project_id":null,"permissions":["read","projects:write"],"ttl_seconds":3600});
     let (a, b) = tokio::join!(
         call(&l, &l.token, "POST", &route, request.clone(), "issue"),
@@ -484,140 +484,359 @@ async fn customer_api_connections_resolve_both_protocols_atomically_without_gran
     l.finish().await;
 }
 
-/// A credential lives no longer than the one that issued it, and ends when
-/// that one is revoked, or when the member who issued it is removed or their
-/// account disabled.
+/// A run that has not ended is stopped by a key that may run, through the
+/// app it is a run of.
 #[tokio::test]
-async fn credentials_end_with_whoever_issued_them() {
+async fn a_run_is_cancelled_through_its_app_by_a_key_that_may_run() {
     let l = Lab::new().await;
-    let issue = |by: Principal, ttl: i64| {
-        let store = l.store.clone();
-        let tenant = l.tenant.clone();
-        async move {
-            let v = store
-                .issue_credential(
-                    &by,
-                    &tenant,
-                    serde_json::from_value(
-                        json!({"name":"line","role":"owner","project_id":null,"ttl_seconds":ttl}),
-                    )
-                    .unwrap(),
-                )
+    let node = l.node("compiler").await;
+    approve_component(&l, &node, false, true).await;
+    let deployer = key(&l, Some(&l.project), &["read", "apps:write"]).await;
+    let runner = key(&l, Some(&l.project), &["read", "runs:write"]).await;
+    let observer = key(&l, Some(&l.project), &["read"]).await;
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
+    let mut apps = Vec::new();
+    for name in ["cancel-one", "cancel-two"] {
+        let (status, op) = call(
+            &l,
+            s(&deployer["token"]),
+            "POST",
+            &(base.clone() + "/apps/deploy"),
+            json!({"name":name,"artifact_id":l.artifact,"triggers":{"manual":true,"http":false}}),
+            &uid(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{op}");
+        apps.push(s(&op["resource_id"]).to_owned());
+    }
+    let runs = format!("{base}/apps/{}/runs", apps[0]);
+    let (status, started) = call(&l, s(&runner["token"]), "POST", &runs, json!({}), &uid()).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let run: String = sqlx::query_scalar("SELECT id FROM customer_app_runs WHERE app_id=$1")
+        .bind(&apps[0])
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    let cancel = format!("{runs}/{run}/cancel");
+    // Not by a key that only reads or only deploys, and not through another app.
+    for k in [&observer, &deployer] {
+        assert_eq!(
+            call(&l, s(&k["token"]), "POST", &cancel, json!({}), &uid())
                 .await
-                .unwrap();
-            (store.authenticate(s(&v["token"])).await.unwrap(), v)
-        }
-    };
-    let expires = |id: &str| {
-        let (pool, id) = (l.store.pool.clone(), id.to_owned());
-        async move {
-            sqlx::query_scalar::<_, f64>(
-                "SELECT extract(epoch FROM expires)::float8 FROM credentials WHERE id=$1",
-            )
-            .bind(id)
-            .fetch_one(&pool)
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let other = format!("{base}/apps/{}/runs/{run}/cancel", apps[1]);
+    assert_eq!(
+        call(&l, s(&runner["token"]), "POST", &other, json!({}), &uid())
             .await
-            .unwrap()
-        }
-    };
-    // Two minutes from the operator; thirty days asked of it, and of that.
-    let (parent, parent_row) = issue(l.operator.clone(), 120).await;
-    let (child, child_row) = issue(parent.clone(), 2_592_000).await;
-    let (_, grandchild_row) = issue(child.clone(), 2_592_000).await;
-    let limit = expires(s(&parent_row["id"])).await;
-    assert_eq!(expires(s(&child_row["id"])).await, limit);
-    assert_eq!(expires(s(&grandchild_row["id"])).await, limit);
-    // An API key issued with a credential ends with it too.
-    let (status, key) = call(
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let request = uid();
+    let (status, stopped) = call(
         &l,
-        s(&child_row["token"]),
+        s(&runner["token"]),
         "POST",
-        &format!("/v1/workspaces/{}/api-keys", l.tenant),
-        json!({"name":"automation","project_id":null,"permissions":["read"],"ttl_seconds":2592000}),
+        &cancel,
+        json!({}),
+        &request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{stopped}");
+    // The same request again is the same answer, not a second stop.
+    assert_eq!(
+        call(
+            &l,
+            s(&runner["token"]),
+            "POST",
+            &cancel,
+            json!({}),
+            &request
+        )
+        .await
+        .1,
+        stopped
+    );
+    let (status, after) = call(
+        &l,
+        s(&observer["token"]),
+        "GET",
+        &format!("{runs}/{run}"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        matches!(s(&after["state"]), "cancelled" | "stopped"),
+        "{after}"
+    );
+    // A run that ended has nothing left to stop.
+    assert_eq!(
+        call(&l, s(&runner["token"]), "POST", &cancel, json!({}), &uid())
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    l.finish().await;
+}
+
+/// Every route is one a tenant's key may be given, or one of the operator's
+/// own: tenants and their keys, what a tenant is allowed, suspending one,
+/// the nodes, the public egress policy and this control plane's own status.
+/// What lay beneath the app API answers nobody, the operator included.
+#[tokio::test]
+async fn the_operator_has_its_own_routes_and_no_others() {
+    let l = Lab::new().await;
+    let t = format!("/v1/tenants/{}", l.tenant);
+    let p = format!("{t}/projects/{}", l.project);
+    let id = uid();
+    for (method, path) in [
+        ("POST", format!("{p}/executions")),
+        ("POST", format!("{p}/deployments")),
+        ("PATCH", format!("{p}/deployments/{id}")),
+        ("POST", format!("{p}/executions/{id}/stop")),
+        ("POST", format!("{p}/executions/{id}/pause")),
+        ("POST", format!("{p}/grants")),
+        ("POST", format!("{p}/grants/{id}/revoke")),
+        ("POST", format!("{p}/routes")),
+        ("GET", format!("{p}/executions")),
+        ("GET", format!("{p}/executions/{id}")),
+        ("GET", format!("{p}/deployments")),
+        ("GET", format!("{p}/grants")),
+        ("GET", format!("{p}/routes")),
+        ("GET", format!("{p}/networks")),
+        ("GET", format!("{t}/settings")),
+        ("PATCH", format!("{t}/settings")),
+        ("GET", format!("{t}/credentials")),
+        ("POST", format!("{t}/credentials")),
+        ("GET", "/v1/anything-else".to_owned()),
+    ] {
+        let (status, body) = call(&l, &l.token, method, &path, json!({}), &uid()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+    }
+    // Its own answer to the operator, and to no key whatever the key holds.
+    let every = [
+        "read",
+        "apps:write",
+        "runs:write",
+        "projects:write",
+        "connections:write",
+        "secrets:write",
+    ];
+    let holder = key(&l, None, &every).await;
+    for (method, path) in [
+        ("POST", "/v1/tenants".to_owned()),
+        ("PATCH", t.clone()),
+        ("PATCH", format!("{t}/http-limits")),
+        ("POST", format!("{t}/lifecycle")),
+        ("GET", format!("{t}/api-keys")),
+        ("POST", format!("{t}/api-keys")),
+        ("DELETE", format!("{t}/api-keys/{id}")),
+        ("GET", "/v1/nodes".to_owned()),
+        ("POST", "/v1/nodes".to_owned()),
+        ("PATCH", format!("/v1/nodes/{id}")),
+        ("GET", "/v1/public-egress-policy".to_owned()),
+        ("PUT", "/v1/public-egress-policy".to_owned()),
+        ("GET", "/v1/control-plane/status".to_owned()),
+    ] {
+        let segments: Vec<_> = path.trim_matches('/').split('/').collect();
+        assert!(
+            fenders_control_plane::customer_api::operators(method, &segments),
+            "{method} {path}"
+        );
+        assert!(
+            fenders_control_plane::customer_api::permission(method, &segments).is_none(),
+            "{method} {path}"
+        );
+        let (status, _) = call(&l, s(&holder["token"]), method, &path, json!({}), &uid()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "a key: {method} {path}");
+        let (status, _) = call(&l, &l.token, method, &path, json!({}), &uid()).await;
+        assert!(
+            !matches!(status, StatusCode::NOT_FOUND if !path.contains(&id))
+                && status != StatusCode::FORBIDDEN
+                && status != StatusCode::UNAUTHORIZED,
+            "the operator: {method} {path}: {status}"
+        );
+    }
+    l.finish().await;
+}
+
+/// A tenant's keys are the operator's to issue, list and revoke. A key does
+/// what its permissions say and cannot make another, whatever it holds.
+#[tokio::test]
+async fn a_tenants_keys_are_the_operators_to_issue() {
+    let l = Lab::new().await;
+    let every = [
+        "read",
+        "apps:write",
+        "runs:write",
+        "projects:write",
+        "connections:write",
+        "secrets:write",
+    ];
+    let ask = json!({"name":"line","project_id":null,"permissions":every,"ttl_seconds":3600});
+    let key = l
+        .store
+        .create_api_key(
+            &l.operator,
+            &l.tenant,
+            serde_json::from_value(ask.clone()).unwrap(),
+            &uid(),
+        )
+        .await
+        .unwrap();
+    let holder = l.store.authenticate(s(&key["token"])).await.unwrap();
+    assert_eq!(holder.role, Role::Key);
+    assert_eq!(key["created_by"], l.operator.id);
+    // With every permission there is, it makes, lists and revokes none.
+    for refused in [
+        l.store
+            .create_api_key(
+                &holder,
+                &l.tenant,
+                serde_json::from_value(ask.clone()).unwrap(),
+                &uid(),
+            )
+            .await,
+        l.store.api_keys(&holder, &l.tenant).await,
+        l.store
+            .revoke_credential(&holder, &l.tenant, s(&key["id"]))
+            .await,
+    ] {
+        assert_eq!(refused.unwrap_err().status, StatusCode::FORBIDDEN);
+    }
+    // Nor over the API, on the operator's route or the workspace's name for it.
+    for path in [
+        format!("/v1/tenants/{}/api-keys", l.tenant),
+        format!("/v1/workspaces/{}/api-keys", l.tenant),
+    ] {
+        let (status, _) = call(&l, s(&key["token"]), "POST", &path, ask.clone(), &uid()).await;
+        assert!(
+            matches!(status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+            "{path}: {status}"
+        );
+    }
+    // The operator does all three, and a revoked key stops at once.
+    let (status, second) = call(
+        &l,
+        &l.token,
+        "POST",
+        &format!("/v1/tenants/{}/api-keys", l.tenant),
+        ask.clone(),
         &uid(),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{key}");
-    assert_eq!(expires(s(&key["id"])).await, limit);
-    // The operator's own are as long as asked.
-    let (_, long) = issue(l.operator.clone(), 2_592_000).await;
-    assert!(expires(s(&long["id"])).await > limit + 29.0 * 86400.0);
-
-    // Revoking the parent ends the whole line, and nothing beside it.
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    assert_eq!(
+        l.store.api_keys(&l.operator, &l.tenant).await.unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     l.store
-        .revoke_credential(&l.operator, &l.tenant, s(&parent_row["id"]))
+        .revoke_credential(&l.operator, &l.tenant, s(&key["id"]))
         .await
         .unwrap();
-    for token in [&parent_row, &child_row, &grandchild_row, &key] {
-        assert_eq!(
-            l.store
-                .authenticate(s(&token["token"]))
-                .await
-                .unwrap_err()
-                .status,
-            StatusCode::UNAUTHORIZED
-        );
+    assert_eq!(
+        l.store
+            .authenticate(s(&key["token"]))
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(l.store.authenticate(s(&second["token"])).await.is_ok());
+    // No role of a person is a credential's kind.
+    for role in ["owner", "editor", "viewer"] {
+        let refused = sqlx::query("INSERT INTO credentials(id,token_hash,tenant_id,name,role,expires) VALUES($1,$2,$3,'role',$4,now()+interval '1 hour')")
+            .bind(uid()).bind(uid()).bind(&l.tenant).bind(role).execute(&l.store.pool).await;
+        assert!(refused.is_err(), "{role}");
     }
-    assert!(l.store.authenticate(s(&long["token"])).await.is_ok());
+    l.finish().await;
+}
 
-    // A member who issued credentials while an owner: removed, or disabled.
-    let member_with_key = |name: &'static str| {
-        let l = &l;
-        let issue = &issue;
+/// A key carries a label its issuer chose, and every change the key makes
+/// is recorded with it: a product built on the API reads its own users back
+/// out of the audit trail, of which the API knows nothing.
+#[tokio::test]
+async fn a_keys_label_is_recorded_with_what_it_does() {
+    let l = Lab::new().await;
+    let issue = |label: Value| {
+        let (store, operator, tenant) = (l.store.clone(), l.operator.clone(), l.tenant.clone());
         async move {
-            let (user, membership) = (uid(), uid());
-            sqlx::query("INSERT INTO customer_users(id,issuer,subject) VALUES($1,'https://identity.test',$2)")
-                .bind(&user).bind(name).execute(&l.store.pool).await.unwrap();
-            sqlx::query("INSERT INTO workspace_memberships(id,tenant_id,user_id,role) VALUES($1,$2,$3,'owner')")
-                .bind(&membership).bind(&l.tenant).bind(&user).execute(&l.store.pool).await.unwrap();
-            // As `create_api_key` and `issue_credential` record it for a
-            // browser session of theirs.
-            let (issued, row) = issue(l.operator.clone(), 3600).await;
-            sqlx::query("UPDATE credentials SET created_by=$1 WHERE id=$2")
-                .bind(&user)
-                .bind(s(&row["id"]))
-                .execute(&l.store.pool)
+            store
+                .create_api_key(
+                    &operator,
+                    &tenant,
+                    serde_json::from_value(json!({"name":"console","project_id":null,"permissions":["read","secrets:write"],"ttl_seconds":3600,"label":label})).unwrap(),
+                    &uid(),
+                )
                 .await
-                .unwrap();
-            // And one issued with that in turn.
-            let (_, second) = issue(issued, 3600).await;
-            (user, membership, row, second)
         }
     };
-    // Another owner stays, so the last-owner rule allows the changes.
-    let _staying = member_with_key("staying").await;
-    let (_, membership, first, second) = member_with_key("removed").await;
-    l.store
-        .update_member(
-            &l.operator,
-            &l.tenant,
-            &membership,
-            json!({"revoked":true,"expected_revision":1}),
+    let labelled = issue(json!("user:4f2a alice@example.test")).await.unwrap();
+    let plain = issue(Value::Null).await.unwrap();
+    assert_eq!(labelled["label"], "user:4f2a alice@example.test");
+    assert!(plain["label"].is_null());
+    // It is what the key says of itself, and what a listing says of it.
+    let (status, me) = call(&l, s(&labelled["token"]), "GET", "/v1/me", json!({}), "").await;
+    assert_eq!(
+        (status, &me["label"]),
+        (StatusCode::OK, &json!("user:4f2a alice@example.test"))
+    );
+    let listed = l.store.api_keys(&l.operator, &l.tenant).await.unwrap();
+    assert!(
+        listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["label"] == "user:4f2a alice@example.test")
+    );
+    // A change each key makes, and one the operator makes.
+    let path = format!("/v1/tenants/{}/projects/{}/secrets", l.tenant, l.project);
+    for (token, name) in [
+        (s(&labelled["token"]), "by-labelled"),
+        (s(&plain["token"]), "by-plain"),
+        (l.token.as_str(), "by-operator"),
+    ] {
+        let (status, body) = call(
+            &l,
+            token,
+            "POST",
+            &path,
+            json!({"name":name,"value":"a value"}),
+            &uid(),
         )
-        .await
-        .unwrap();
-    let (user, _, third, fourth) = member_with_key("disabled").await;
-    l.store
-        .update_customer_user(
-            &l.operator,
-            &user,
-            json!({"disabled":true,"expected_revision":1}),
-        )
-        .await
-        .unwrap();
-    for token in [&first, &second, &third, &fourth] {
-        assert_eq!(
-            l.store
-                .authenticate(s(&token["token"]))
-                .await
-                .unwrap_err()
-                .status,
-            StatusCode::UNAUTHORIZED
-        );
+        .await;
+        assert!(status.is_success(), "{name}: {body}");
     }
-    // The owner who stayed keeps theirs.
-    assert!(l.store.authenticate(s(&_staying.2["token"])).await.is_ok());
-    assert!(l.store.authenticate(s(&long["token"])).await.is_ok());
+    let recorded: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT actor,actor_label FROM audit WHERE tenant_id=$1 AND action LIKE 'secret.%' ORDER BY sequence",
+    )
+    .bind(&l.tenant)
+    .fetch_all(&l.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded,
+        [
+            (
+                s(&labelled["id"]).to_owned(),
+                Some("user:4f2a alice@example.test".to_owned())
+            ),
+            (s(&plain["id"]).to_owned(), None),
+            (l.operator.id.clone(), None),
+        ]
+    );
+    // One line of at most 128 bytes.
+    for refused in [json!(""), json!("x".repeat(129)), json!("two\nlines")] {
+        assert!(issue(refused.clone()).await.is_err(), "{refused}");
+    }
+    assert!(issue(json!("x".repeat(128))).await.is_ok());
     l.finish().await;
 }
 
@@ -709,7 +928,7 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
         .bind(&l.tenant).execute(&l.store.pool).await.unwrap();
     sqlx::query("INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext) SELECT md5('s'||n),$1,$2,'s'||n,'\\x00' FROM generate_series(1,4096) n")
         .bind(&l.tenant).bind(&l.project).execute(&l.store.pool).await.unwrap();
-    sqlx::query("INSERT INTO credentials(id,token_hash,tenant_id,name,role,expires) SELECT md5('c'||n),md5('h'||n),$1,'c','viewer',now()+interval '1 hour' FROM generate_series(1,1024) n")
+    sqlx::query("INSERT INTO credentials(id,token_hash,tenant_id,name,role,expires) SELECT md5('c'||n),md5('h'||n),$1,'c','key',now()+interval '1 hour' FROM generate_series(1,1024) n")
         .bind(&l.tenant).execute(&l.store.pool).await.unwrap();
     let quota = StatusCode::TOO_MANY_REQUESTS;
     let project = |name: &'static str| {
@@ -733,13 +952,18 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
             .status,
         quota
     );
-    let issue = || {
-        l.store.issue_credential(
-            &l.operator,
-            &l.tenant,
-            serde_json::from_value(json!({"name":"more","role":"viewer","project_id":null}))
+    let issue = || async {
+        l.store
+            .create_api_key(
+                &l.operator,
+                &l.tenant,
+                serde_json::from_value(
+                    json!({"name":"more","project_id":null,"permissions":["read"],"ttl_seconds":86400}),
+                )
                 .unwrap(),
-        )
+                &uid(),
+            )
+            .await
     };
     assert_eq!(issue().await.unwrap_err().status, quota);
     // Credentials that open nothing any more do not count.
@@ -766,7 +990,8 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
             "POST",
             &path,
             json!({"name":"x","value":"value"}),
-            "",
+            // A key names each change it asks for.
+            &uid(),
         )
         .await
         .0;
@@ -778,7 +1003,7 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
         "POST",
         &path,
         json!({"name":"x","value":"value"}),
-        "",
+        &uid(),
     )
     .await;
     assert_eq!(status, quota);
@@ -891,16 +1116,10 @@ async fn a_secrets_ciphertext_opens_only_for_its_own_row() {
     let launch = |key: &'static str, id: String| {
         let l = &l;
         async move {
-            l.store
-                .create_workload(
-                    &l.operator,
-                    &l.tenant,
-                    &l.project,
-                    json!({"spec":{"artifact_id":l.artifact,"secret_env":{"TOKEN":id}}}),
-                    key,
-                    false,
-                )
-                .await
+            let app = l
+                .try_configured_app(json!({"secret_env":{"TOKEN":id}}))
+                .await?;
+            l.start_app(&app, key).await
         }
     };
     let (own, other) = (
