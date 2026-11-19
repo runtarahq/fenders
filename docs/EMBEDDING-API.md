@@ -222,6 +222,11 @@ A field it does not name may still be present: do not depend on one.
 Each run is a VM of its own with its own cgroup and uid on the node, and
 reaches only the destinations its app was given.
 
+`scripts/verify_management_api_live.sh` asks the rest of this page of a
+local environment (`scripts/local_env.sh up`): the probes, paging, what a
+refusal says, rotating and deleting, the audit trail, and removing a
+workspace.
+
 ## Whether it is up
 
 Two routes take no credential, at the root and not under `/v1`, for whatever

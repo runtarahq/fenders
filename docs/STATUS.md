@@ -46,6 +46,7 @@ as both control plane and node.
 | Area | What | Repeat it with |
 |---|---|---|
 | Embedding, two tenants | An operator credential creates tenants and scoped keys; each key uploads, deploys and runs; neither sees the other; no console is served | `scripts/verify_embedding_live.sh` |
+| The management API | The probes with no credential; one name for a workspace; lists by pages; refusals with a status and a code of their own; a secret rotated and given to a run; deletions refused while in use and made once not; the audit trail as a key and as the operator read it; a workspace suspended and deleted | `scripts/verify_management_api_live.sh` |
 | Commands | A command run through the workload API and a manual run of a deployed app, recorded with their exit | `scripts/verify_run_channel_live.sh` |
 | Run output | Standard output and error read through `GET …/apps/APP/logs`, with the values of the run's secrets masked | `scripts/verify_output_live.sh` |
 | Connections | An app reaches the TCP endpoints and public HTTPS origins it was given and nothing else; removing one stops the runs that hold it | `scripts/verify_connections_live.sh` |
