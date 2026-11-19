@@ -302,6 +302,19 @@ impl Store {
         allow_wait: bool,
         request: Option<(&str, &str)>,
     ) -> Result<(Option<Value>, String)> {
+        let admitted = self
+            .ingress_admit(hostname, request_bytes, allow_wait, request)
+            .await;
+        self.load.admission(admitted.is_ok());
+        admitted
+    }
+    async fn ingress_admit(
+        &self,
+        hostname: &str,
+        request_bytes: usize,
+        allow_wait: bool,
+        request: Option<(&str, &str)>,
+    ) -> Result<(Option<Value>, String)> {
         if request_bytes as u64 > MAX_REQUEST_BYTES {
             return Err(Error::new(
                 StatusCode::PAYLOAD_TOO_LARGE,

@@ -61,6 +61,8 @@ pub struct Store {
     pub api_rates: std::sync::Arc<crate::ingress::Rates>,
     /// Whose each gateway host name is, for refusing without a transaction.
     pub ingress_hosts: std::sync::Arc<crate::ingress::Hosts>,
+    /// What this process has done, counted.
+    pub load: std::sync::Arc<crate::load::Load>,
 }
 
 fn private_directory(path: &Path) -> Result<()> {
@@ -239,6 +241,7 @@ impl Store {
             exchange: Default::default(),
             http_rates: Default::default(),
             ingress_hosts: Default::default(),
+            load: Default::default(),
             api_rates: Default::default(),
             node_turns: Default::default(),
             sockets: Default::default(),
@@ -265,7 +268,12 @@ impl Store {
     }
     pub fn background_status(&self, p: &Principal) -> Result<Value> {
         p.operator()?;
-        self.background.snapshot()
+        let mut status = self.background.snapshot()?;
+        if let (Some(status), Value::Object(load)) = (status.as_object_mut(), self.load.snapshot())
+        {
+            status.extend(load);
+        }
+        Ok(status)
     }
     pub(crate) async fn snapshot(&self) -> Result<Tx> {
         self.begin_transaction(false, false, true).await
@@ -284,9 +292,11 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         if mutate {
+            let asked = std::time::Instant::now();
             sqlx::query("SELECT pg_advisory_xact_lock(184923781), set_config('fenders.mutation','true',true)")
                 .execute(&mut *tx)
                 .await?;
+            self.load.locked(asked.elapsed());
         }
         if !recovery {
             let barrier: Value =

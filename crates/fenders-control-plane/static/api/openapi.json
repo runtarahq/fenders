@@ -5977,7 +5977,7 @@
       },
       "ControlPlaneStatus": {
         "type": "object",
-        "description": "How this control plane's own loops are doing. A loop that runs is not proof that work is placed.",
+        "description": "How this control plane's own loops are doing, and what this process has done since it started. A loop that runs is not proof that work is placed.",
         "properties": {
           "process_id": {
             "type": "string",
@@ -6065,12 +6065,46 @@
                 "consecutive_failures"
               ]
             }
+          },
+          "database": {
+            "type": "object",
+            "description": "Transactions made under the lock all changes share, and the time they waited for it.",
+            "properties": {
+              "locked_transactions": {
+                "type": "integer"
+              },
+              "lock_wait_ms": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "locked_transactions",
+              "lock_wait_ms"
+            ]
+          },
+          "gateway": {
+            "type": "object",
+            "description": "Requests for HTTP apps the gateway admitted and refused.",
+            "properties": {
+              "admitted": {
+                "type": "integer"
+              },
+              "refused": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "admitted",
+              "refused"
+            ]
           }
         },
         "required": [
           "process_id",
           "uptime_ms",
-          "components"
+          "components",
+          "database",
+          "gateway"
         ]
       },
       "Me": {

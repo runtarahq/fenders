@@ -158,3 +158,38 @@ async fn requests_that_cannot_be_admitted_are_refused_without_the_mutation_lock(
     drop(holder);
     l.finish().await;
 }
+
+/// What a request costs is read by the operator: the transactions this
+/// process made under the mutation lock, and what its gateway admitted and
+/// refused.
+#[tokio::test]
+async fn the_status_counts_locked_transactions_and_admissions() {
+    let l = Lab::new().await;
+    let node = l.node("count-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    let hostname = s(&route["hostname"]);
+    let status = || l.store.background_status(&l.operator).unwrap();
+    let before = status();
+    let lease = l.store.ingress_start(hostname, 0).await.unwrap().1;
+    l.store.ingress_finish(&lease, Some(0)).await.unwrap();
+    assert!(l.store.ingress_start("nobody.apps.test", 0).await.is_err());
+    let after = status();
+    let grew = |part: &str, name: &str| n(&after[part][name]) - n(&before[part][name]);
+    assert_eq!(grew("gateway", "admitted"), 1);
+    assert_eq!(grew("gateway", "refused"), 1);
+    // Admitting and settling are each a transaction under the lock; the
+    // refusal of a host name that is nobody's is none.
+    assert_eq!(grew("database", "locked_transactions"), 2);
+    assert!(after["database"]["lock_wait_ms"].is_u64());
+    // A key is told nothing of it.
+    let (key, _) = l.credential("viewer", None).await;
+    assert!(l.store.background_status(&key).is_err());
+    l.finish().await;
+}
