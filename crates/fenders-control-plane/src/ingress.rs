@@ -320,17 +320,21 @@ impl Store {
             ));
         }
         // Refused without the mutation lock: a host name that is nobody's,
-        // and a workspace past its requests for this minute.
+        // and a workspace past its requests for this minute. Not asked
+        // while the database cannot be reached: what is known of the host
+        // name, below, decides.
         let whose = match self.ingress_hosts.get(hostname) {
+            _ if self.gateway.outage.down_for().is_some() => Some((String::new(), i64::MAX)),
             Some(whose) => whose,
-            None => {
-                let mut tx = self.transaction(false, false).await?;
-                let whose = optional(&mut tx,"SELECT t.id,t.http_requests_per_minute FROM tenants t WHERE t.id=COALESCE((SELECT tenant_id FROM routes WHERE hostname=$1 LIMIT 1),(SELECT tenant_id FROM app_http WHERE hostname=$1 LIMIT 1))",args![hostname]).await?
-                    .map(|row| (s(&row["id"]).to_owned(), n(&row["http_requests_per_minute"])));
-                drop(tx);
-                self.ingress_hosts.remember(hostname, whose.clone());
-                whose
-            }
+            None => match self.ingress_whose(hostname).await {
+                Ok(whose) => {
+                    self.ingress_hosts.remember(hostname, whose.clone());
+                    whose
+                }
+                // The database went away: what the gates know decides.
+                Err(error) if self.gateway.outage.failed(&error) => Some((String::new(), i64::MAX)),
+                Err(error) => return Err(error),
+            },
         };
         match whose {
             None => {
@@ -357,6 +361,11 @@ impl Store {
             let reservation = self.ingress_warm(&gate, request).await?;
             return Ok((Some(gate.route), reservation));
         }
+        // The cold path needs the database; while it cannot be reached it
+        // is refused at once rather than left to wait for a connection.
+        if self.gateway.outage.down_for().is_some() {
+            return Err(Error::database_unavailable());
+        }
         self.load.cold();
         // The request is counted as in flight from the moment it is
         // admitted; one that is not admitted after all is not.
@@ -369,10 +378,35 @@ impl Store {
         }
         admitted.map(|route| (route, reservation))
     }
+    /// Whose `hostname` is, and its workspace's requests a minute.
+    async fn ingress_whose(&self, hostname: &str) -> Result<Option<(String, i64)>> {
+        let mut tx = self.transaction(false, false).await?;
+        Ok(optional(&mut tx,"SELECT t.id,t.http_requests_per_minute FROM tenants t WHERE t.id=COALESCE((SELECT tenant_id FROM routes WHERE hostname=$1 LIMIT 1),(SELECT tenant_id FROM app_http WHERE hostname=$1 LIMIT 1))",args![hostname]).await?
+            .map(|row| (s(&row["id"]).to_owned(), n(&row["http_requests_per_minute"]))))
+    }
     /// What is to be known of `hostname` for its requests to be admitted
     /// in memory, read without the lock: `None` when nothing serves it, its
     /// workspace is not active, or its app's gate is closed.
     async fn gate_read(&self, hostname: &str) -> Result<Option<crate::gate::Gate>> {
+        // While the database cannot be reached, what was last read is
+        // believed, for as long as the outage is within its bound.
+        let outage = &self.gateway.outage;
+        let stale = || {
+            if outage.serving_stale() {
+                Ok(self.gateway.gates.stale(hostname))
+            } else {
+                Err(Error::database_unavailable())
+            }
+        };
+        if outage.down_for().is_some() {
+            return stale();
+        }
+        match self.gate_fetch(hostname).await {
+            Err(error) if outage.failed(&error) => stale(),
+            read => read,
+        }
+    }
+    async fn gate_fetch(&self, hostname: &str) -> Result<Option<crate::gate::Gate>> {
         let epoch = self.gateway.gates.epoch();
         let mut tx = self.transaction(false, false).await?;
         let Some(route) = Self::ingress_route(&mut tx, hostname).await? else {
@@ -433,6 +467,11 @@ impl Store {
         if let Some(want) = budgets.short(&key)
             && !self.lease_extend(&key, crate::lease::BLOCK, want).await
         {
+            // Run dry while the database cannot be reached: not the
+            // allowance's end, and to be asked again.
+            if self.gateway.outage.down_for().is_some() {
+                return Err(Error::database_unavailable());
+            }
             return Err(quota("transfer allowance exhausted"));
         }
         let reservation = uid();
@@ -713,6 +752,11 @@ impl Store {
                 .gates
                 .tenant_of(reservation)
                 .ok_or_else(Error::missing)?;
+            // While the database cannot be reached the workspace is as it
+            // was: nothing can suspend it.
+            if self.gateway.outage.serving_stale() {
+                return Ok(());
+            }
             let mut tx = self.transaction(false, false).await?;
             return Self::require_workspace_active(&mut tx, &tenant).await;
         }

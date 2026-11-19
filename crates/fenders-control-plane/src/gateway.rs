@@ -46,6 +46,9 @@ pub const FLUSH_EVERY: Duration = Duration::from_secs(1);
 const SESSION_TOUCH: Duration = Duration::from_secs(5);
 /// A session not touched for this long is a process that is gone.
 pub(crate) const SESSION_DEAD: &str = "15 seconds";
+/// The same, for the scheduler's grace after it could not reach the
+/// database.
+pub(crate) const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
 /// Ended requests waiting to be written. Past this the oldest is dropped.
 const MOST_WAITING: usize = 16384;
 /// Records written by one flush.
@@ -150,6 +153,8 @@ pub struct Gateway {
     /// One ask to extend a lease at a time: the others wait, and find it
     /// extended.
     extending: tokio::sync::Mutex<()>,
+    /// Whether the database can be reached ([`crate::outage`]).
+    pub outage: crate::outage::Outage,
 }
 
 impl Default for Gateway {
@@ -161,6 +166,7 @@ impl Default for Gateway {
             gates: Default::default(),
             launches: Default::default(),
             renewals: Default::default(),
+            outage: Default::default(),
             extending: Default::default(),
         }
     }
@@ -312,7 +318,16 @@ impl Store {
     /// One transaction, whatever it holds. What cannot be written is kept
     /// for the next flush.
     pub async fn flush_gateway(&self) -> Result<()> {
-        self.flush(false).await
+        let flushed = self.flush(false).await;
+        // The flush is what notices that the database is back: it tries
+        // every second, outage or not.
+        match &flushed {
+            Ok(()) => self.gateway.outage.reached(),
+            Err(error) => {
+                self.gateway.outage.failed(error);
+            }
+        }
+        flushed
     }
 
     /// The last flush of a gateway that is stopping: as any other, and
@@ -590,6 +605,11 @@ impl Store {
         if self.gateway.budgets.exhausted(key) {
             return false;
         }
+        // Not while the database cannot be reached: nothing is extended, and
+        // nothing waits for a connection that will not come.
+        if self.gateway.outage.down_for().is_some() {
+            return false;
+        }
         let want = want.max(need);
         let granted = async {
             let mut tx = self.gateway_transaction().await?;
@@ -603,7 +623,10 @@ impl Store {
                 self.gateway.budgets.granted(key, &period, granted, want);
                 self.gateway.budgets.has(key, need)
             }
-            Err(_) => false,
+            Err(error) => {
+                self.gateway.outage.failed(&error);
+                false
+            }
         }
     }
 

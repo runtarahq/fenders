@@ -6068,13 +6068,26 @@
           },
           "database": {
             "type": "object",
-            "description": "Transactions made under the lock all changes share, and the time they waited for it.",
+            "description": "Transactions made under the lock all changes share, and the time they waited for it. reachable is whether this process's gateway last reached the database, and unreachable_ms for how long it has not.",
             "properties": {
               "locked_transactions": {
                 "type": "integer"
               },
               "lock_wait_ms": {
                 "type": "integer"
+              },
+              "reachable": {
+                "type": "boolean"
+              },
+              "unreachable_ms": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -6084,7 +6097,7 @@
           },
           "gateway": {
             "type": "object",
-            "description": "Requests for HTTP apps the gateway admitted and refused; of those, the ones that took the cold path, admission in a transaction under the lock all changes share, as a request to an app that is not serving does; and the request records it dropped because the database did not take them in time. in_flight is the requests it has in flight now.",
+            "description": "Requests for HTTP apps the gateway admitted and refused; of those, the ones that took the cold path, admission in a transaction under the lock all changes share, as a request to an app that is not serving does; and the request records it dropped because the database did not take them in time. in_flight is the requests it has in flight now. serving_from_memory is whether, the database not being reached, it serves what it knew.",
             "properties": {
               "admitted": {
                 "type": "integer"
@@ -6100,6 +6113,9 @@
               },
               "in_flight": {
                 "type": "integer"
+              },
+              "serving_from_memory": {
+                "type": "boolean"
               }
             },
             "required": [

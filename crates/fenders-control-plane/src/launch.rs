@@ -139,6 +139,14 @@ impl Launches {
         );
     }
 
+    /// What was last read of a launch, however old: for while the database
+    /// cannot be reached.
+    pub fn stale(&self, execution: &str, generation: i64) -> Option<Launch> {
+        self.lock()
+            .get(&(execution.to_owned(), generation))
+            .map(|(launch, ..)| launch.clone())
+    }
+
     /// Nothing is believed of any launch any more.
     pub fn forget_all(&self) {
         self.lock().clear();

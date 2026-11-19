@@ -90,6 +90,11 @@ pub struct Store {
     pub gateway: std::sync::Arc<crate::gateway::Gateway>,
     /// What this process serves.
     pub serves: Serves,
+    /// Whether the scheduler failed a pass, and since when it has passed
+    /// again: sessions are not taken for dead until it has for as long as
+    /// one may go unflushed ([`crate::gateway::SESSION_DEAD`]). `None` when
+    /// nothing failed.
+    pub(crate) recovering: std::sync::Arc<std::sync::Mutex<Option<Option<std::time::Instant>>>>,
     /// What this process has done, counted.
     pub load: std::sync::Arc<crate::load::Load>,
 }
@@ -340,6 +345,7 @@ impl Store {
             ingress_hosts: Default::default(),
             gateway: Default::default(),
             serves: Serves::All,
+            recovering: Default::default(),
             load: Default::default(),
             api_rates: Default::default(),
             node_turns: Default::default(),
@@ -433,6 +439,14 @@ impl Store {
         }));
         Ok(self)
     }
+    /// How long an edge serves from what it knows while the database
+    /// cannot be reached (E11). Set before the store is shared.
+    pub fn with_outage_bound(mut self, bound: Duration) -> Self {
+        if let Some(gateway) = std::sync::Arc::get_mut(&mut self.gateway) {
+            gateway.outage = crate::outage::Outage::new(bound);
+        }
+        self
+    }
     pub fn serving(mut self, serves: Serves) -> Self {
         self.serves = serves;
         self
@@ -458,6 +472,10 @@ impl Store {
             status.extend(load);
             status["gateway"]["records_dropped"] = json!(self.gateway.dropped());
             status["gateway"]["in_flight"] = json!(self.gateway.gates.in_flight_total());
+            let down = self.gateway.outage.down_for();
+            status["database"]["reachable"] = json!(down.is_none());
+            status["database"]["unreachable_ms"] = json!(down.map(|d| d.as_millis() as u64));
+            status["gateway"]["serving_from_memory"] = json!(self.gateway.outage.serving_stale());
         }
         Ok(status)
     }

@@ -63,6 +63,10 @@ struct Args {
     /// The CA the edges' gateway certificate leads to, when not --ca.
     #[arg(long)]
     gateway_ca: Option<PathBuf>,
+    /// How long the gateway and the run channel serve what they know while
+    /// the database cannot be reached, in seconds.
+    #[arg(long, default_value_t = 600)]
+    serve_stale_seconds: u64,
     /// What this process serves: everything (`all`), the management API,
     /// the scheduler and the nodes' peer (`control`), or the gateway and
     /// the run channel (`edge`, with `--state` holding what `fenders-keys
@@ -137,6 +141,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Serves::All
             })
     };
+    store = store.with_outage_bound(std::time::Duration::from_secs(args.serve_stale_seconds));
     if let Some(endpoint) = &args.run_channel_endpoint {
         let tls = tls
             .as_ref()

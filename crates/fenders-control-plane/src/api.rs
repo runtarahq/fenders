@@ -85,7 +85,9 @@ async fn edge_dispatch(State(store): State<Store>, req: Request) -> Result<Respo
     };
     match (method, parts.uri.path()) {
         ("GET", "/healthz") => Ok(Json(json!({"status":"ok"})).into_response()),
-        ("GET", "/readyz") => Ok(if store.ready().await {
+        // An edge is ready while it serves, from memory if it must: what
+        // watches it is to take it out only when it serves nothing.
+        ("GET", "/readyz") => Ok(if !store.gateway.outage.past_bound() {
             Json(json!({"status":"ready"})).into_response()
         } else {
             (

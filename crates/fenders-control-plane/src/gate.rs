@@ -176,6 +176,14 @@ impl Gates {
             .insert(hostname.to_owned(), (gate, Instant::now(), epoch));
     }
 
+    /// What was last read of `hostname`, however old, unless its app's gate
+    /// is closed: for while the database cannot be reached.
+    pub fn stale(&self, hostname: &str) -> Option<Gate> {
+        let inner = self.lock();
+        let (gate, _, _) = inner.gates.get(hostname)?;
+        (!inner.held(gate.app.as_ref())).then(|| gate.clone())
+    }
+
     /// Nothing is known of `hostname` any more.
     pub fn forget(&self, hostname: &str) {
         self.lock().gates.remove(hostname);

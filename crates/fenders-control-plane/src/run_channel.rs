@@ -259,6 +259,28 @@ impl Store {
             self.load.run_channel(false);
             return Ok(launch);
         }
+        // While the database cannot be reached, what was last read of the
+        // launch is believed, within the outage's bound.
+        let outage = &self.gateway.outage;
+        let stale = || match self.gateway.launches.stale(execution, generation) {
+            Some(launch) if outage.serving_stale() => Ok(launch),
+            _ => Err(Error::database_unavailable()),
+        };
+        if outage.down_for().is_some() {
+            self.load.run_channel(false);
+            return stale();
+        }
+        match self.launch_fetch(execution, generation, epoch).await {
+            Err(error) if outage.failed(&error) => stale(),
+            read => read,
+        }
+    }
+    async fn launch_fetch(
+        &self,
+        execution: &str,
+        generation: i64,
+        epoch: u64,
+    ) -> Result<crate::launch::Launch> {
         self.load.run_channel(true);
         let mut tx = self.transaction(false, false).await?;
         let row = optional(

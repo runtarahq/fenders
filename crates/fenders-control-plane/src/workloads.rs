@@ -385,6 +385,31 @@ impl Store {
         Ok(op)
     }
     pub async fn schedule(&self) -> Result<()> {
+        // After a pass that failed (the database could not be reached), no
+        // edge could touch its session either: they are not taken for dead
+        // until this has passed for as long as one may go untouched.
+        let expire_sessions = {
+            let mut recovering = self.recovering.lock().unwrap_or_else(|e| e.into_inner());
+            match *recovering {
+                None => true,
+                Some(None) => {
+                    *recovering = Some(Some(std::time::Instant::now()));
+                    false
+                }
+                Some(Some(since)) if since.elapsed() >= crate::gateway::SESSION_GRACE => {
+                    *recovering = None;
+                    true
+                }
+                Some(Some(_)) => false,
+            }
+        };
+        let passed = self.schedule_pass(expire_sessions).await;
+        if passed.is_err() {
+            *self.recovering.lock().unwrap_or_else(|e| e.into_inner()) = Some(None);
+        }
+        passed
+    }
+    async fn schedule_pass(&self, expire_sessions: bool) -> Result<()> {
         self.claim_schedule_occurrences().await?;
         self.dispatch_schedule_runs().await?;
         let mut tx = self.watched_transaction().await?;
@@ -392,7 +417,9 @@ impl Store {
         Self::retire_schedule_dispatch(&mut tx).await?;
         crate::placement::expire(&mut tx).await?;
         let expired = Self::expire_ingress(&mut tx).await?;
-        Self::expire_gateway_sessions(&mut tx).await?;
+        if expire_sessions {
+            Self::expire_gateway_sessions(&mut tx).await?;
+        }
         Self::expire_execution_logs(&mut tx).await?;
         Self::expire_app_events(&mut tx).await?;
         Self::compact_usage_backlog(&mut tx).await?;

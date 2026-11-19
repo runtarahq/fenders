@@ -61,6 +61,8 @@ mod http_runs;
 mod ingress_admission;
 #[path = "cases/key_rotation.rs"]
 mod key_rotation;
+#[path = "cases/outage.rs"]
+mod outage;
 #[path = "cases/placement.rs"]
 mod placement;
 #[path = "cases/placement_retention.rs"]

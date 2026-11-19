@@ -39,6 +39,7 @@ pub mod networking;
 pub mod nodes;
 pub mod observed;
 mod orphan_uploads;
+pub mod outage;
 pub mod pickup;
 pub mod pki;
 mod placement;
