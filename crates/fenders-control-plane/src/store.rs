@@ -471,6 +471,14 @@ impl Store {
         }
         self
     }
+    /// How long a flush may take, instead of [`crate::outage::FLUSH_WITHIN`]:
+    /// for tests.
+    pub fn with_flush_within(mut self, within: Duration) -> Self {
+        if let Some(gateway) = std::sync::Arc::get_mut(&mut self.gateway) {
+            gateway.flush_within = within;
+        }
+        self
+    }
     /// Requests of apps other edges own are passed to them with `forwarder`.
     pub fn with_forwarder(mut self, forwarder: crate::forward::Forwarder) -> Self {
         self.forwarder = Some(std::sync::Arc::new(forwarder));

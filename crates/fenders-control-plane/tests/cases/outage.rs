@@ -352,9 +352,13 @@ async fn a_lock_waited_for_too_long_is_busy_not_broken_nor_the_database_gone() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_flush_kept_waiting_for_the_lock_is_not_an_outage() {
     let l = Lab::new().await;
+    // A flush bounded by half a second, and the lock held for one: held
+    // no longer, as the lock is the whole database's, and other tests'
+    // too.
     let edge = Store::from_pool(l.store.pool.clone(), l.root.path())
         .unwrap()
-        .serving(Serves::Edge);
+        .serving(Serves::Edge)
+        .with_flush_within(std::time::Duration::from_millis(500));
     let mut holder = l.store.pool.begin().await.unwrap();
     sqlx::query("SELECT pg_advisory_xact_lock(184923781)")
         .execute(&mut *holder)

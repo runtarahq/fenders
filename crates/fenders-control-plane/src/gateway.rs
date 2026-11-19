@@ -167,6 +167,8 @@ pub struct Gateway {
     pub edge: Option<String>,
     /// Requests waiting together for an app to start ([`crate::wakes`]).
     pub wakes: std::sync::Arc<crate::wakes::Wakes>,
+    /// How long a flush may take ([`crate::outage::FLUSH_WITHIN`]).
+    pub(crate) flush_within: std::time::Duration,
 }
 
 impl Default for Gateway {
@@ -182,6 +184,7 @@ impl Default for Gateway {
             shares: Default::default(),
             edge: None,
             wakes: Default::default(),
+            flush_within: crate::outage::FLUSH_WITHIN,
             extending: Default::default(),
         }
     }
@@ -333,7 +336,7 @@ impl Store {
     /// One transaction, whatever it holds. What cannot be written is kept
     /// for the next flush.
     pub async fn flush_gateway(&self) -> Result<()> {
-        let flushed = crate::outage::within(crate::outage::FLUSH_WITHIN, self.flush(false)).await;
+        let flushed = crate::outage::within(self.gateway.flush_within, self.flush(false)).await;
         // The flush is what notices that the database is back: it tries
         // every second, outage or not.
         match &flushed {
