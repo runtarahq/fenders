@@ -12,6 +12,9 @@ use serde_json::{Value, json};
 /// workspace's limits has no room for it.
 const SHARE_SHORT: &str = "ingress allowance exhausted";
 
+/// What a cold admission tried without the lock answers when it needs it.
+const NEEDS_LOCK: &str = "the admission needs the mutation lock";
+
 /// The largest request body and the largest response body passed on.
 pub const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -408,9 +411,16 @@ impl Store {
         // The request is counted as in flight from the moment it is
         // admitted; one that is not admitted after all is not.
         let reservation = uid();
+        // A request that wakes an app is admitted without the lock when it
+        // can be: the scheduler wakes the app ([`Self::ingress_cold`]).
         let mut admitted = self
-            .ingress_cold(hostname, allow_wait, request, &reservation)
+            .ingress_cold(hostname, allow_wait, request, &reservation, false)
             .await;
+        if matches!(&admitted, Err(e) if e.message == NEEDS_LOCK) {
+            admitted = self
+                .ingress_cold(hostname, allow_wait, request, &reservation, true)
+                .await;
+        }
         // This process's share of the workspace's limits had no room for
         // it. With the lock let go, it waits for one the workspace has room
         // for, as a warm request does, and is admitted once more.
@@ -420,7 +430,7 @@ impl Store {
             self.gateway.gates.leave(&reservation);
             if self.share_with_room(&tenant).await {
                 admitted = self
-                    .ingress_cold(hostname, allow_wait, request, &reservation)
+                    .ingress_cold(hostname, allow_wait, request, &reservation, true)
                     .await;
             }
         }
@@ -640,9 +650,35 @@ impl Store {
         allow_wait: bool,
         request: Option<(&str, &str)>,
         reservation: &str,
+        locked: bool,
     ) -> Result<Option<Value>> {
+        // Without the lock, a request that waits for its app to start is
+        // admitted when nothing here needs it: it holds a reservation, and
+        // the scheduler, told of it, wakes the app in its pass. A thousand
+        // requests to a thousand idle apps then take the lock not at all,
+        // rather than a thousand times ahead of the scheduler and the
+        // nodes' heartbeats. One to an app that serves, or that needs a
+        // share of its workspace's limits or more of its lease, takes it.
+        let needs_lock = || Error::new(StatusCode::CONFLICT, NEEDS_LOCK);
         let epoch = self.gateway.gates.epoch();
-        let mut tx = self.gateway_transaction().await?;
+        let mut tx = if locked {
+            self.gateway_transaction().await?
+        } else {
+            self.transaction(false, false).await?
+        };
+        // A restored control plane admits nothing until it is activated:
+        // the locked path says so.
+        if !locked
+            && one(
+                &mut tx,
+                "SELECT active FROM recovery_barrier WHERE singleton",
+                args![],
+            )
+            .await?["active"]
+                == true
+        {
+            return Err(needs_lock());
+        }
         let route = Self::ingress_route(&mut tx, hostname).await?;
         let app = optional(&mut tx, APP_OF_HOST, args![hostname]).await?;
         // A request waits while its app has nothing ready to serve it but
@@ -660,7 +696,14 @@ impl Store {
                 "service unavailable",
             ));
         }
-        let expired = Self::expire_ingress(&mut tx).await?;
+        if !locked && route.is_some() {
+            return Err(needs_lock());
+        }
+        let expired = if locked {
+            Self::expire_ingress(&mut tx).await?
+        } else {
+            Vec::new()
+        };
         let context = route
             .as_ref()
             .or(app.as_ref())
@@ -696,6 +739,16 @@ impl Store {
             row: route.is_none(),
             bound: route.is_some(),
         };
+        if !locked
+            && (self.gateway.shares.of(s(tenant)).is_none()
+                || self
+                    .gateway
+                    .budgets
+                    .short(&(s(tenant).to_owned(), s(&context["project_id"]).to_owned()))
+                    .is_some())
+        {
+            return Err(needs_lock());
+        }
         let (share, taken) = match self.gateway.shares.of(s(tenant)) {
             Some(share) => (share, None),
             None => {
@@ -774,7 +827,7 @@ impl Store {
         // to write too.
         let admitted = context["hostname"].as_str().unwrap_or(hostname);
         let audited = self.http_rates.first_this_minute(s(tenant), admitted);
-        if !app.is_null() {
+        if !app.is_null() && locked {
             exec(
                 &mut tx,
                 "UPDATE app_http SET last_activity=now() WHERE app_id=$1",
@@ -782,6 +835,14 @@ impl Store {
             )
             .await?;
             Self::wake_http(&mut tx, s(&app["id"])).await?;
+        } else if !app.is_null() {
+            // The scheduler wakes it, told at once.
+            exec(
+                &mut tx,
+                "SELECT pg_notify('fenders_schedule','wake')",
+                args![],
+            )
+            .await?;
         }
         tx.commit().await?;
         if let Some(taken) = taken {

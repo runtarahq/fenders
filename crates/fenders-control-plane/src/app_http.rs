@@ -297,7 +297,7 @@ impl Store {
         let mut refused: std::collections::HashMap<String, crate::eviction::Room> =
             std::collections::HashMap::new();
         let only = only.map(|apps| json!(apps)).unwrap_or(Value::Null);
-        for binding in rows(tx,"SELECT h.*,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h WHERE ($1::jsonb IS NULL OR h.app_id IN (SELECT jsonb_array_elements_text($1::jsonb))) AND NOT (h.state='idle' AND NOT h.idle_draining AND NOT EXISTS(SELECT 1 FROM ingress_reservations q WHERE q.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM app_http_extras x WHERE x.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.deployment_id=h.deployment_id AND e.reserved) AND NOT EXISTS(SELECT 1 FROM app_http_operations x JOIN operations o ON o.id=x.operation_id WHERE x.app_id=h.app_id AND o.state='pending')) ORDER BY h.updated,h.app_id",args![only]).await? {
+        for mut binding in rows(tx,"SELECT h.*,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h WHERE ($1::jsonb IS NULL OR h.app_id IN (SELECT jsonb_array_elements_text($1::jsonb))) AND NOT (h.state='idle' AND NOT h.idle_draining AND NOT EXISTS(SELECT 1 FROM ingress_reservations q WHERE q.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM app_http_extras x WHERE x.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.deployment_id=h.deployment_id AND e.reserved) AND NOT EXISTS(SELECT 1 FROM app_http_operations x JOIN operations o ON o.id=x.operation_id WHERE x.app_id=h.app_id AND o.state='pending')) ORDER BY h.updated,h.app_id",args![only]).await? {
             let app=one(tx,"SELECT a.*,t.http FROM apps a JOIN app_triggers t ON t.app_id=a.id WHERE a.id=$1",args![binding["app_id"]]).await?;
             let app_id=s(&app["id"]);
             if !Self::workspace_active(tx,s(&app["tenant_id"])).await? {continue;}
@@ -329,7 +329,11 @@ impl Store {
             }
             if binding["state"]=="idle" {
                 Self::wake_http(tx,app_id).await?;
-                continue;
+                // Woken: it is started in this same pass, not the next.
+                match optional(tx,"SELECT h.*,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h WHERE app_id=$1 AND state='starting'",args![app_id]).await? {
+                    Some(woken) => binding = woken,
+                    None => continue,
+                }
             }
             if binding["state"]=="stopping" {
                 if !self.drain_http(tx,&binding,&seen).await? {
