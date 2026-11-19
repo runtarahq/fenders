@@ -7,11 +7,45 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// A TCP proxy to the test database that can be cut and restored.
+/// A TCP proxy to the test database that can be cut (connections end,
+/// none is made), frozen (connections stay, nothing passes: a database
+/// that hangs) and restored.
 struct Proxy {
     port: u16,
     cut: Arc<AtomicBool>,
+    frozen: Arc<AtomicBool>,
     links: Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
+}
+
+/// Copies `from` to `to` while not frozen.
+async fn pump(
+    mut from: tokio::net::tcp::OwnedReadHalf,
+    mut to: tokio::net::tcp::OwnedWriteHalf,
+    frozen: Arc<AtomicBool>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buffer = vec![0u8; 16384];
+    loop {
+        if frozen.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            continue;
+        }
+        match tokio::time::timeout(std::time::Duration::from_millis(20), from.read(&mut buffer))
+            .await
+        {
+            Err(_) => continue,
+            Ok(Ok(0)) | Ok(Err(_)) => return,
+            Ok(Ok(n)) => {
+                // Read before a freeze, held until it ends.
+                while frozen.load(Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                if to.write_all(&buffer[..n]).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl Proxy {
@@ -19,34 +53,50 @@ impl Proxy {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let cut = Arc::new(AtomicBool::new(false));
+        let frozen = Arc::new(AtomicBool::new(false));
         let links = Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new()));
-        let (accepting, held) = (cut.clone(), links.clone());
+        let (accepting, held, freezing) = (cut.clone(), links.clone(), frozen.clone());
         tokio::spawn(async move {
             loop {
-                let Ok((mut client, _)) = listener.accept().await else {
+                let Ok((client, _)) = listener.accept().await else {
                     return;
                 };
                 if accepting.load(Ordering::SeqCst) {
                     drop(client);
                     continue;
                 }
-                let target = target.clone();
+                let (target, frozen) = (target.clone(), freezing.clone());
                 held.lock().unwrap().spawn(async move {
-                    if let Ok(mut server) = tokio::net::TcpStream::connect(target).await {
-                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                    if let Ok(server) = tokio::net::TcpStream::connect(target).await {
+                        let (client_read, client_write) = client.into_split();
+                        let (server_read, server_write) = server.into_split();
+                        tokio::join!(
+                            pump(client_read, server_write, frozen.clone()),
+                            pump(server_read, client_write, frozen)
+                        );
                     }
                 });
             }
         });
-        Self { port, cut, links }
+        Self {
+            port,
+            cut,
+            frozen,
+            links,
+        }
     }
     /// Every connection through it ends, and no other is made.
     fn cut(&self) {
         self.cut.store(true, Ordering::SeqCst);
         self.links.lock().unwrap().abort_all();
     }
+    /// Nothing passes, and nothing ends: a database that hangs.
+    fn freeze(&self) {
+        self.frozen.store(true, Ordering::SeqCst);
+    }
     fn restore(&self) {
         self.cut.store(false, Ordering::SeqCst);
+        self.frozen.store(false, Ordering::SeqCst);
     }
 }
 
@@ -213,5 +263,59 @@ async fn the_scheduler_gives_sessions_time_after_it_could_not_reach_the_database
             .unwrap()
     };
     assert_eq!(sessions().await, 1, "not yet: the grace has begun");
+    l.finish().await;
+}
+
+/// A database that hangs, rather than refusing, is taken for gone after a
+/// moment: a request, a shim's call and the flush do not wait on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_database_that_hangs_is_taken_for_gone_and_served_around() {
+    let l = Lab::new().await;
+    let proxy = Proxy::to(database()).await;
+    let edge = edge_through(&l, &proxy, std::time::Duration::from_secs(600)).await;
+    let node = l.node("hang-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    let host = s(&route["hostname"]).to_owned();
+    let (_, first) = edge.ingress_start(&host, 0).await.unwrap();
+    edge.ingress_finish(&first, Some(1)).await.unwrap();
+    edge.flush_gateway().await.unwrap();
+    proxy.freeze();
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    // The read of what is known times out, and what is known is served.
+    let started = std::time::Instant::now();
+    let (_, during) = edge.ingress_start(&host, 0).await.unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    edge.ingress_finish(&during, Some(1)).await.unwrap();
+    // And from then on at once.
+    let started = std::time::Instant::now();
+    let (_, next) = edge.ingress_start(&host, 0).await.unwrap();
+    edge.ingress_finish(&next, Some(1)).await.unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_millis(200));
+    // The flush gives up rather than hang.
+    let started = std::time::Instant::now();
+    assert!(edge.flush_gateway().await.is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(7));
+    proxy.restore();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // What waited is written once the database answers again.
+    for _ in 0..20 {
+        if edge.flush_gateway().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let counted: i64 =
+        sqlx::query_scalar("SELECT COALESCE(sum(requests),0)::bigint FROM traffic_usage")
+            .fetch_one(&l.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(counted, 3);
     l.finish().await;
 }

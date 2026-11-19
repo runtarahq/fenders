@@ -270,7 +270,12 @@ impl Store {
             self.load.run_channel(false);
             return stale();
         }
-        match self.launch_fetch(execution, generation, epoch).await {
+        match crate::outage::within(
+            crate::outage::READ_WITHIN,
+            self.launch_fetch(execution, generation, epoch),
+        )
+        .await
+        {
             Err(error) if outage.failed(&error) => stale(),
             read => read,
         }

@@ -82,6 +82,22 @@ impl Outage {
     }
 }
 
+/// How long the request path waits for the database before it takes it
+/// for gone: a database that hangs, rather than refusing, would otherwise
+/// keep a request, or the flush, waiting for as long as it hangs.
+pub const READ_WITHIN: Duration = Duration::from_secs(2);
+pub const FLUSH_WITHIN: Duration = Duration::from_secs(5);
+
+/// `work`, or the database taken for gone if it has not answered `within`.
+pub async fn within<T>(
+    within: Duration,
+    work: impl std::future::Future<Output = crate::error::Result<T>>,
+) -> crate::error::Result<T> {
+    tokio::time::timeout(within, work)
+        .await
+        .unwrap_or_else(|_| Err(crate::error::Error::database_unavailable()))
+}
+
 /// Whether `error` is the database not being there.
 pub fn unreachable(error: &crate::error::Error) -> bool {
     error.is_database_unavailable()

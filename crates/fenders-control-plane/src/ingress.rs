@@ -326,7 +326,12 @@ impl Store {
         let whose = match self.ingress_hosts.get(hostname) {
             _ if self.gateway.outage.down_for().is_some() => Some((String::new(), i64::MAX)),
             Some(whose) => whose,
-            None => match self.ingress_whose(hostname).await {
+            None => match crate::outage::within(
+                crate::outage::READ_WITHIN,
+                self.ingress_whose(hostname),
+            )
+            .await
+            {
                 Ok(whose) => {
                     self.ingress_hosts.remember(hostname, whose.clone());
                     whose
@@ -401,7 +406,7 @@ impl Store {
         if outage.down_for().is_some() {
             return stale();
         }
-        match self.gate_fetch(hostname).await {
+        match crate::outage::within(crate::outage::READ_WITHIN, self.gate_fetch(hostname)).await {
             Err(error) if outage.failed(&error) => stale(),
             read => read,
         }

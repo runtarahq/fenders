@@ -318,7 +318,7 @@ impl Store {
     /// One transaction, whatever it holds. What cannot be written is kept
     /// for the next flush.
     pub async fn flush_gateway(&self) -> Result<()> {
-        let flushed = self.flush(false).await;
+        let flushed = crate::outage::within(crate::outage::FLUSH_WITHIN, self.flush(false)).await;
         // The flush is what notices that the database is back: it tries
         // every second, outage or not.
         match &flushed {
@@ -611,12 +611,12 @@ impl Store {
             return false;
         }
         let want = want.max(need);
-        let granted = async {
+        let granted = crate::outage::within(crate::outage::READ_WITHIN, async {
             let mut tx = self.gateway_transaction().await?;
             let granted = self.lease_grant(&mut tx, key, want).await?;
             tx.commit().await?;
             Ok::<_, crate::error::Error>(granted)
-        }
+        })
         .await;
         match granted {
             Ok((period, granted)) => {
