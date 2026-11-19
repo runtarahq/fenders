@@ -63,6 +63,7 @@ as both control plane and node.
 
 | Feature | State |
 |---|---|
+| Undoing a deletion | A deleted workspace, project or node is gone to the API for good. Its row stays in the database, with what was used and done under it; nothing restores it |
 | Pause and resume | The API has no such request; a run can only be stopped (`POST …/apps/APP/runs/RUN/cancel`) |
 | Worker host qualification | There is no harness that qualifies a new host for production |
 | A user interface | None is included. `Store::with_assets` lets a wrapping binary serve its own |
@@ -114,6 +115,11 @@ place. Each breaks a client written against what was there before.
 
 Not a break: `PATCH /v1/workspaces/W` may name the `allowance_revision` it
 was decided on as `expected_revision`.
+
+Added since, and not breaks: `GET /healthz` and `GET /readyz`;
+`GET /v1/workspaces/W` and its `…/audit`; `PUT` and `DELETE` of a secret;
+`DELETE` of an artifact, a project (and `PATCH` to rename one), a node and
+a workspace.
 
 ## Limits
 

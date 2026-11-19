@@ -169,6 +169,18 @@ Schedules and the HTTP trigger are `triggers`; secrets, connections to
 external TCP endpoints and HTTPS origins, releases, events and usage are in
 the contract.
 
+What is made can be changed and removed:
+
+```sh
+PUT    $S/secrets/SECRET     {"value": "…"}     # another value; runs started after have it
+DELETE $S/secrets/SECRET                        # 409 in_use while a release, a run or a connection names it
+DELETE $S/artifacts/ARTIFACT                    # 409 in_use once it is an app's code
+DELETE $S/apps/APP?expected_revision=N
+DELETE $S/connections/CONNECTION
+PATCH  /v1/workspaces/TENANT/projects/PROJECT   {"name": "…"}
+DELETE /v1/workspaces/TENANT/projects/PROJECT   # only one that holds nothing, and not the default
+```
+
 A change names the revision it was decided on as `expected_revision`, and
 is `409 revision_conflict` if the thing has changed since. Which revision is
 the thing's own: an app's `revision` for the app and its versions, releases,
@@ -232,14 +244,21 @@ What no tenant's key is ever given, whatever it holds:
 | Tenants | `POST /v1/workspaces` (`GET /v1/workspaces` lists them all to the operator, and a key its own) |
 | What a tenant is allowed | `PATCH /v1/workspaces/T` (allowance, default app size), `PATCH /v1/workspaces/T/http-limits` |
 | Suspending one | `POST /v1/workspaces/T/lifecycle` |
+| Deleting one | `DELETE /v1/workspaces/T`, once it is suspended. It cannot be undone |
 | Its keys | `GET`, `POST /v1/workspaces/T/api-keys`, `DELETE /v1/workspaces/T/api-keys/KEY` |
-| Nodes | `GET`, `POST /v1/nodes`, `PATCH /v1/nodes/NODE` |
+| Nodes | `GET`, `POST /v1/nodes`, `PATCH /v1/nodes/NODE`, `DELETE /v1/nodes/NODE` once it is drained |
 | Public egress policy | `GET`, `PUT /v1/public-egress-policy` |
 | This control plane's loops | `GET /v1/control-plane/status` |
 
 Everything else is the tenant API of section 5, which the operator
-credential may also call. There is no third set: a path in neither is
-answered `404` to everyone.
+credential may also call. There is no third set but the two probes: a path
+in none is answered `404` to everyone.
+
+When a customer leaves: suspend its workspace, wait for `status` to be
+`suspended` (its runs have ended), and delete it. Its keys then open
+nothing, its secrets are destroyed and its storage is released. The record
+of what it used and did stays in the control plane's database, for you to
+keep or remove by your own rules; the API does not read it again.
 
 Both sets are in the contract at `/api/openapi.json`, these tagged
 `operator`. The table of routes in `customer_api.rs` is what the control

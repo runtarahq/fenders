@@ -1,7 +1,6 @@
 # Fixing the management API's inconsistencies
 
-A plan, and a record of how far it has got: phases 1 to 4 are done, and
-phase 5 is not. It answers an audit of the
+A record of a plan that is done: all five phases. It answers an audit of the
 management API (the operator's routes and the workspace API) made on
 2026-11-18 by reading `crates/fenders-control-plane` and probing a running
 control plane with no node attached. The node protocol, the run channel and
@@ -12,8 +11,9 @@ revocation, suspension, body limits and the idempotency of the workspace
 routes all behaved as documented. What follows is what did not, and the
 order to fix it in.
 
-Delete this file when its last phase lands; what remains true belongs in
-[STATUS.md](STATUS.md) and [EMBEDDING-API.md](EMBEDDING-API.md).
+Its last phase has landed. What remains true is in
+[STATUS.md](STATUS.md) and [EMBEDDING-API.md](EMBEDDING-API.md); this file
+can go once the branches it describes are merged.
 
 ## Decisions
 
@@ -384,6 +384,31 @@ events", target: "events"}]`, and "contact support if this persists".
 ## Phase 5: what is missing
 
 Additions only. Order by D6.
+
+**Done**, a commit a route, each with its row in the route tables, its
+entry in the contract, its audit record and its test. Where what was built
+differs from what is written below:
+
+- The probes are a third table of routes, `OPEN_ROUTES`, beside the key's
+  and the operator's: they take no credential and are at the root.
+- The audit read: a record's project is taken from the project its
+  transaction was authorized for, so that the forty places that write a
+  record did not each have to pass it. A key of one project reads the
+  records of that project; it is not refused. Records made before have no
+  project and are not shown to such a key.
+- A project, a node and a workspace are deleted by being marked: other
+  rows name them (executions, usage, the audit trail), and are kept. Each
+  gives up what must be unique (a project's name and slug, a node's name
+  and pin) so that it may be made again.
+- Deleting a workspace was to "decide what of usage and audit is kept".
+  All of it is kept, in the database, and none is read through the API
+  again. Removing it is the operator's, by its own rules; nothing here
+  does it.
+- An artifact is deleted by retention's own rule: refused while a version
+  names it, as planned, and also while an execution names it or a node is
+  inspecting it.
+- A refusal to delete what is still named is `409` with a new code,
+  `in_use`.
 
 | Route | Why | Notes |
 |---|---|---|
