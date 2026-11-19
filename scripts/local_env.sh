@@ -28,6 +28,9 @@
 # binaries: LOCAL_BIN (the directory with fenders-control-plane and
 # fenders-pki), LOCAL_BUILD (the node bundle), LOCAL_STATE (instead of
 # run/local) and LOCAL_CONTROL_ARGS (further control-plane options).
+# LOCAL_PG names the PostgreSQL container and its volume, for a second
+# environment whose database is not the first's; with it, give LOCAL_STATE
+# too, since a state directory and its database go together.
 # For development only: one self-made CA, an operator token on disk,
 # everything on 127.0.0.1.
 set -euo pipefail
@@ -37,7 +40,7 @@ build=${LOCAL_BUILD:-$repo/build/node}
 bin=${LOCAL_BIN:-$repo/target/release}
 stage=/var/lib/fenders-local
 cgroup=/sys/fs/cgroup/fenders-local
-pg=fenders-local-pg
+pg=${LOCAL_PG:-fenders-local-pg}
 manage_port=19090 internal_port=19091 gateway_port=19092 channel_port=19093 node_port=19094 pg_port=19099
 manage=https://127.0.0.1:$manage_port
 
@@ -104,7 +107,7 @@ up() {
   mkdir -p "$state"
   if ! docker start "$pg" >/dev/null 2>&1; then
     docker run -d --name "$pg" -p 127.0.0.1:$pg_port:5432 -e POSTGRES_PASSWORD=local \
-      -e POSTGRES_DB=fenders -v fenders-local-pg:/var/lib/postgresql/data postgres:17-alpine >/dev/null
+      -e POSTGRES_DB=fenders -v "$pg":/var/lib/postgresql/data postgres:17-alpine >/dev/null
   fi
   # Asked over TCP: on a new data directory the image first runs a server
   # that listens on its socket alone, says it is ready there, and restarts.
@@ -203,7 +206,7 @@ case ${1:-} in
   destroy)
     down
     docker rm -f "$pg" >/dev/null 2>&1 || true
-    docker volume rm fenders-local-pg >/dev/null 2>&1 || true
+    docker volume rm "$pg" >/dev/null 2>&1 || true
     sudo rm -rf "$stage"
     rm -rf "$state"
     echo destroyed
