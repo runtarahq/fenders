@@ -125,9 +125,31 @@ impl Store {
             return Err(Error::invalid("invalid log generation"));
         }
         let batch = Batch::parse(value)?;
-        let mut tx = self.watched_transaction().await?;
+        // Without the mutation lock: a node ships output as its runs write
+        // it, and sixty apps writing a line a request held the lock most of
+        // the time, under everything else. The execution's row is held for
+        // share instead: fencing its output, or deleting it, changes that
+        // row under the lock, and waits for this or is seen by it. The
+        // source's row orders one execution's batches, and a lock of the
+        // workspace's own its bound on what it keeps.
+        let mut tx = self.transaction(false, false).await?;
+        // A restored control plane takes nothing until it is activated, as
+        // under the lock.
+        if one(
+            &mut tx,
+            "SELECT active FROM recovery_barrier WHERE singleton",
+            args![],
+        )
+        .await?["active"]
+            == true
+        {
+            return Err(Error::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "restored control plane awaits external-resource fencing and operator activation",
+            ));
+        }
         let execution_row = optional(&mut tx,
-            "SELECT e.* FROM executions e JOIN nodes n ON n.id=e.node_id WHERE e.id=$1 AND e.generation=$2 AND e.node_id=$3 AND NOT e.log_ingestion_fenced AND NOT n.disabled AND n.backend='wasm' AND n.boot_id=$4 AND n.observed_confinement=$5",
+            "SELECT e.* FROM executions e JOIN nodes n ON n.id=e.node_id WHERE e.id=$1 AND e.generation=$2 AND e.node_id=$3 AND NOT e.log_ingestion_fenced AND NOT n.disabled AND n.backend='wasm' AND n.boot_id=$4 AND n.observed_confinement=$5 FOR SHARE OF e",
             args![execution,generation,node,batch.boot_id,HOST_CONFINEMENT]).await?
             .ok_or_else(|| conflict("log execution ownership or worker identity changed"))?;
         if execution_row["spec"]["secret_env"]
@@ -193,10 +215,16 @@ impl Store {
         // text and are intentionally not used for this value.
         sqlx::query("UPDATE execution_log_sources SET acknowledged=$1,reported_last=$2,end_sequence=$3,source_gap=$4,interrupted=interrupted OR $6,updated=now() WHERE execution_id=$5")
             .bind(ack).bind(reported).bind(end).bind(gap).bind(execution).bind(batch.interrupted).execute(&mut *tx).await?;
-        Self::expire_execution_logs(&mut tx).await?;
+        // Output older than its days is the scheduler's to remove, each pass.
+        exec(
+            &mut tx,
+            "SELECT pg_advisory_xact_lock(184923783,hashtext($1))",
+            args![execution_row["tenant_id"]],
+        )
+        .await?;
         Self::bound_execution_logs(&mut tx, execution, s(&execution_row["tenant_id"])).await?;
         let result = one(&mut tx,"SELECT capture_id,acknowledged,source_gap,interrupted,pruned_through,COALESCE(end_sequence=acknowledged,false) AS complete FROM execution_log_sources WHERE execution_id=$1",args![execution]).await?;
-        self.commit_watched(tx).await?;
+        tx.commit().await?;
         Ok(json!({"accepted":true,"cursor":result}))
     }
 
