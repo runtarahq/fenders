@@ -996,18 +996,25 @@ async fn an_app_serves_once_its_shim_asks_and_its_requests_go_through_the_run_ch
     assert_eq!(parts.headers["content-type"], "text/plain");
     assert!(parts.headers.get("set-cookie").is_none());
     assert_eq!(&body[..], b"made");
-    // The request is settled once its response has ended.
+    // The request is settled once its response has ended, and its record
+    // is written by the flush after that.
     let recorded = || async {
         for _ in 0..200 {
-            let row: (String, Option<i32>, i64) = sqlx::query_as(
-                "SELECT state,http_status,(SELECT count(*) FROM ingress_reservations WHERE id=$1) FROM app_http_runs WHERE id=$1",
-            )
-            .bind(&request_id)
-            .fetch_one(&l.store.pool)
-            .await
-            .unwrap();
-            if row.2 == 0 {
-                return (row.0, row.1);
+            let held: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM ingress_reservations WHERE id=$1")
+                    .bind(&request_id)
+                    .fetch_one(&l.store.pool)
+                    .await
+                    .unwrap();
+            if held == 0 {
+                l.store.flush_gateway().await.unwrap();
+                return sqlx::query_as::<_, (String, Option<i32>)>(
+                    "SELECT state,http_status FROM app_http_runs WHERE id=$1",
+                )
+                .bind(&request_id)
+                .fetch_one(&l.store.pool)
+                .await
+                .unwrap();
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -1033,6 +1040,7 @@ async fn an_app_serves_once_its_shim_asks_and_its_requests_go_through_the_run_ch
     )
     .await;
     assert_eq!(client.await.unwrap().0.status, StatusCode::BAD_GATEWAY);
+    l.store.flush_gateway().await.unwrap();
     let recorded: (String, Option<i32>) =
         sqlx::query_as("SELECT state,http_status FROM app_http_runs WHERE id=$1")
             .bind(&failed_id)
@@ -1097,6 +1105,7 @@ async fn an_app_serves_once_its_shim_asks_and_its_requests_go_through_the_run_ch
             Err(_) => assert!(fits),
         }
     }
+    l.store.flush_gateway().await.unwrap();
     let after: i64 = sqlx::query_scalar("SELECT count(*) FROM app_http_runs")
         .fetch_one(&l.store.pool)
         .await
@@ -1194,7 +1203,7 @@ async fn a_request_its_client_abandoned_is_settled_at_once_and_charged_nothing()
             ),
         );
         let mut waited = 0;
-        while admitted().await <= n {
+        while reservations().await == 0 {
             let answered =
                 tokio::time::timeout(std::time::Duration::from_millis(20), &mut request).await;
             assert!(
@@ -1221,6 +1230,10 @@ async fn a_request_its_client_abandoned_is_settled_at_once_and_charged_nothing()
         }
         assert_eq!(held, 0, "an abandoned request keeps no reservation");
     }
+    // Each has its record, written by a flush: offered to the app and
+    // never answered, so whether it ran is not known.
+    assert_eq!(admitted().await, 0);
+    l.store.flush_gateway().await.unwrap();
     assert_eq!(admitted().await, 3);
     assert_eq!(
         charged().await,

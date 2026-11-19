@@ -61,6 +61,8 @@ pub struct Store {
     pub api_rates: std::sync::Arc<crate::ingress::Rates>,
     /// Whose each gateway host name is, for refusing without a transaction.
     pub ingress_hosts: std::sync::Arc<crate::ingress::Hosts>,
+    /// What the gateway holds in memory until its next flush.
+    pub gateway: std::sync::Arc<crate::gateway::Gateway>,
     /// What this process has done, counted.
     pub load: std::sync::Arc<crate::load::Load>,
 }
@@ -241,6 +243,7 @@ impl Store {
             exchange: Default::default(),
             http_rates: Default::default(),
             ingress_hosts: Default::default(),
+            gateway: Default::default(),
             load: Default::default(),
             api_rates: Default::default(),
             node_turns: Default::default(),
@@ -272,6 +275,7 @@ impl Store {
         if let (Some(status), Value::Object(load)) = (status.as_object_mut(), self.load.snapshot())
         {
             status.extend(load);
+            status["gateway"]["records_dropped"] = json!(self.gateway.dropped());
         }
         Ok(status)
     }

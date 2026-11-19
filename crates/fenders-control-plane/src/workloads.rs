@@ -391,7 +391,8 @@ impl Store {
         Self::expire_schedule_queue(&mut tx).await?;
         Self::retire_schedule_dispatch(&mut tx).await?;
         crate::placement::expire(&mut tx).await?;
-        Self::expire_ingress(&mut tx).await?;
+        let expired = Self::expire_ingress(&mut tx).await?;
+        Self::expire_gateway_sessions(&mut tx).await?;
         Self::expire_execution_logs(&mut tx).await?;
         Self::expire_app_events(&mut tx).await?;
         Self::compact_usage_backlog(&mut tx).await?;
@@ -428,6 +429,7 @@ impl Store {
         Self::reconcile_app_runs(&mut tx).await?;
         Self::reconcile_workspace_suspensions(&mut tx).await?;
         tx.commit().await?;
+        self.ingress_expired(&expired);
         self.reclaim_artifact_blobs().await?;
         self.reclaim_orphan_uploads().await?;
         self.websocket_sweep().await?;

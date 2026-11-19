@@ -1605,7 +1605,7 @@ async fn gateway_dispatch_tracked(
         );
         // Once the request is offered, only its not being taken proves that
         // the app did not run. Admission failures occur before this point.
-        state.store.ingress_dispatched(&lease).await?;
+        state.store.ingress_dispatched(&lease);
         *dispatched = true;
         let (tx, request_body) = pipe();
         let admit = meter.clone();

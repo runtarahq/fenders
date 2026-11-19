@@ -6084,18 +6084,22 @@
           },
           "gateway": {
             "type": "object",
-            "description": "Requests for HTTP apps the gateway admitted and refused.",
+            "description": "Requests for HTTP apps the gateway admitted and refused, and the request records it dropped because the database did not take them in time.",
             "properties": {
               "admitted": {
                 "type": "integer"
               },
               "refused": {
                 "type": "integer"
+              },
+              "records_dropped": {
+                "type": "integer"
               }
             },
             "required": [
               "admitted",
-              "refused"
+              "refused",
+              "records_dropped"
             ]
           }
         },

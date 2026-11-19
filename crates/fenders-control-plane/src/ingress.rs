@@ -254,7 +254,11 @@ impl Meter {
     }
 }
 impl Store {
-    pub(crate) async fn expire_ingress(tx: &mut Tx) -> Result<()> {
+    /// Settles the reservations that lapsed, and says which they were: a
+    /// record of one this process still holds is then ended
+    /// ([`Store::ingress_expired`]), once the transaction has committed.
+    pub(crate) async fn expire_ingress(tx: &mut Tx) -> Result<Vec<String>> {
+        let mut expired = Vec::new();
         exec(tx,"DELETE FROM app_http_runs WHERE id IN (SELECT id FROM app_http_runs WHERE finished_at IS NOT NULL AND created<now()-interval '30 days' ORDER BY created,id LIMIT 512)",args![]).await?;
         for row in rows(
             tx,
@@ -263,6 +267,9 @@ impl Store {
         )
         .await?
         {
+            expired.push(s(&row["id"]).to_owned());
+            // The row of a request another process had in flight, written
+            // while it was: that process is not there to finish it.
             exec(tx,"UPDATE app_http_runs SET state=CASE WHEN started_at IS NULL THEN 'failed' ELSE 'unknown' END,finished_at=clock_timestamp() WHERE id=$1 AND finished_at IS NULL",args![row["id"]]).await?;
             let bytes = if !row["app_id"].is_null() && row["execution_id"].is_null() {
                 json!(0)
@@ -271,7 +278,14 @@ impl Store {
             };
             exec(tx,"INSERT INTO traffic_usage(tenant_id,project_id,period,bytes,requests) VALUES($1,$2,$3::date,$4,1) ON CONFLICT(tenant_id,project_id,period) DO UPDATE SET bytes=traffic_usage.bytes+excluded.bytes,requests=traffic_usage.requests+1",args![row["tenant_id"],row["project_id"],row["period"],bytes]).await?;
         }
-        Ok(())
+        Ok(expired)
+    }
+    /// Ends the records of requests whose reservations lapsed: never given
+    /// to an app, they did not run; given to one, they may have.
+    pub(crate) fn ingress_expired(&self, expired: &[String]) {
+        for request in expired {
+            self.gateway.ended(request, None);
+        }
     }
     pub async fn ingress_start(
         &self,
@@ -364,7 +378,7 @@ impl Store {
                 "service unavailable",
             ));
         }
-        Self::expire_ingress(&mut tx).await?;
+        let expired = Self::expire_ingress(&mut tx).await?;
         let context = route
             .as_ref()
             .or(app.as_ref())
@@ -394,32 +408,35 @@ impl Store {
         let reservation = uid();
         let app = app.as_ref().unwrap_or(&Value::Null);
         exec(&mut tx,"INSERT INTO ingress_reservations(id,tenant_id,project_id,period,bytes,execution_id,app_id,release_id,app_revision,expires) VALUES($1,$2,$3,date_trunc('month',now() AT TIME ZONE 'UTC')::date,$4,$5,$6,$7,$8::bigint,now()+CASE WHEN $9 THEN interval '10 seconds' ELSE interval '90 seconds' END)",args![reservation,tenant,context["project_id"],reserve,route.as_ref().map(|r|r["execution_id"].clone()),app["id"],app["target_release_id"],app["revision"],route.is_none()]).await?;
-        if let Some((method, path)) = request.filter(|_| !app.is_null()) {
-            // The gateway supplies the URI path, never its potentially secret query.
-            let path: String = path
-                .split('?')
-                .next()
-                .unwrap_or("/")
-                .chars()
-                .take(2048)
-                .collect();
-            exec(&mut tx,"INSERT INTO app_http_runs(id,tenant_id,project_id,app_id,release_id,execution_id,method,path) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",args![reservation,tenant,context["project_id"],app["id"],app["target_release_id"],route.as_ref().map(|r|r["execution_id"].clone()),method,path]).await?;
-        }
+        // The request's record is kept in memory and written when it ends
+        // ([`crate::gateway`]): made here, and held once this has committed.
+        let record = request.filter(|_| !app.is_null()).map(|(method, path)| {
+            crate::gateway::Opened {
+                tenant: s(tenant).to_owned(),
+                project: s(&context["project_id"]).to_owned(),
+                app: s(&app["id"]).to_owned(),
+                release: s(&app["target_release_id"]).to_owned(),
+                execution: route
+                    .as_ref()
+                    .and_then(|route| route["execution_id"].as_str())
+                    .map(str::to_owned),
+                method: method.to_owned(),
+                // The gateway supplies the URI path, never its potentially secret query.
+                path: path
+                    .split('?')
+                    .next()
+                    .unwrap_or("/")
+                    .chars()
+                    .take(2048)
+                    .collect(),
+            }
+        });
         // Admission is audited once a minute for each app or route, with
         // the first request of that minute; each request has its own record
-        // (`app_http_runs`) and its usage.
+        // (`app_http_runs`) and its usage. The audit row is the flusher's
+        // to write too.
         let admitted = context["hostname"].as_str().unwrap_or(hostname);
-        if self.http_rates.first_this_minute(s(tenant), admitted) {
-            Self::audit_system(
-                &mut tx,
-                "gateway",
-                "ingress.admit",
-                &json!(reservation),
-                tenant,
-                json!({"hostname": admitted}),
-            )
-            .await?;
-        }
+        let audited = self.http_rates.first_this_minute(s(tenant), admitted);
         if !app.is_null() {
             exec(
                 &mut tx,
@@ -430,6 +447,13 @@ impl Store {
             Self::wake_http(&mut tx, s(&app["id"])).await?;
         }
         tx.commit().await?;
+        self.ingress_expired(&expired);
+        if let Some(record) = record {
+            self.gateway.opened(&reservation, record);
+        }
+        if audited {
+            self.gateway.admitted(&reservation, s(tenant), admitted);
+        }
         Ok((route, reservation))
     }
     pub async fn ingress_poll(&self, reservation: &str) -> Result<Option<Value>> {
@@ -459,6 +483,9 @@ impl Store {
             .await?;
         }
         tx.commit().await?;
+        if let Some(execution) = route.as_ref().and_then(|r| r["execution_id"].as_str()) {
+            self.gateway.bound(reservation, execution);
+        }
         Ok(route)
     }
     pub async fn ingress_wait_request(
@@ -582,20 +609,11 @@ impl Store {
     pub async fn ingress_finish(&self, reservation: &str, used: Option<i64>) -> Result<()> {
         self.ingress_complete(reservation, used, None).await
     }
-    /// Persist dispatch before attempting transport. Lost replies and process loss
-    /// remain unknown; neither expiry nor recovery replays an invocation.
-    pub async fn ingress_dispatched(&self, reservation: &str) -> Result<()> {
-        let mut tx = self.transaction(true, false).await?;
-        let lease = one(
-            &mut tx,
-            "SELECT * FROM ingress_reservations WHERE id=$1 AND expires>now()",
-            args![reservation],
-        )
-        .await?;
-        Self::require_workspace_active(&mut tx, s(&lease["tenant_id"])).await?;
-        exec(&mut tx,"UPDATE app_http_runs SET state='running',started_at=clock_timestamp(),execution_id=$2 WHERE id=$1 AND state='queued'",args![reservation,lease["execution_id"]]).await?;
-        tx.commit().await?;
-        Ok(())
+    /// The request is being offered to its app: from here, only its not
+    /// being taken proves that it did not run. Kept in the request's record,
+    /// in memory; nothing is written until a flush.
+    pub fn ingress_dispatched(&self, reservation: &str) {
+        self.gateway.dispatched(reservation);
     }
     pub async fn ingress_complete(
         &self,
@@ -611,7 +629,6 @@ impl Store {
         )
         .await?
         {
-            exec(&mut tx,"UPDATE app_http_runs SET state=CASE WHEN $2::integer IS NOT NULL THEN CASE WHEN $2::integer<400 THEN 'succeeded' ELSE 'failed' END WHEN started_at IS NULL THEN 'failed' ELSE 'unknown' END,http_status=$2::integer,finished_at=clock_timestamp() WHERE id=$1 AND finished_at IS NULL",args![reservation,status]).await?;
             let queued = !row["app_id"].is_null() && row["execution_id"].is_null();
             let bytes = used
                 .unwrap_or(if queued { 0 } else { n(&row["bytes"]) })
@@ -627,6 +644,9 @@ impl Store {
             }
         }
         tx.commit().await?;
+        // Its record ends with it. One that already ended, because its
+        // reservation lapsed, is not ended otherwise.
+        self.gateway.ended(reservation, status);
         Ok(())
     }
 }

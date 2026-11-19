@@ -65,7 +65,9 @@ async fn a_workspaces_request_limits_are_its_plans_and_admission_is_audited_once
         "finishing does not reset the rate window"
     );
     // Admission was audited once for the minute, not once a request; each
-    // request has its own usage.
+    // request has its own usage. The audit row is written by a flush.
+    assert_eq!(audited().await, 0);
+    l.store.flush_gateway().await.unwrap();
     assert_eq!(audited().await, 1);
     assert_eq!(
         l.store.usage(&l.operator, &l.tenant, None).await.unwrap()["ingress_month"]["requests"],
@@ -74,6 +76,7 @@ async fn a_workspaces_request_limits_are_its_plans_and_admission_is_audited_once
     // A minute on, the window has passed: admitted again, and audited again.
     l.store.http_rates.advance(61);
     let lease = l.store.ingress_start(hostname, 0).await.unwrap().1;
+    l.store.flush_gateway().await.unwrap();
     assert_eq!(audited().await, 2);
 
     // Two at once: a third is refused while two are in flight, whatever the

@@ -160,6 +160,17 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             async move { pickup.listen_for_pickup().await }
         },
     )?;
+    // What the gateway holds in memory is written once a second.
+    let flusher = store.clone();
+    background.periodic(
+        Component::GatewayFlusher,
+        crate::gateway::FLUSH_EVERY,
+        crate::gateway::FLUSH_EVERY,
+        move || {
+            let flusher = flusher.clone();
+            async move { flusher.flush_gateway().await }
+        },
+    )?;
     let state = api::ApiState {
         store: store.clone(),
         domain: args.domain,
@@ -191,7 +202,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             streaming.push((
                 tokio::net::TcpListener::bind((args.host, args.run_channel_port)).await?,
                 management,
-                crate::run_channel::router(store),
+                crate::run_channel::router(store.clone()),
             ));
         }
         for (listener, config, router) in listeners {
@@ -236,6 +247,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Err(error) if result.is_ok() => result = Err(error.into()),
                 _ => {}
             }
+        }
+        // The listeners have drained: what their last requests left in
+        // memory is written before the process ends.
+        if let Err(error) = store.flush_gateway().await {
+            eprintln!("the gateway's last flush failed: {}", error.message);
         }
         result?;
     } else {
