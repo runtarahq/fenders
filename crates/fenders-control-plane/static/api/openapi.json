@@ -6760,6 +6760,10 @@
               },
               "reserved_bytes": {
                 "type": "integer"
+              },
+              "gateway_conservative_bytes": {
+                "type": "integer",
+                "description": "Of bytes, what was charged for the lease of a gateway that stopped without saying what it had passed."
               }
             }
           }

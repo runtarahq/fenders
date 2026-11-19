@@ -1046,3 +1046,57 @@ async fn monthly_concurrent_reports_converge_and_previous_terminal_sources_prove
     );
     l.finish().await;
 }
+
+/// What a gateway session holds of a transfer allowance is held: it is in
+/// the usage report as reserved, and nothing else may be given it. The
+/// lease of a session that is gone is counted as used, conservatively.
+#[tokio::test]
+async fn a_gateways_lease_is_held_and_a_dead_gateways_is_charged_conservatively() {
+    let l = Lab::new().await;
+    let lease = |session: String, bytes: i64| {
+        sqlx::query("INSERT INTO gateway_transfer_leases(session_id,tenant_id,project_id,period,held_bytes) VALUES($1,$2,$3,date_trunc('month',now() AT TIME ZONE 'UTC')::date,$4)")
+            .bind(session)
+            .bind(&l.tenant)
+            .bind(&l.project)
+            .bind(bytes)
+            .execute(&l.store.pool)
+    };
+    // This process's session, alive, and one of a process that is gone.
+    l.store.flush_gateway().await.unwrap();
+    let (alive, dead) = (l.store.gateway.session().to_owned(), uid());
+    sqlx::query(
+        "INSERT INTO gateway_sessions(id,seen) VALUES($1,clock_timestamp()-interval '1 minute')",
+    )
+    .bind(&dead)
+    .execute(&l.store.pool)
+    .await
+    .unwrap();
+    lease(alive.clone(), 3000).await.unwrap();
+    lease(dead.clone(), 700).await.unwrap();
+    // And one whose session has no row at all.
+    lease(uid(), 50).await.unwrap();
+
+    let before = usage(&l).await;
+    let allowance = &before["transfer_allowance"];
+    assert_eq!(allowance["reserved_bytes"], 3750);
+    assert_eq!(allowance["bytes"], 0);
+    assert_eq!(before["totals"]["ingress_reserved_bytes"], 3750);
+
+    l.store.schedule().await.unwrap();
+    let after = usage(&l).await;
+    let allowance = &after["transfer_allowance"];
+    assert_eq!(allowance["reserved_bytes"], 3000, "the live lease is kept");
+    assert_eq!(allowance["bytes"], 750, "what the dead held is used");
+    assert_eq!(allowance["gateway_conservative_bytes"], 750);
+    assert_eq!(after["ingress_month"]["bytes"], 750);
+    assert_eq!(after["ingress_month"]["requests"], 0);
+    let sessions: Vec<String> = sqlx::query_scalar("SELECT id FROM gateway_sessions")
+        .fetch_all(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(sessions, vec![alive]);
+    // Settled once: another pass charges nothing more.
+    l.store.schedule().await.unwrap();
+    assert_eq!(usage(&l).await["transfer_allowance"]["bytes"], 750);
+    l.finish().await;
+}

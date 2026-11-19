@@ -34,6 +34,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(crate) const LEASES_MIGRATION: &str = include_str!("../sql/gateway_transfer_leases.sql");
 pub(crate) const MIGRATION: &str = "CREATE TABLE IF NOT EXISTS gateway_sessions (
     id text PRIMARY KEY CHECK(id ~ '^[a-f0-9]{32}$'),
     started timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -328,8 +329,23 @@ impl Store {
         Ok(())
     }
 
-    /// Forgets the sessions of processes that are gone.
+    /// Forgets the sessions of processes that are gone. What such a
+    /// session held of a transfer allowance is counted as used: how much of
+    /// it the process passed before it went is not known, so all of it is
+    /// charged, and said to be conservative. A lease whose session has no
+    /// row is one of those too.
     pub(crate) async fn expire_gateway_sessions(tx: &mut Tx) -> Result<()> {
+        exec(
+            tx,
+            &format!(
+                "WITH gone AS (DELETE FROM gateway_transfer_leases l WHERE NOT EXISTS(SELECT 1 FROM gateway_sessions s WHERE s.id=l.session_id AND s.seen>=clock_timestamp()-interval '{SESSION_DEAD}') RETURNING l.tenant_id,l.project_id,l.period,l.held_bytes)
+                INSERT INTO traffic_usage(tenant_id,project_id,period,bytes,requests,conservative_bytes)
+                SELECT tenant_id,project_id,period,sum(held_bytes)::bigint,0,sum(held_bytes)::bigint FROM gone GROUP BY tenant_id,project_id,period HAVING sum(held_bytes)>0
+                ON CONFLICT(tenant_id,project_id,period) DO UPDATE SET bytes=traffic_usage.bytes+excluded.bytes,conservative_bytes=traffic_usage.conservative_bytes+excluded.conservative_bytes"
+            ),
+            args![],
+        )
+        .await?;
         exec(
             tx,
             &format!(

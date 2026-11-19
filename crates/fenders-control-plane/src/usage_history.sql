@@ -7,6 +7,7 @@ WITH source AS (
         observed_outbound_bytes,observed_period_records,observed_at FROM accounting_month_rollups
     UNION ALL SELECT tenant_id,project_id,period,0,0,0,0,0,bytes,1,sampled_at FROM execution_egress_periods
     UNION ALL SELECT tenant_id,project_id,period,0,0,0,0,bytes,0,0,NULL FROM ingress_reservations
+    UNION ALL SELECT tenant_id,project_id,period,0,0,0,0,held_bytes,0,0,NULL FROM gateway_transfer_leases
     UNION ALL SELECT tenant_id,project_id,period,0,0,0,0,held_bytes,0,0,NULL FROM execution_egress_budgets WHERE held_bytes>0
 ), accounting AS (
 SELECT period,sum(gateway_bytes) gateway_bytes,sum(gateway_requests) gateway_requests,
