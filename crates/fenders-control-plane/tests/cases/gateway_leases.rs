@@ -204,3 +204,50 @@ async fn the_leases_of_a_workspaces_projects_are_of_one_allowance() {
     assert_eq!(written(&l).await.0, LEAST + 1000);
     l.finish().await;
 }
+
+/// The operator lowers a workspace's allowance below what this gateway has
+/// leased of it and not used: the lease gives that back, in the same
+/// transaction, and the lowering is made. What a request in flight reserved
+/// stays held, and nothing more passes than the new allowance has.
+#[tokio::test]
+async fn lowering_an_allowance_takes_back_what_a_lease_holds_unused() {
+    let l = Lab::new().await;
+    let (host, key) = serving(&l).await;
+    let (_, done) = l.store.ingress_start(&host, 0).await.unwrap();
+    l.store.ingress_finish(&done, Some(5000)).await.unwrap();
+    l.store.flush_gateway().await.unwrap();
+    let (_, flying) = l.store.ingress_start(&host, 0).await.unwrap();
+    assert_eq!(written(&l).await.0, LEAST - 5000);
+    // 5000 used, a block reserved: 6000 more is less than what is leased.
+    let lower = |bytes: i64| {
+        l.store.update_allowance(
+            &l.operator,
+            &l.tenant,
+            serde_json::from_value(json!({"allowance":{"cpu_percent":400,"memory_mib":4096,"instances":4,"storage_bytes":20000000000_i64,"transfer_bytes":bytes}})).unwrap(),
+        )
+    };
+    lower(5000 + BLOCK + 6000).await.unwrap();
+    assert_eq!(written(&l).await.0, BLOCK, "only what is in flight is held");
+    assert_eq!(l.store.gateway.budgets.holds(&key), Some((0, BLOCK, 0)));
+    // The request in flight passes its block, and then what is left.
+    let meter = fenders_control_plane::ingress::Meter::new(l.store.clone(), &flying);
+    use fenders_control_plane::ingress::Way;
+    assert!(meter.admit(Way::Out, BLOCK as usize + 6000).await);
+    assert!(!meter.admit(Way::Out, 1).await);
+    l.store
+        .ingress_complete(&flying, Some(meter.passed().await), Some(200))
+        .await
+        .unwrap();
+    l.store.flush_gateway().await.unwrap();
+    let usage = l.store.usage(&l.operator, &l.tenant, None).await.unwrap();
+    assert_eq!(
+        usage["transfer_allowance"]["bytes"],
+        5000 + BLOCK + 6000,
+        "the allowance is met and not exceeded"
+    );
+    // Below what is used it is still refused, and the lease is as it was.
+    let before = l.store.gateway.budgets.holds(&key);
+    assert!(lower(100).await.is_err());
+    assert_eq!(l.store.gateway.budgets.holds(&key), before);
+    l.finish().await;
+}

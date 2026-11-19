@@ -439,6 +439,40 @@ impl Budgets {
         inner.over.extend(taken.returns);
     }
 
+    /// Takes what is available of every lease of `tenant`'s projects out of
+    /// them: for the operator to change the workspace's allowance, which a
+    /// lease of bytes nobody uses must not keep from being lowered. Says
+    /// what was taken, to come off the leases in the database, or to be put
+    /// back with [`give_back`](Self::give_back) if that cannot be done.
+    pub fn withhold(&self, tenant: &str) -> Vec<(Key, String, i64)> {
+        let mut inner = self.lock();
+        let mut taken = Vec::new();
+        for (key, budget) in inner.budgets.iter_mut() {
+            if key.0 == tenant && budget.available > 0 {
+                let bytes = std::mem::take(&mut budget.available);
+                taken.push((key.clone(), budget.period.clone(), bytes));
+            }
+            if key.0 == tenant {
+                // To be asked again, under the new allowance.
+                budget.exhausted = false;
+            }
+        }
+        taken
+    }
+
+    /// What [`withhold`](Self::withhold) took could not come off the
+    /// leases: it is theirs again.
+    pub fn give_back(&self, taken: Vec<(Key, String, i64)>) {
+        let mut inner = self.lock();
+        for (key, period, bytes) in taken {
+            if let Some(budget) = inner.budgets.get_mut(&key)
+                && budget.period == period
+            {
+                budget.available += bytes;
+            }
+        }
+    }
+
     /// The lease of `key` is not in the database any more: a process that
     /// did not flush for too long is taken for gone, and its leases were
     /// charged. What is reserved has to be leased again.
@@ -638,6 +672,26 @@ mod tests {
             budgets.take("2026-12-01", false).used[0].period,
             "2026-12-01"
         );
+    }
+
+    #[test]
+    fn what_is_withheld_for_an_allowance_change_is_only_what_is_available() {
+        let budgets = Budgets::default();
+        let other: Key = ("u".into(), "p".into());
+        budgets.granted(&key(), "2026-11-01", MIB, MIB);
+        budgets.granted(&other, "2026-11-01", MIB, MIB);
+        budgets.take_off("r", &key(), true);
+        assert!(budgets.spend(&key(), 100));
+        let taken = budgets.withhold("t");
+        assert_eq!(
+            taken,
+            vec![(key(), "2026-11-01".to_owned(), MIB - BLOCK - 100)]
+        );
+        // What a request reserved, and what was used, stay.
+        assert_eq!(budgets.holds(&key()), Some((0, BLOCK, 100)));
+        assert_eq!(budgets.holds(&other), Some((MIB, 0, 0)));
+        budgets.give_back(taken);
+        assert_eq!(budgets.holds(&key()), Some((MIB - BLOCK - 100, BLOCK, 100)));
     }
 
     #[test]

@@ -672,31 +672,27 @@ impl Store {
             )
             .await?;
         }
-        let row = match &value.allowance {
-            Some(allowance) => {
-                let row = Self::set_allowance(&mut tx, tenant, allowance).await?;
-                Self::audit(
-                    &mut tx,
-                    p,
-                    "tenant.allowance",
-                    tenant,
-                    tenant,
-                    json!(allowance),
-                )
-                .await?;
-                row
-            }
-            None => {
-                sqlx::query_scalar::<_, Value>(&format!(
-                    "SELECT {WORKSPACE} FROM tenants t WHERE id=$1"
-                ))
-                .bind(tenant)
-                .fetch_one(&mut *tx)
-                .await?
+        // What this gateway leased of the allowance and nobody uses is given
+        // back first: a lease must not keep it from being lowered, and none
+        // may outlive a lowering it would exceed. A request in flight keeps
+        // what it reserved. Put back if the change is not made.
+        let withheld = if value.allowance.is_some() {
+            self.gateway.budgets.withhold(tenant)
+        } else {
+            Vec::new()
+        };
+        let changed = self
+            .change_allowance(&mut tx, p, tenant, &value, &withheld)
+            .await;
+        let row = match changed {
+            Ok(row) => row,
+            Err(error) => {
+                self.gateway.budgets.give_back(withheld);
+                return Err(error);
             }
         };
-        if let Some(key) = key {
-            crate::customer_api::save_operator_receipt(
+        if let Some(key) = key
+            && let Err(error) = crate::customer_api::save_operator_receipt(
                 &mut tx,
                 &p.id,
                 key,
@@ -704,9 +700,50 @@ impl Store {
                 &request,
                 &row,
             )
-            .await?;
+            .await
+        {
+            self.gateway.budgets.give_back(withheld);
+            return Err(error);
         }
-        tx.commit().await?;
+        if let Err(error) = tx.commit().await {
+            self.gateway.budgets.give_back(withheld);
+            return Err(error.into());
+        }
+        Ok(row)
+    }
+    async fn change_allowance(
+        &self,
+        tx: &mut Tx,
+        p: &Principal,
+        tenant: &str,
+        value: &UpdateAllowance,
+        withheld: &[(crate::lease::Key, String, i64)],
+    ) -> Result<Value> {
+        for (key, period, bytes) in withheld {
+            sqlx::query("UPDATE gateway_transfer_leases SET held_bytes=GREATEST(0,held_bytes-$5),updated=clock_timestamp() WHERE session_id=$1 AND tenant_id=$2 AND project_id=$3 AND period=$4::date")
+                .bind(self.gateway.session())
+                .bind(&key.0)
+                .bind(&key.1)
+                .bind(period)
+                .bind(bytes)
+                .execute(&mut **tx)
+                .await?;
+        }
+        let row = match &value.allowance {
+            Some(allowance) => {
+                let row = Self::set_allowance(tx, tenant, allowance).await?;
+                Self::audit(tx, p, "tenant.allowance", tenant, tenant, json!(allowance)).await?;
+                row
+            }
+            None => {
+                sqlx::query_scalar::<_, Value>(&format!(
+                    "SELECT {WORKSPACE} FROM tenants t WHERE id=$1"
+                ))
+                .bind(tenant)
+                .fetch_one(&mut **tx)
+                .await?
+            }
+        };
         Ok(row)
     }
     /// The caller authorizes the operation and records its audit in this transaction.
