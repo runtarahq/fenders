@@ -15,6 +15,11 @@ const SHARE_SHORT: &str = "ingress allowance exhausted";
 /// What a cold admission tried without the lock answers when it needs it.
 const NEEDS_LOCK: &str = "the admission needs the mutation lock";
 
+/// What it answers when it found the app serving: the request goes in as
+/// one to an app that serves does, from what is read of it without the
+/// lock, unless its gate was closed.
+const SERVES_NOW: &str = "the app serves now";
+
 /// What it answers when it has had its process take what it lacked (a
 /// share of the workspace's limits, a lease of its allowance), and is to
 /// be tried without the lock again.
@@ -421,6 +426,19 @@ impl Store {
         let mut admitted = self
             .ingress_cold(hostname, allow_wait, request, &reservation, false)
             .await;
+        // The app came to serve since it was looked at: in as any request
+        // to an app that serves, unless its gate is closed, which only the
+        // locked path opens.
+        if matches!(&admitted, Err(e) if e.message == SERVES_NOW) {
+            if let Some(gate) = self.gate_read(hostname).await? {
+                if !self.owns(gate.owner.as_deref()) {
+                    return Err(misdirected());
+                }
+                let reservation = self.ingress_warm(&gate, request).await?;
+                return Ok((Some(gate.route), reservation));
+            }
+            admitted = Err(Error::new(StatusCode::CONFLICT, NEEDS_LOCK));
+        }
         if matches!(&admitted, Err(e) if e.message == TRY_AGAIN) {
             admitted = self
                 .ingress_cold(hostname, allow_wait, request, &reservation, false)
@@ -697,7 +715,7 @@ impl Store {
             ));
         }
         if !locked && route.is_some() {
-            return Err(needs_lock());
+            return Err(Error::new(StatusCode::CONFLICT, SERVES_NOW));
         }
         let expired = if locked {
             Self::expire_ingress(&mut tx).await?
@@ -1205,7 +1223,10 @@ impl Store {
         let settled = match self.gateway.gates.leave(reservation) {
             Some(entered) if !entered.row => true,
             _ => {
-                let mut tx = self.gateway_transaction().await?;
+                // Without the mutation lock: the row is all there is to it,
+                // and deleting it takes the row's own lock. Hundreds of
+                // requests that waited for apps to start end together.
+                let mut tx = self.transaction(false, false).await?;
                 let row = optional(
                     &mut tx,
                     "DELETE FROM ingress_reservations WHERE id=$1 RETURNING id",
