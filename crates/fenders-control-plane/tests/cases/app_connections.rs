@@ -379,6 +379,8 @@ async fn connection_completion_waits_for_http_replacement_and_the_commands_end()
         .ingress_begin(&format!("app-{app}.apps.test"), 0, true)
         .await
         .unwrap();
+    // Admitted without the lock: the scheduler's pass wakes it.
+    l.store.schedule().await.unwrap();
     assert_eq!(l.http(app).await["state"], "starting");
     assert_eq!(l.operation(&removed).await["state"], "pending");
     let command = l.execution(s(&command["id"])).await;

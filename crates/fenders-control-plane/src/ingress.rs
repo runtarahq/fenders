@@ -15,6 +15,11 @@ const SHARE_SHORT: &str = "ingress allowance exhausted";
 /// What a cold admission tried without the lock answers when it needs it.
 const NEEDS_LOCK: &str = "the admission needs the mutation lock";
 
+/// What it answers when it has had its process take what it lacked (a
+/// share of the workspace's limits, a lease of its allowance), and is to
+/// be tried without the lock again.
+const TRY_AGAIN: &str = "the admission is to be tried again";
+
 /// The largest request body and the largest response body passed on.
 pub const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -416,7 +421,12 @@ impl Store {
         let mut admitted = self
             .ingress_cold(hostname, allow_wait, request, &reservation, false)
             .await;
-        if matches!(&admitted, Err(e) if e.message == NEEDS_LOCK) {
+        if matches!(&admitted, Err(e) if e.message == TRY_AGAIN) {
+            admitted = self
+                .ingress_cold(hostname, allow_wait, request, &reservation, false)
+                .await;
+        }
+        if matches!(&admitted, Err(e) if e.message == NEEDS_LOCK || e.message == TRY_AGAIN) {
             admitted = self
                 .ingress_cold(hostname, allow_wait, request, &reservation, true)
                 .await;
@@ -728,15 +738,33 @@ impl Store {
             row: route.is_none(),
             bound: route.is_some(),
         };
+        // A share of the workspace's limits, or enough of its project's
+        // lease, that this process lacks is taken under the lock by one
+        // request at a time, and found taken by the others
+        // ([`Self::retake_share`], [`Self::lease_extend`]); then the request
+        // is tried without the lock again. After a restart, the first
+        // thousand requests of a workspace take them once, not each.
+        let key = (s(tenant).to_owned(), s(&context["project_id"]).to_owned());
         if !locked
             && (self.gateway.shares.of(s(tenant)).is_none()
-                || self
-                    .gateway
-                    .budgets
-                    .short(&(s(tenant).to_owned(), s(&context["project_id"]).to_owned()))
-                    .is_some())
+                || self.gateway.budgets.short(&key).is_some())
         {
-            return Err(needs_lock());
+            // Only read: given back before what follows takes the lock.
+            drop(tx);
+            if self.gateway.shares.of(s(tenant)).is_none() {
+                self.retake_share(
+                    s(tenant),
+                    Some((
+                        n(&limits["http_concurrent_requests"]),
+                        n(&limits["http_requests_per_minute"]),
+                    )),
+                )
+                .await;
+            }
+            if let Some(want) = self.gateway.budgets.short(&key) {
+                self.lease_extend(&key, crate::lease::BLOCK, want).await;
+            }
+            return Err(Error::new(StatusCode::CONFLICT, TRY_AGAIN));
         }
         let (share, taken) = match self.gateway.shares.of(s(tenant)) {
             Some(share) => (share, None),
