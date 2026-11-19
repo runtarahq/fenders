@@ -241,6 +241,18 @@ a workspace.
 - A request body is at most 64 MiB and a response 1 GiB; a response may last
   15 minutes and is cut after 60 seconds of silence. These, and the
   connection limits (1000 an app, 4000 a tenant), are constants.
+- Measured with 1,000 HTTP apps of the test component in one workspace on
+  one machine (8 executions at once): the scheduler's pass took about 60 ms
+  with all of them idle, as it passes over an idle app with nothing waiting;
+  1,000 deploys were taken in 29 seconds. A request to an idle app was
+  answered in 1 to 3 seconds, the slower ones making room by eviction: each
+  step of a wake (placement, start, the shim's first ask) waits on a loop
+  that runs once a second.
+- Time waiting for room counts toward an app's startup deadline (5 minutes
+  for a release, 10 seconds for a wake). Deploying more apps at once than a
+  workspace can start within it leaves the rest `http-readiness-timeout`,
+  blocked until each is released again: of 1,000 deployed into 8 slots, 360
+  started on the first try.
 - Scale-out reacts in seconds and by one execution at a time; a burst beyond
   the queue (64 requests an app) is answered 503.
 - An app's executions that have handled no request for 5 seconds give way
@@ -344,6 +356,9 @@ a workspace.
 - A control process that could not reach the database does not take
   sessions for dead until it has reached it for 15 seconds again.
 - The scheduler's placement of apps on edges counts apps, not their traffic.
+  An edge is live while it flushes and for 15 seconds after (`edges.seen`),
+  so one restarting keeps its apps; apps placed elsewhere while an edge was
+  away go back to it only when idle, 64 a second at most.
 
 ### Nodes
 
