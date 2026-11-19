@@ -213,12 +213,13 @@ impl Budgets {
     }
 
     /// Whether the allowance had nothing to give when last asked, and the
-    /// lease has nothing either: a request would pass no byte.
+    /// lease has not a block left either: no request is admitted. What is
+    /// less than a block is too little for a request to be worth admitting.
     pub fn exhausted(&self, key: &Key) -> bool {
         self.lock()
             .budgets
             .get(key)
-            .is_some_and(|budget| budget.exhausted && budget.available < 1)
+            .is_some_and(|budget| budget.exhausted && budget.available < BLOCK)
     }
 
     /// The allowance granted `bytes` more, in the month `period`, of the

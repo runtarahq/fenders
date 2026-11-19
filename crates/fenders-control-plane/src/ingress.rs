@@ -429,9 +429,9 @@ impl Store {
         if budgets.exhausted(&key) {
             return Err(quota("transfer allowance exhausted"));
         }
+        // A request is admitted while a block of the allowance is left.
         if let Some(want) = budgets.short(&key)
             && !self.lease_extend(&key, crate::lease::BLOCK, want).await
-            && !budgets.has(&key, 1)
         {
             return Err(quota("transfer allowance exhausted"));
         }
@@ -546,7 +546,14 @@ impl Store {
         let grant = match self.gateway.budgets.short(&key) {
             Some(want) => {
                 let (period, granted) = self.lease_grant(&mut tx, &key, want).await?;
-                if granted == 0 && !self.gateway.budgets.has(&key, 1) {
+                // A request is admitted while a block of the allowance is
+                // left: what the lease has and what it was just granted.
+                if granted < crate::lease::BLOCK
+                    && !self
+                        .gateway
+                        .budgets
+                        .has(&key, crate::lease::BLOCK - granted)
+                {
                     return Err(quota("transfer allowance exhausted"));
                 }
                 Some((period, granted, want))

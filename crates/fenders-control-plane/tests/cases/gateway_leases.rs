@@ -251,3 +251,33 @@ async fn lowering_an_allowance_takes_back_what_a_lease_holds_unused() {
     assert_eq!(l.store.gateway.budgets.holds(&key), before);
     l.finish().await;
 }
+
+/// A request is admitted while a block of the allowance is left, and not
+/// with less: that much is too little for a request to be worth admitting.
+#[tokio::test]
+async fn a_request_is_admitted_while_a_block_of_the_allowance_is_left() {
+    let l = Lab::new().await;
+    let (host, _) = serving(&l).await;
+    let allow = |bytes: i64| {
+        sqlx::query("UPDATE tenants SET transfer_bytes=$2 WHERE id=$1")
+            .bind(&l.tenant)
+            .bind(bytes)
+            .execute(&l.store.pool)
+    };
+    allow(BLOCK - 1).await.unwrap();
+    assert_eq!(
+        l.store.ingress_start(&host, 0).await.unwrap_err().status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    allow(BLOCK).await.unwrap();
+    // Refused once, the allowance is asked again from the next flush on.
+    l.store.flush_gateway().await.unwrap();
+    let (_, request) = l.store.ingress_start(&host, 0).await.unwrap();
+    l.store.ingress_finish(&request, Some(10)).await.unwrap();
+    // BLOCK - 10 left: less than a block.
+    assert_eq!(
+        l.store.ingress_start(&host, 0).await.unwrap_err().status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    l.finish().await;
+}
