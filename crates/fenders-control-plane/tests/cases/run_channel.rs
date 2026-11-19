@@ -282,11 +282,14 @@ async fn a_launch_names_its_run_channel_and_only_its_credential_is_answered() {
         StatusCode::CONFLICT
     );
     // Once the execution has released its reservation the launch is over.
+    // Changed here underneath the store, it is told as a heartbeat that
+    // made the change would tell it.
     sqlx::query("UPDATE executions SET reserved=false WHERE id=$1")
         .bind(id)
         .execute(&l.store.pool)
         .await
         .unwrap();
+    l.store.gateway.gates.changed();
     assert_eq!(
         call(&router, "POST", &outcome, Some(credential)).await,
         StatusCode::CONFLICT
@@ -545,13 +548,21 @@ async fn a_disabled_nodes_launches_are_refused_on_the_run_channel() {
         l.store
             .run_channel_authorize(id, generation, credential)
             .await
+            .map(|_| ())
             .map_err(|error| error.status)
     };
+    // Known, and believed: a second call reads nothing.
     assert_eq!(authorized().await, Ok(()));
+    let reads = || n(&l.store.background_status(&l.operator).unwrap()["run_channel"]["reads"]);
+    let before = reads();
+    assert_eq!(authorized().await, Ok(()));
+    assert_eq!(reads(), before);
     l.store
         .node_mode(&l.operator, s(&node["id"]), json!({"disabled":true}))
         .await
         .unwrap();
+    // Disabling the node is seen at the next call, though what was read
+    // of the launch is not two seconds old.
     assert_eq!(authorized().await, Err(StatusCode::FORBIDDEN));
     assert_eq!(
         call(&router, "POST", &path, Some(credential)).await,

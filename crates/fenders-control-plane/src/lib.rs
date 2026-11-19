@@ -31,6 +31,7 @@ pub mod gateway;
 pub mod http_exchange;
 pub mod ingress;
 pub mod key_rotation;
+pub mod launch;
 pub mod lease;
 pub mod load;
 pub mod model;

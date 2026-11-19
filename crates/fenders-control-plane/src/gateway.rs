@@ -138,6 +138,8 @@ pub struct Gateway {
     pub budgets: crate::lease::Budgets,
     /// What is known of the apps it serves and its requests in flight.
     pub gates: crate::gate::Gates,
+    /// What is known of the launches whose shims call its run channel.
+    pub launches: crate::launch::Launches,
     /// One ask to extend a lease at a time: the others wait, and find it
     /// extended.
     extending: tokio::sync::Mutex<()>,
@@ -150,6 +152,7 @@ impl Default for Gateway {
             inner: Default::default(),
             budgets: Default::default(),
             gates: Default::default(),
+            launches: Default::default(),
             extending: Default::default(),
         }
     }

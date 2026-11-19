@@ -6109,6 +6109,22 @@
               "cold",
               "in_flight"
             ]
+          },
+          "run_channel": {
+            "type": "object",
+            "description": "Calls the run channel was made by runs' shims, and of those the ones that read the database to learn what their launch is: the rest were answered from what was read of it in the last two seconds.",
+            "properties": {
+              "calls": {
+                "type": "integer"
+              },
+              "reads": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "calls",
+              "reads"
+            ]
           }
         },
         "required": [
@@ -6116,7 +6132,8 @@
           "uptime_ms",
           "components",
           "database",
-          "gateway"
+          "gateway",
+          "run_channel"
         ]
       },
       "Me": {

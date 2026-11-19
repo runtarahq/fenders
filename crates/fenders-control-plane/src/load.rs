@@ -19,6 +19,8 @@ pub struct Load {
     admitted: AtomicU64,
     refused: AtomicU64,
     cold: AtomicU64,
+    run_channel_calls: AtomicU64,
+    run_channel_reads: AtomicU64,
 }
 
 impl Load {
@@ -44,6 +46,15 @@ impl Load {
         self.cold.fetch_add(1, Relaxed);
     }
 
+    /// A call on the run channel, which read the database to learn what
+    /// its launch is, or did not.
+    pub(crate) fn run_channel(&self, read: bool) {
+        self.run_channel_calls.fetch_add(1, Relaxed);
+        if read {
+            self.run_channel_reads.fetch_add(1, Relaxed);
+        }
+    }
+
     /// Transactions made under the mutation lock.
     pub fn locked_transactions(&self) -> u64 {
         self.locked.load(Relaxed)
@@ -59,6 +70,10 @@ impl Load {
                 "admitted": self.admitted.load(Relaxed),
                 "refused": self.refused.load(Relaxed),
                 "cold": self.cold.load(Relaxed),
+            },
+            "run_channel": {
+                "calls": self.run_channel_calls.load(Relaxed),
+                "reads": self.run_channel_reads.load(Relaxed),
             },
         })
     }
@@ -82,6 +97,7 @@ mod tests {
             json!({
                 "database": {"locked_transactions": 2, "lock_wait_ms": 2},
                 "gateway": {"admitted": 1, "refused": 2, "cold": 0},
+                "run_channel": {"calls": 0, "reads": 0},
             })
         );
     }
