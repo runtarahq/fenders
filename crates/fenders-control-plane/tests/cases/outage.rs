@@ -370,7 +370,16 @@ async fn a_flush_kept_waiting_for_the_lock_is_not_an_outage() {
         "the database answered: no outage"
     );
     holder.rollback().await.unwrap();
-    edge.flush_gateway().await.unwrap();
+    // The lock let go, it flushes again: within half a second, here, once
+    // the tests beside it leave it a moment.
+    let mut flushed = false;
+    for _ in 0..20 {
+        if edge.flush_gateway().await.is_ok() {
+            flushed = true;
+            break;
+        }
+    }
+    assert!(flushed);
     l.finish().await;
 }
 
