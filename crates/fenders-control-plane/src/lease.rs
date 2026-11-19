@@ -58,9 +58,11 @@ pub enum Way {
 #[derive(Debug, PartialEq)]
 pub enum Pass {
     Passed,
-    /// The lease is short of `want` bytes: ask for them and try again.
+    /// The lease has not the `need` bytes these take: ask for `want`, which
+    /// brings it to its size, and try again.
     Short {
         key: Key,
+        need: i64,
         want: i64,
     },
     /// Past the body's size limit, refused before, or no such request.
@@ -281,6 +283,7 @@ impl Budgets {
             let Some(budget) = inner.budgets.get_mut(&flight.key) else {
                 return Pass::Short {
                     key: flight.key.clone(),
+                    need,
                     want: block.max(LEAST),
                 };
             };
@@ -293,6 +296,7 @@ impl Budgets {
             } else {
                 return Pass::Short {
                     key: flight.key.clone(),
+                    need,
                     want: (budget.size().max(block) - budget.available).min(MOST),
                 };
             };
@@ -522,8 +526,13 @@ mod tests {
             Pass::Passed
         );
         match budgets.pass("r", Way::Out, 1, u64::MAX) {
-            Pass::Short { key: short, want } => {
+            Pass::Short {
+                key: short,
+                need,
+                want,
+            } => {
                 assert_eq!(short, key());
+                assert_eq!(need, 1);
                 assert!(want >= BLOCK);
             }
             other => panic!("{other:?}"),

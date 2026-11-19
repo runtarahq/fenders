@@ -250,7 +250,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         // The listeners have drained: what their last requests left in
         // memory is written before the process ends.
-        if let Err(error) = store.flush_gateway().await {
+        if let Err(error) = store.close_gateway().await {
             eprintln!("the gateway's last flush failed: {}", error.message);
         }
         result?;

@@ -1668,6 +1668,7 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
     }
     // A request is settled once its response has ended.
     for _ in 0..200 {
+        store.flush_gateway().await.unwrap();
         if store.usage(&operator, tenant, None).await.unwrap()["ingress_month"]["requests"] == 2 {
             break;
         }
@@ -1879,6 +1880,7 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
     // malformed answer after the app was given it (the cases below), and it
     // is not charged.
     let charged = || async {
+        store.flush_gateway().await.unwrap();
         sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(sum(bytes),0)::bigint FROM traffic_usage WHERE tenant_id=$1",
         )

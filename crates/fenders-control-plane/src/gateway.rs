@@ -115,11 +115,28 @@ struct Batch {
     ended: Vec<Record>,
     open: Vec<String>,
     admitted: Vec<Admitted>,
+    leases: crate::lease::Taken,
+}
+
+/// What a flush did for the leases, to be told to their budgets once it
+/// has committed.
+#[derive(Default)]
+struct Written {
+    /// Leases that were not there to be taken from.
+    lost: Vec<crate::lease::Key>,
+    /// What each lease asked for was granted: the key, the bytes granted
+    /// and the bytes asked.
+    granted: Vec<(crate::lease::Key, i64, i64)>,
 }
 
 pub struct Gateway {
     session: String,
     inner: Mutex<Inner>,
+    /// What this session holds of each project's transfer allowance.
+    pub budgets: crate::lease::Budgets,
+    /// One ask to extend a lease at a time: the others wait, and find it
+    /// extended.
+    extending: tokio::sync::Mutex<()>,
 }
 
 impl Default for Gateway {
@@ -127,6 +144,8 @@ impl Default for Gateway {
         Self {
             session: uid(),
             inner: Default::default(),
+            budgets: Default::default(),
+            extending: Default::default(),
         }
     }
 }
@@ -211,6 +230,9 @@ impl Gateway {
     /// Whether a flush has anything to do: something to write, or a session
     /// row to touch.
     fn due(&self) -> bool {
+        if self.budgets.due() {
+            return true;
+        }
         let inner = self.lock();
         !inner.ended.is_empty()
             || !inner.admitted.is_empty()
@@ -238,6 +260,7 @@ impl Gateway {
 
     /// Puts back what a flush took and could not write.
     fn restore(&self, batch: Batch) {
+        self.budgets.restore(batch.leases);
         let mut inner = self.lock();
         for id in batch.open {
             if let Some((_, changed)) = inner.open.get_mut(&id) {
@@ -261,44 +284,77 @@ impl Gateway {
     }
 }
 
+/// The UTC month a lease taken now is for, as the database has it.
+const PERIOD: &str = "date_trunc('month',now() AT TIME ZONE 'UTC')::date";
+
 impl Store {
     /// Writes what the gateway holds in memory: its session, the records of
-    /// requests that ended or changed, and the admissions to be audited.
+    /// requests that ended or changed, the admissions to be audited, and
+    /// what was used of its leases, which it then brings to their size.
     /// One transaction, whatever it holds. What cannot be written is kept
     /// for the next flush.
     pub async fn flush_gateway(&self) -> Result<()> {
-        if !self.gateway.due() {
+        self.flush(false).await
+    }
+
+    /// The last flush of a gateway that is stopping: as any other, and
+    /// every lease is given back, so that none is left to be charged as a
+    /// dead session's.
+    pub async fn close_gateway(&self) -> Result<()> {
+        self.flush(true).await
+    }
+
+    async fn flush(&self, closing: bool) -> Result<()> {
+        if !closing && !self.gateway.due() {
             return Ok(());
         }
         let mut tx = self.transaction(true, false).await?;
+        let period: String = sqlx::query_scalar(&format!("SELECT {PERIOD}::text"))
+            .fetch_one(&mut *tx)
+            .await?;
         // Taken once the lock is held: a record's times are written as how
         // long ago they were, by the database's clock.
-        let batch = self.gateway.take();
-        match self.write_gateway(&mut tx, &batch).await {
-            Ok(()) => match tx.commit().await {
-                Ok(()) => {
-                    self.gateway.flushed();
-                    Ok(())
-                }
-                Err(error) => {
-                    self.gateway.restore(batch);
-                    Err(error.into())
-                }
-            },
+        let mut batch = self.gateway.take();
+        batch.leases = self.gateway.budgets.take(&period, closing);
+        let written = match self.write_gateway(&mut tx, &batch, closing).await {
+            Ok(written) => written,
             Err(error) => {
                 self.gateway.restore(batch);
-                Err(error)
+                return Err(error);
             }
+        };
+        if let Err(error) = tx.commit().await {
+            self.gateway.restore(batch);
+            return Err(error.into());
         }
+        let budgets = &self.gateway.budgets;
+        for key in &written.lost {
+            budgets.lost(key);
+        }
+        for (key, granted, asked) in &written.granted {
+            budgets.granted(key, &period, *granted, *asked);
+        }
+        self.gateway.flushed();
+        Ok(())
     }
 
-    async fn write_gateway(&self, tx: &mut Tx, batch: &Batch) -> Result<()> {
-        exec(
-            tx,
-            "INSERT INTO gateway_sessions(id) VALUES($1) ON CONFLICT(id) DO UPDATE SET seen=clock_timestamp()",
-            args![self.gateway.session()],
-        )
-        .await?;
+    async fn write_gateway(&self, tx: &mut Tx, batch: &Batch, closing: bool) -> Result<Written> {
+        let session = self.gateway.session();
+        if closing {
+            exec(
+                tx,
+                "DELETE FROM gateway_sessions WHERE id=$1",
+                args![session],
+            )
+            .await?;
+        } else {
+            exec(
+                tx,
+                "INSERT INTO gateway_sessions(id) VALUES($1) ON CONFLICT(id) DO UPDATE SET seen=clock_timestamp()",
+                args![session],
+            )
+            .await?;
+        }
         if !batch.rows.is_empty() {
             // A record of an app or release that is gone meanwhile is not
             // written; one whose execution is gone is written without it. A
@@ -326,7 +382,117 @@ impl Store {
             )
             .await?;
         }
-        Ok(())
+        self.write_leases(tx, &batch.leases).await
+    }
+
+    /// What was used is recorded and comes off the leases; what is given
+    /// back comes off them too; and each lease that is short of its size
+    /// is granted what the allowance has for it.
+    async fn write_leases(&self, tx: &mut Tx, taken: &crate::lease::Taken) -> Result<Written> {
+        use crate::db::rows;
+        let session = self.gateway.session();
+        let mut written = Written::default();
+        const LEASE: &str =
+            "(tenant_id text,project_id text,period date,bytes bigint,requests bigint)";
+        if !taken.used.is_empty() {
+            let used: Vec<Value> = taken.used.iter().map(|used| json!({"tenant_id":used.key.0,"project_id":used.key.1,"period":used.period,"bytes":used.bytes,"requests":used.requests})).collect();
+            exec(tx,&format!("INSERT INTO traffic_usage(tenant_id,project_id,period,bytes,requests)
+                SELECT tenant_id,project_id,period,bytes,requests FROM jsonb_to_recordset($1) AS u{LEASE}
+                ON CONFLICT(tenant_id,project_id,period) DO UPDATE SET bytes=traffic_usage.bytes+excluded.bytes,requests=traffic_usage.requests+excluded.requests"),args![Value::Array(used)]).await?;
+        }
+        // Off the leases: what was used, and what is given back.
+        let mut off: Vec<Value> = taken.used.iter().filter(|used| used.bytes > 0).map(|used| json!({"tenant_id":used.key.0,"project_id":used.key.1,"period":used.period,"bytes":used.bytes})).collect();
+        off.extend(taken.gives.iter().map(|(key, period, bytes)| json!({"tenant_id":key.0,"project_id":key.1,"period":period,"bytes":bytes})));
+        if !off.is_empty() {
+            let found = rows(tx,&format!("UPDATE gateway_transfer_leases l SET held_bytes=GREATEST(0,l.held_bytes-u.bytes),updated=clock_timestamp()
+                FROM (SELECT tenant_id,project_id,period,sum(bytes)::bigint bytes FROM jsonb_to_recordset($2) AS u{LEASE} GROUP BY tenant_id,project_id,period) u
+                WHERE l.session_id=$1 AND l.tenant_id=u.tenant_id AND l.project_id=u.project_id AND l.period=u.period
+                RETURNING l.tenant_id,l.project_id,l.period::text AS period"),args![session,Value::Array(off)]).await?;
+            // A lease that is not there was charged as a dead session's:
+            // this process did not flush for too long.
+            for used in taken.used.iter().filter(|used| used.bytes > 0) {
+                if !found.iter().any(|row| {
+                    row["tenant_id"] == used.key.0
+                        && row["project_id"] == used.key.1
+                        && row["period"] == used.period
+                }) {
+                    written.lost.push(used.key.clone());
+                }
+            }
+        }
+        for (key, period) in &taken.returns {
+            exec(tx,"DELETE FROM gateway_transfer_leases WHERE session_id=$1 AND tenant_id=$2 AND project_id=$3 AND period=$4::date",args![session,key.0,key.1,period]).await?;
+        }
+        for (key, want) in &taken.asks {
+            let (_, granted) = self.lease_grant(tx, key, *want).await?;
+            written.granted.push((key.clone(), granted, *want));
+        }
+        exec(
+            tx,
+            "DELETE FROM gateway_transfer_leases WHERE session_id=$1 AND held_bytes=0",
+            args![session],
+        )
+        .await?;
+        Ok(written)
+    }
+
+    /// Adds to this session's lease for `key` what the workspace's
+    /// allowance has of the `want` bytes asked for, in this month: none
+    /// when the workspace is not active. Says the month and what was
+    /// granted. The caller holds the mutation lock, and tells the budget
+    /// once its transaction has committed.
+    pub(crate) async fn lease_grant(
+        &self,
+        tx: &mut Tx,
+        key: &crate::lease::Key,
+        want: i64,
+    ) -> Result<(String, i64)> {
+        use crate::db::{n, one, s};
+        let room = one(tx,&format!("SELECT cur.period::text AS period,CASE WHEN t.lifecycle_state='active' THEN LEAST($2::numeric,GREATEST(0,t.transfer_bytes-COALESCE((SELECT sum(used_bytes+held_bytes) FROM transfer_allowance_accounting a WHERE a.tenant_id=t.id AND a.period=cur.period),0))) ELSE 0 END::bigint AS granted FROM tenants t,(SELECT {PERIOD} AS period) cur WHERE t.id=$1"),args![key.0,want.max(0)]).await?;
+        let (period, granted) = (s(&room["period"]).to_owned(), n(&room["granted"]));
+        if granted > 0 {
+            let session = self.gateway.session();
+            // A lease is some session's: one that has not flushed yet has
+            // its row from here.
+            exec(
+                tx,
+                "INSERT INTO gateway_sessions(id) VALUES($1) ON CONFLICT(id) DO NOTHING",
+                args![session],
+            )
+            .await?;
+            exec(tx,"INSERT INTO gateway_transfer_leases(session_id,tenant_id,project_id,period,held_bytes) VALUES($1,$2,$3,$4::date,$5)
+                ON CONFLICT(session_id,tenant_id,project_id,period) DO UPDATE SET held_bytes=gateway_transfer_leases.held_bytes+excluded.held_bytes,updated=clock_timestamp()",args![session,key.0,key.1,period,granted]).await?;
+        }
+        Ok((period, granted))
+    }
+
+    /// Extends the lease of `key` by up to `want` bytes, now: for a request
+    /// that found it without the `need` bytes it was about to pass, between
+    /// flushes. Whether it has them after.
+    pub async fn lease_extend(&self, key: &crate::lease::Key, need: i64, want: i64) -> bool {
+        let _one = self.gateway.extending.lock().await;
+        // Another request asked while this one waited.
+        if self.gateway.budgets.has(key, need) {
+            return true;
+        }
+        if self.gateway.budgets.exhausted(key) {
+            return false;
+        }
+        let want = want.max(need);
+        let granted = async {
+            let mut tx = self.transaction(true, false).await?;
+            let granted = self.lease_grant(&mut tx, key, want).await?;
+            tx.commit().await?;
+            Ok::<_, crate::error::Error>(granted)
+        }
+        .await;
+        match granted {
+            Ok((period, granted)) => {
+                self.gateway.budgets.granted(key, &period, granted, want);
+                self.gateway.budgets.has(key, need)
+            }
+            Err(_) => false,
+        }
     }
 
     /// Forgets the sessions of processes that are gone. What such a

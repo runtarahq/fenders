@@ -505,13 +505,21 @@ impl crate::store::Store {
         project: &str,
         bytes: i64,
     ) -> Result<()> {
-        use crate::{args, db::exec};
-        let mut tx = self.transaction(true, false).await?;
-        Self::require_workspace_active(&mut tx, tenant).await?;
-        Self::transfer_capacity(&mut tx, tenant, bytes).await?;
-        exec(&mut tx,"INSERT INTO traffic_usage(tenant_id,project_id,period,bytes,requests) VALUES($1,$2,date_trunc('month',now() AT TIME ZONE 'UTC')::date,$3,0) ON CONFLICT(tenant_id,project_id,period) DO UPDATE SET bytes=traffic_usage.bytes+excluded.bytes",args![tenant,project,bytes]).await?;
-        tx.commit().await?;
-        Ok(())
+        // Out of the gateway's lease of the allowance, in memory, as a
+        // request's bytes are: a transaction only when the lease is short.
+        let key = (tenant.to_owned(), project.to_owned());
+        let budgets = &self.gateway.budgets;
+        if budgets.spend(&key, bytes) {
+            return Ok(());
+        }
+        if self
+            .lease_extend(&key, bytes, bytes.max(crate::lease::LEAST))
+            .await
+            && budgets.spend(&key, bytes)
+        {
+            return Ok(());
+        }
+        Err(crate::db::quota("transfer allowance exhausted"))
     }
 }
 

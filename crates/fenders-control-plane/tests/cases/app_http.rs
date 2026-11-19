@@ -1249,11 +1249,13 @@ async fn a_request_its_client_abandoned_is_settled_at_once_and_charged_nothing()
         .unwrap();
 }
 
-/// A request's bytes are reserved against the transfer allowance a block at
-/// a time as they pass, and none pass that are not reserved.
+/// A request's bytes come out of the gateway's lease of the transfer
+/// allowance, which is extended as they pass, and none pass that are not
+/// leased: they stop exactly where the allowance ends.
 #[tokio::test]
-async fn a_requests_bytes_are_reserved_in_blocks_and_stop_where_the_allowance_ends() {
-    use fenders_control_plane::ingress::{MAX_REQUEST_BYTES, Meter, TRANSFER_BLOCK, Way};
+async fn a_requests_bytes_come_out_of_the_lease_and_stop_where_the_allowance_ends() {
+    use fenders_control_plane::ingress::{MAX_REQUEST_BYTES, Meter, Way};
+    use fenders_control_plane::lease::{BLOCK, LEAST};
     const MIB: usize = 1024 * 1024;
     let l = Lab::new().await;
     let node = l.node("worker").await;
@@ -1263,51 +1265,86 @@ async fn a_requests_bytes_are_reserved_in_blocks_and_stop_where_the_allowance_en
     l.release(&app, &version, "first").await;
     l.http_running(&app, &node).await;
     let host = format!("app-{app}.apps.test");
-    // Room for three blocks and a half.
+    // Room for three megabytes and a half.
+    let allowance = (3 * MIB + MIB / 2) as i64;
     sqlx::query("UPDATE tenants SET transfer_bytes=$2 WHERE id=$1")
         .bind(&l.tenant)
-        .bind((3 * MIB + MIB / 2) as i64)
+        .bind(allowance)
         .execute(&l.store.pool)
         .await
         .unwrap();
     let pool = &l.store.pool;
-    let reserved = |lease: String| async move {
-        sqlx::query_scalar::<_, i64>("SELECT bytes FROM ingress_reservations WHERE id=$1")
-            .bind(lease)
-            .fetch_one(pool)
-            .await
-            .unwrap()
+    let leased = || async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(sum(held_bytes),0)::bigint FROM gateway_transfer_leases",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
     };
+    let key = (l.tenant.clone(), l.project.clone());
+    let locked = || l.store.load.locked_transactions();
+    // The first request of a project takes its lease, at its least, in the
+    // transaction that admits it, and reserves a block of it. Its
+    // reservation holds nothing of the allowance itself.
+    assert_eq!(leased().await, 0);
     let (_, lease) = l.store.ingress_start(&host, 0).await.unwrap();
-    assert_eq!(reserved(lease.clone()).await, TRANSFER_BLOCK);
+    assert_eq!(leased().await, LEAST);
+    assert_eq!(
+        l.store.gateway.budgets.holds(&key),
+        Some((LEAST - BLOCK, BLOCK, 0))
+    );
+    let held: i64 = sqlx::query_scalar("SELECT bytes FROM ingress_reservations WHERE id=$1")
+        .bind(&lease)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(held, 0);
     let meter = Meter::new(l.store.clone(), &lease);
-    // Within the first block nothing more is reserved.
+    // Within the lease bytes pass in memory: no transaction.
+    let before = locked();
     assert!(meter.admit(Way::In, MIB / 2).await);
     assert!(meter.admit(Way::Out, MIB / 2).await);
-    assert_eq!(reserved(lease.clone()).await, TRANSFER_BLOCK);
-    // Past it, the next block is reserved before the bytes pass.
+    assert_eq!(locked(), before);
+    assert_eq!(leased().await, LEAST);
+    // Past it, the lease is extended before the bytes pass: one
+    // transaction, however many bytes.
     assert!(meter.admit(Way::Out, 1).await);
-    assert_eq!(reserved(lease.clone()).await, 2 * TRANSFER_BLOCK);
+    assert_eq!(locked(), before + 1);
     assert!(meter.admit(Way::Out, 2 * MIB - 1).await);
-    assert_eq!(reserved(lease.clone()).await, 3 * TRANSFER_BLOCK);
-    // The allowance has half a block left: a fourth cannot be reserved, so
-    // the byte that needs it does not pass, and nothing does after that.
+    assert!(leased().await >= (3 * MIB) as i64);
+    // The allowance has half a megabyte left, and the lease is given that:
+    // what is asked for is what the lease is to be brought to, and what is
+    // granted is what there is.
+    assert!(meter.admit(Way::Out, MIB / 2).await);
+    assert_eq!(leased().await, allowance);
+    // Nothing is left: the next byte does not pass, and nothing does after.
     assert!(!meter.admit(Way::Out, 1).await);
     assert!(!meter.admit(Way::In, 1).await);
-    assert_eq!(meter.passed().await, (3 * MIB) as i64);
-    assert_eq!(reserved(lease.clone()).await, 3 * TRANSFER_BLOCK);
+    assert_eq!(meter.passed().await, allowance);
+    assert_eq!(leased().await, allowance, "the allowance is not exceeded");
     l.store
         .ingress_complete(&lease, Some(meter.passed().await), Some(200))
         .await
         .unwrap();
-    let counted: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(sum(bytes),0)::bigint FROM traffic_usage WHERE tenant_id=$1",
-    )
-    .bind(&l.tenant)
-    .fetch_one(&l.store.pool)
-    .await
-    .unwrap();
-    assert_eq!(counted, (3 * MIB) as i64);
+    // What it used is written by the flush, and comes off the lease.
+    let counted = || async move {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT COALESCE(sum(bytes),0)::bigint,COALESCE(sum(requests),0)::bigint FROM traffic_usage",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(counted().await, (0, 0));
+    l.store.flush_gateway().await.unwrap();
+    assert_eq!(counted().await, (allowance, 1));
+    assert_eq!(leased().await, 0);
+    // A workspace with nothing left is admitted no request.
+    assert_eq!(
+        l.store.ingress_start(&host, 0).await.unwrap_err().status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
 
     // A body over its size limit is refused whatever the allowance, and a
     // request whose reservation lapsed passes nothing more.
@@ -1661,7 +1698,9 @@ async fn an_apps_executions_send_to_its_websocket_connections_and_no_others() {
     assert_eq!(status, StatusCode::OK);
     assert!(matches!(to_first.try_recv(), Ok(Push::Text(text)) if text == "hello"));
     assert!(to_second.try_recv().is_err());
-    // What it sent is counted against the transfer allowance.
+    // What it sent is counted against the transfer allowance, out of the
+    // gateway's lease, and written by its flush.
+    l.store.flush_gateway().await.unwrap();
     let counted: i64 = sqlx::query_scalar(
         "SELECT COALESCE(sum(bytes),0)::bigint FROM traffic_usage WHERE tenant_id=$1",
     )

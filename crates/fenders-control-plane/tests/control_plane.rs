@@ -53,6 +53,8 @@ mod egress_budget;
 mod execution_input_retention;
 #[path = "cases/execution_logs.rs"]
 mod execution_logs;
+#[path = "cases/gateway_leases.rs"]
+mod gateway_leases;
 #[path = "cases/http_runs.rs"]
 mod http_runs;
 #[path = "cases/ingress_admission.rs"]
@@ -569,6 +571,8 @@ async fn ingress_budget_and_recovery_barrier() {
         .unwrap();
     l.store.ingress_finish(&lease, Some(100)).await.unwrap();
     l.store.ingress_finish(&lease, Some(100)).await.unwrap();
+    // Settled once, and written by the gateway's flush.
+    l.store.flush_gateway().await.unwrap();
     assert_eq!(
         l.store.usage(&l.operator, &l.tenant, None).await.unwrap()["ingress_month"]["bytes"],
         100
