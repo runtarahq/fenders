@@ -617,7 +617,7 @@ impl Store {
         // An execution of an app that accepts WebSocket connections sends
         // to them by calling the run channel over its host-bound origin.
         // No other launch of Fenders' own names one.
-        if run_channel.is_some() && self.websocket_sender(execution).await?.is_some() {
+        if run_channel.is_some() && Self::websocket_sender(&mut tx, execution).await?.is_some() {
             spec["host_origin"] = json!(crate::websocket::ORIGIN);
         }
         let egress = if !e["egress_budget_launcher"].is_null() {

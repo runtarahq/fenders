@@ -835,8 +835,8 @@ impl Store {
             )
             .await?;
             Self::wake_http(&mut tx, s(&app["id"])).await?;
-        } else if !app.is_null() {
-            // The scheduler wakes it, told at once.
+        } else if !app.is_null() && self.gateway.wakes.tell_scheduler() {
+            // The scheduler wakes it, told at once ([`crate::wakes`]).
             exec(
                 &mut tx,
                 "SELECT pg_notify('fenders_schedule','wake')",

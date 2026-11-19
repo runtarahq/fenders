@@ -23,6 +23,8 @@ pub struct Wakes {
     /// The reservations of requests waking apps, asked about together:
     /// one query a round for all of them, not one each ([`Rounds`]).
     pub rounds: Rounds,
+    /// When the scheduler was last told of a wake ([`Self::tell_scheduler`]).
+    told: Mutex<Option<std::time::Instant>>,
 }
 
 /// Whether waiting requests' apps serve, asked in rounds: whichever
@@ -38,6 +40,9 @@ pub struct Rounds {
     )>,
     running: tokio::sync::Mutex<()>,
 }
+
+/// How often the scheduler is told of wakes at most.
+pub const TELL_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How often a round is run at most.
 pub const ROUND: std::time::Duration = std::time::Duration::from_millis(100);
@@ -137,6 +142,20 @@ impl Wakes {
             id,
             _done: sender,
         })
+    }
+
+    /// Whether to tell the scheduler of a wake now: at most every
+    /// [`TELL_EVERY`]. Each telling is a NOTIFY, and the commits of
+    /// transactions that notify are made one at a time; one telling stands
+    /// for every wake recorded before the scheduler's next pass, and the
+    /// scheduler runs a pass every second besides.
+    pub fn tell_scheduler(&self) -> bool {
+        let mut told = self.told.lock().unwrap_or_else(|e| e.into_inner());
+        if told.is_some_and(|at| at.elapsed() < TELL_EVERY) {
+            return false;
+        }
+        *told = Some(std::time::Instant::now());
+        true
     }
 
     /// How many apps' wakes are led now.
