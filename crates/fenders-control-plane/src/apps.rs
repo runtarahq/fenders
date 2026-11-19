@@ -325,7 +325,8 @@ impl Store {
         )
         .await?;
         if Self::request_app_http(&mut tx, s(&app["id"]), &op).await? {
-            self.reconcile_app_http(&mut tx).await?;
+            self.reconcile_apps_http(&mut tx, Some(&[s(&app["id"]).to_owned()]))
+                .await?;
         } else {
             exec(
                 &mut tx,

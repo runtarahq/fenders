@@ -505,7 +505,16 @@ impl Store {
         }
         Self::network_reconcile(&mut tx).await?;
         Self::reconcile_app_runs(&mut tx).await?;
-        self.reconcile_app_http(&mut tx).await?;
+        // The apps whose executions it reports; the scheduler's pass sees
+        // to the others within a second.
+        let reported: Vec<String> = reports
+            .iter()
+            .filter_map(|r| r["id"].as_str().map(str::to_owned))
+            .collect();
+        let apps: Vec<String> = rows(&mut tx,"SELECT DISTINCT h.app_id FROM app_http h JOIN executions e ON e.deployment_id=h.deployment_id OR e.id=h.candidate_execution_id WHERE e.id IN (SELECT jsonb_array_elements_text($1))",args![reported]).await?.iter().map(|r| s(&r["app_id"]).to_owned()).collect();
+        if !apps.is_empty() {
+            self.reconcile_apps_http(&mut tx, Some(&apps)).await?;
+        }
         Self::reconcile_workspace_suspensions(&mut tx).await?;
         let assignments=rows(&mut tx,"SELECT id,generation,desired,spec,tenant_id,project_id FROM executions WHERE node_id=$1 AND reserved ORDER BY created",args![node]).await?;
         self.commit_watched(tx).await?;

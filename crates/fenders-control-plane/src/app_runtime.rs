@@ -397,7 +397,8 @@ impl Store {
         let op =
             Self::operation(&mut tx, tenant, project, key, &request, app, "app-triggers").await?;
         let op = if http != triggers["http"] && Self::request_app_http(&mut tx, app, &op).await? {
-            self.reconcile_app_http(&mut tx).await?;
+            self.reconcile_apps_http(&mut tx, Some(&[app.to_owned()]))
+                .await?;
             one(
                 &mut tx,
                 "SELECT * FROM operations WHERE id=$1",
@@ -472,7 +473,8 @@ impl Store {
         .await?;
         // A release takes over from one that is serving without a gap.
         let op = if Self::replace_app_http(&mut tx, app, &op).await? {
-            self.reconcile_app_http(&mut tx).await?;
+            self.reconcile_apps_http(&mut tx, Some(&[app.to_owned()]))
+                .await?;
             one(
                 &mut tx,
                 "SELECT * FROM operations WHERE id=$1",
@@ -618,7 +620,8 @@ impl Store {
             Self::track_app_http(&mut tx, app, &op).await?
         };
         let op = if tracked {
-            self.reconcile_app_http(&mut tx).await?;
+            self.reconcile_apps_http(&mut tx, Some(&[app.to_owned()]))
+                .await?;
             one(
                 &mut tx,
                 "SELECT * FROM operations WHERE id=$1",
