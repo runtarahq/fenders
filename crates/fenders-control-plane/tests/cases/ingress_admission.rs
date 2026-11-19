@@ -257,3 +257,34 @@ async fn warm_admission_sees_a_change_at_the_next_request() {
     );
     l.finish().await;
 }
+
+/// A heartbeat or a scheduler pass that changes nothing of what decides
+/// whether an app serves leaves what the gateway knows be; one that does
+/// makes it be read again.
+#[tokio::test]
+async fn only_a_change_to_what_serves_makes_the_gateway_read_again() {
+    let l = Lab::new().await;
+    let node = l.node("epoch-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    l.store.schedule().await.unwrap();
+    let epoch = || l.store.gateway.gates.epoch();
+    let before = epoch();
+    // The same report again, and a pass with nothing to do.
+    l.report(&node, &all[0], "running", 2).await;
+    l.store.schedule().await.unwrap();
+    assert_eq!(epoch(), before);
+    let hostname = s(&route["hostname"]);
+    let request = l.store.ingress_start(hostname, 0).await.unwrap().1;
+    l.store.ingress_finish(&request, Some(0)).await.unwrap();
+    // The run stopped: that changes what serves.
+    l.report(&node, &all[0], "exited", 3).await;
+    assert!(epoch() > before);
+    l.finish().await;
+}

@@ -50,6 +50,7 @@ pub(crate) async fn apply(tx: &mut Tx) -> Result<()> {
     let workspace_deletion = [crate::workspace_lifecycle::DELETION_MIGRATION];
     let gateway_sessions = [crate::gateway::MIGRATION];
     let gateway_leases = [crate::gateway::LEASES_MIGRATION];
+    let gate_changes = [include_str!("../sql/gate_changes.sql")];
     let migrations = [
         (
             digest(format!("{SCHEMA}\0{}", BASELINE.join("\0"))),
@@ -72,6 +73,7 @@ pub(crate) async fn apply(tx: &mut Tx) -> Result<()> {
         (digest(workspace_deletion[0]), workspace_deletion.as_slice()),
         (digest(gateway_sessions[0]), gateway_sessions.as_slice()),
         (digest(gateway_leases[0]), gateway_leases.as_slice()),
+        (digest(gate_changes[0]), gate_changes.as_slice()),
     ];
     let applied: Vec<(i64, String)> = sqlx::query_as(
         "SELECT version,checksum FROM control_schema_migrations ORDER BY version LIMIT 64",

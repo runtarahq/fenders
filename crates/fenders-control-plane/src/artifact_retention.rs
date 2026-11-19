@@ -73,7 +73,7 @@ impl Store {
         Ok(row)
     }
     pub(crate) async fn reclaim_artifact_blobs(&self) -> Result<()> {
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let candidates=rows(&mut tx,"SELECT digest FROM artifact_blob_garbage WHERE next_attempt<=now() ORDER BY next_attempt,digest LIMIT 16 FOR UPDATE",args![]).await?;
         for entry in candidates {
             let digest = s(&entry["digest"]);
@@ -104,7 +104,7 @@ impl Store {
             )
             .await?;
         }
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(())
     }
 }

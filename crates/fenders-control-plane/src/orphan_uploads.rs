@@ -89,7 +89,7 @@ impl Store {
     pub(crate) async fn reclaim_orphan_uploads(&self) -> Result<()> {
         // The lock covers discovery, reference checks and unlink. In-flight upload
         // writes and backup reads hold this same lock, including before DB commit.
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let scan = self.orphan_upload_scan.clone();
         let root = self.state.join("blobs");
         let candidates = tokio::task::spawn_blocking(move || {
@@ -134,7 +134,7 @@ impl Store {
             failed
         })
         .await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         // Cursor progress survives filesystem failure; other candidates can be
         // examined next pass. Failed files return on the next full sweep.
         if failed {

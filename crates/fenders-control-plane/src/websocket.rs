@@ -600,9 +600,9 @@ impl crate::store::Store {
         if lost.is_empty() {
             return Ok(());
         }
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         exec(&mut tx,"UPDATE app_http_runs SET state='unknown',finished_at=clock_timestamp() WHERE websocket IS NOT NULL AND finished_at IS NULL AND id=ANY(ARRAY(SELECT jsonb_array_elements_text($1)))",args![serde_json::json!(lost)]).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(())
     }
 

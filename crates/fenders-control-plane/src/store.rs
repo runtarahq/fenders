@@ -262,6 +262,28 @@ impl Store {
     pub(crate) async fn gateway_transaction(&self) -> Result<Tx> {
         self.begin_transaction(true, false, false, false).await
     }
+    /// A transaction under the mutation lock that changes what the gates
+    /// hold only now and then, and often: a heartbeat, a scheduler pass. It
+    /// does not move the epoch when it begins; [`Self::commit_watched`]
+    /// moves it after it commits, if a trigger said it changed any of it
+    /// (`sql/gate_changes.sql`).
+    pub(crate) async fn watched_transaction(&self) -> Result<Tx> {
+        self.begin_transaction(true, false, false, false).await
+    }
+    /// Commits a [`Self::watched_transaction`], and moves the epoch if it
+    /// changed what the gates hold.
+    pub(crate) async fn commit_watched(&self, mut tx: Tx) -> Result<()> {
+        let changed: bool = sqlx::query_scalar(
+            "SELECT COALESCE(current_setting('fenders.gates_changed',true),'')='1'",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        if changed {
+            self.gateway.gates.changed();
+        }
+        Ok(())
+    }
     /// Whether this control plane can serve: it reaches its database, the
     /// database is the one its encryption key is for, and it is not held
     /// after a restore, when no change is admitted.

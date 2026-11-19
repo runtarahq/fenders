@@ -387,7 +387,7 @@ impl Store {
     pub async fn schedule(&self) -> Result<()> {
         self.claim_schedule_occurrences().await?;
         self.dispatch_schedule_runs().await?;
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         Self::expire_schedule_queue(&mut tx).await?;
         Self::retire_schedule_dispatch(&mut tx).await?;
         crate::placement::expire(&mut tx).await?;
@@ -428,7 +428,7 @@ impl Store {
         exec(&mut tx,"UPDATE operations o SET state='succeeded',updated=now() WHERE kind='stop-deployment' AND state='pending' AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.deployment_id=o.resource_id AND e.reserved)",args![]).await?;
         Self::reconcile_app_runs(&mut tx).await?;
         Self::reconcile_workspace_suspensions(&mut tx).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         self.ingress_expired(&expired);
         self.reclaim_artifact_blobs().await?;
         self.reclaim_orphan_uploads().await?;
