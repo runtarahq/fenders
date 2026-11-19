@@ -26,6 +26,7 @@ pub mod error;
 mod execution_input_retention;
 pub mod execution_logs;
 pub mod external_endpoints;
+pub mod gate;
 pub mod gateway;
 pub mod http_exchange;
 pub mod ingress;
