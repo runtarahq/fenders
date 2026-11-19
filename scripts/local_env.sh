@@ -60,8 +60,10 @@ api() { # METHOD PATH [JSON]
 start_control() {
   if running "$state/control.pid"; then kill "$(cat "$state/control.pid")"; sleep 1; fi
   if running "$state/edge.pid"; then kill "$(cat "$state/edge.pid")"; sleep 1; fi
-  local role=all
-  [[ ${LOCAL_SPLIT:-0} == 1 ]] && role=control
+  local role=all split_args=()
+  if [[ ${LOCAL_SPLIT:-0} == 1 ]]; then
+    role=control split_args=(--gateway-endpoint "https://127.0.0.1:$gateway_port")
+  fi
   # What an app's connections may name. The shipped policy for a public
   # deployment (deploy/systemd/external-network-public.json) with Docker's
   # bridge range left out of what is denied.
@@ -77,7 +79,7 @@ start_control() {
     --run-channel-port $channel_port --run-channel-endpoint "https://127.0.0.1:$channel_port" \
     --ca "$state/pki/ca.pem" --cert "$state/pki/control.pem" --key "$state/pki/control.key" \
     --external-network "$state/external-network.json" --public-egress "$state/public-egress.json" \
-    --role "$role" ${LOCAL_CONTROL_ARGS:-} >> "$state/control.log" 2>&1 < /dev/null &
+    --role "$role" ${split_args[@]+"${split_args[@]}"} ${LOCAL_CONTROL_ARGS:-} >> "$state/control.log" 2>&1 < /dev/null &
   echo $! > "$state/control.pid"
   until [[ -s $state/control/operator.token ]] && curl -s --cacert "$state/pki/ca.pem" -o /dev/null "$manage/"; do
     running "$state/control.pid" || { tail -5 "$state/control.log" >&2; exit 1; }
@@ -111,7 +113,12 @@ down() {
   if running "$state/node.pid"; then sudo kill "$(cat "$state/node.pid")" || true; fi
   if running "$state/control.pid"; then kill "$(cat "$state/control.pid")" || true; fi
   if running "$state/edge.pid"; then kill "$(cat "$state/edge.pid")" || true; fi
-  sleep 1
+  # They drain their connections and write what they hold before they
+  # end: the database stays up until they have.
+  for _ in $(seq 100); do
+    running "$state/control.pid" || running "$state/edge.pid" || break
+    sleep 1
+  done
   if [[ -d $cgroup ]]; then
     echo 1 | sudo tee "$cgroup/cgroup.kill" >/dev/null 2>&1 || true
     sleep 1

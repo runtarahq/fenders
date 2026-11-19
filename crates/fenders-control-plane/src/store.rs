@@ -17,6 +17,12 @@ use std::{
 pub const SCHEMA: &str = include_str!("../schema.sql");
 pub type Tx = Transaction<'static, Postgres>;
 
+/// The edges' gateway, as a control process reaches it.
+pub struct EdgeGateway {
+    pub(crate) base: String,
+    pub(crate) client: reqwest::Client,
+}
+
 /// What a control-plane process serves.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Serves {
@@ -65,6 +71,9 @@ pub struct Store {
     pub(crate) background: std::sync::Arc<crate::supervision::Monitor>,
     pub(crate) pickup: std::sync::Arc<crate::pickup::Pickup>,
     pub(crate) run_channel: Option<std::sync::Arc<crate::run_channel::RunChannel>>,
+    /// Where a control process reaches the edges' gateway, for a sample
+    /// request an operator or a key asks of an app.
+    pub(crate) edge_gateway: Option<std::sync::Arc<EdgeGateway>>,
     /// Requests for HTTP apps, between the gateway and the run channel.
     pub exchange: std::sync::Arc<crate::http_exchange::Exchange>,
     /// The WebSocket connections the gateway holds for apps.
@@ -325,6 +334,7 @@ impl Store {
             background: Default::default(),
             pickup: Default::default(),
             run_channel: None,
+            edge_gateway: None,
             exchange: Default::default(),
             http_rates: Default::default(),
             ingress_hosts: Default::default(),
@@ -396,6 +406,32 @@ impl Store {
     pub async fn check_schema(&self) -> Result<()> {
         let mut tx = self.transaction(false, false).await?;
         crate::schema_migrations::verify(&mut tx).await
+    }
+    /// The edges' gateway, `https://host[:port]`, verified against
+    /// `ca_pem`: where a control process sends a sample request.
+    pub fn with_edge_gateway(mut self, endpoint: &str, ca_pem: &[u8]) -> Result<Self> {
+        url::Url::parse(endpoint)
+            .ok()
+            .filter(|url| {
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && matches!(url.path(), "" | "/")
+            })
+            .ok_or_else(|| Error::invalid("gateway endpoint must be https://host[:port]"))?;
+        let ca = reqwest::Certificate::from_pem(ca_pem)
+            .map_err(|_| Error::invalid("invalid gateway CA"))?;
+        let client = reqwest::Client::builder()
+            .add_root_certificate(ca)
+            .http1_only()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|_| Error::internal())?;
+        self.edge_gateway = Some(std::sync::Arc::new(EdgeGateway {
+            base: endpoint.trim_end_matches('/').to_owned(),
+            client,
+        }));
+        Ok(self)
     }
     pub fn serving(mut self, serves: Serves) -> Self {
         self.serves = serves;

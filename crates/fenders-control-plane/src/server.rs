@@ -56,6 +56,13 @@ struct Args {
     /// Operator-approved IPv4 ranges for customer-owned external databases.
     #[arg(long)]
     external_network: Option<PathBuf>,
+    /// The edges' gateway, `https://host[:port]`, as a control process
+    /// reaches it to send an app the sample requests the API is asked for.
+    #[arg(long)]
+    gateway_endpoint: Option<String>,
+    /// The CA the edges' gateway certificate leads to, when not --ca.
+    #[arg(long)]
+    gateway_ca: Option<PathBuf>,
     /// What this process serves: everything (`all`), the management API,
     /// the scheduler and the nodes' peer (`control`), or the gateway and
     /// the run channel (`edge`, with `--state` holding what `fenders-keys
@@ -143,6 +150,17 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err(
             "a control process names the edges' run channel: --run-channel-endpoint".into(),
         );
+    }
+    if role == Role::Control {
+        let endpoint = args.gateway_endpoint.as_deref().ok_or(
+            "a control process sends sample requests to the edges' gateway: --gateway-endpoint",
+        )?;
+        let ca = args
+            .gateway_ca
+            .clone()
+            .or_else(|| tls.as_ref().map(|tls| tls.ca.clone()))
+            .ok_or("--gateway-ca or --ca is required")?;
+        store = store.with_edge_gateway(endpoint, &std::fs::read(ca)?)?;
     }
     if let Some(path) = args.external_network {
         store = store.with_external_network(

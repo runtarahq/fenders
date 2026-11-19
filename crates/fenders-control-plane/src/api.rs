@@ -1436,6 +1436,60 @@ async fn http_sample(state: &ApiState, hostname: &str, sample: HttpSample) -> Re
         .body(axum::body::Body::from(body))
         .map_err(|_| Error::internal())?;
     let started = std::time::Instant::now();
+    // A control process serves no gateway: the request goes to the edges',
+    // as a client's does, and what they answer is the answer.
+    if let Some(edge) = &state.store.edge_gateway {
+        let (parts, body) = request.into_parts();
+        let body = http_body_util::BodyExt::collect(body)
+            .await
+            .map_err(|_| Error::internal())?
+            .to_bytes();
+        let mut asked = edge
+            .client
+            .request(
+                parts.method,
+                format!("{}{}", edge.base, sent["path"].as_str().unwrap_or("/")),
+            )
+            .body(body);
+        for (name, value) in &parts.headers {
+            asked = asked.header(name, value);
+        }
+        return Ok(match asked.send().await {
+            Ok(mut response) => {
+                let status = response.status().as_u16();
+                let headers: serde_json::Map<String, Value> = response
+                    .headers()
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value.to_str().ok().map(|v| (key.to_string(), json!(v)))
+                    })
+                    .collect();
+                let (mut preview, mut bytes, mut whole) = (Vec::new(), 0usize, true);
+                loop {
+                    match response.chunk().await {
+                        Ok(Some(data)) => {
+                            bytes += data.len();
+                            let room = (16 * 1024usize).saturating_sub(preview.len());
+                            preview.extend_from_slice(&data[..data.len().min(room)]);
+                            if bytes > 1024 * 1024 {
+                                whole = false;
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            whole = false;
+                            break;
+                        }
+                    }
+                }
+                json!({"outcome":"response","request_id":request_id,"method":sent["method"],"path":sent["path"],"duration_ms":started.elapsed().as_millis() as u64,"status":status,"headers":headers,"body":STANDARD.encode(&preview),"body_bytes":bytes,"truncated":!whole || preview.len()<bytes})
+            }
+            Err(_) => {
+                json!({"outcome":"refused","request_id":request_id,"method":sent["method"],"path":sent["path"],"duration_ms":started.elapsed().as_millis() as u64,"gateway_status":503,"error":"the edges' gateway could not be reached"})
+            }
+        });
+    }
     let mut dispatched = false;
     // Reuse admission, wake, readiness, transfer accounting and pinned node
     // transport. Never copy management headers or follow application redirects.
