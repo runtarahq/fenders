@@ -199,7 +199,12 @@ impl Store {
         Ok(())
     }
 
-    async fn drain_http(&self, tx: &mut Tx, binding: &Value, seen: &Observed) -> Result<bool> {
+    pub(crate) async fn drain_http(
+        &self,
+        tx: &mut Tx,
+        binding: &Value,
+        seen: &Observed,
+    ) -> Result<bool> {
         // The app is leaving service: from here its requests are admitted
         // under the lock this transaction holds, and so after it.
         let app = s(&binding["app_id"]);
@@ -246,6 +251,10 @@ impl Store {
         // What the exchange shows of HTTP runs: this process's, or the
         // edges' as they last wrote it ([`crate::observed`]).
         let seen = self.observed(tx).await?;
+        // Apps the workspace's allowance has no room for: idle executions
+        // give way to them once every app has been seen to, as what is read
+        // of the others above would be out of date.
+        let mut short_of_room = Vec::new();
         for binding in rows(tx,"SELECT h.*,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h",args![]).await? {
             let app=one(tx,"SELECT a.*,t.http FROM apps a JOIN app_triggers t ON t.app_id=a.id WHERE a.id=$1",args![binding["app_id"]]).await?;
             let app_id=s(&app["id"]);
@@ -378,8 +387,21 @@ impl Store {
                     exec(tx,"INSERT INTO app_http_attempts(execution_id,tenant_id,project_id,app_id,release_id,generation) VALUES($1,$2,$3,$4,$5,$6)",args![e["id"],app["tenant_id"],app["project_id"],app_id,release["id"],binding["generation"]]).await?;
                     exec(tx,"UPDATE app_http SET execution_id=$1,state='starting',reason='waiting-for-capacity',updated=now() WHERE app_id=$2",args![e["id"],app_id]).await?;
                 },
-                Err(e) if e.status==StatusCode::TOO_MANY_REQUESTS=>{Self::http_state(tx,app_id,"starting",Some("allowance-exhausted")).await?;},
+                Err(e) if e.status==StatusCode::TOO_MANY_REQUESTS=>{
+                    Self::http_state(tx,app_id,"starting",Some("allowance-exhausted")).await?;
+                    short_of_room.push((app["tenant_id"].clone(),crate::eviction::Room::of_spec(&spec),app_id.to_owned()));
+                },
                 Err(e)=>return Err(e),
+            }
+        }
+        // The workspace's idle executions give way to them
+        // ([`crate::eviction`]); each starts once they have stopped.
+        for (tenant, need, app_id) in short_of_room {
+            if self
+                .make_room_in_allowance(tx, s(&tenant), need, &seen, &json!({"app_id":app_id}))
+                .await?
+            {
+                Self::http_state(tx, &app_id, "starting", Some("making-room")).await?;
             }
         }
         exec(tx,"UPDATE operations o SET state=CASE WHEN h.blocked THEN 'failed' ELSE 'succeeded' END,error=CASE WHEN h.blocked THEN h.reason ELSE NULL END,updated=now() FROM app_http_operations x JOIN app_http h ON h.app_id=x.app_id AND h.generation=x.generation WHERE o.id=x.operation_id AND o.state='pending' AND o.kind<>'app-connections' AND ((h.state IN ('serving','disabled','idle') AND h.candidate_until IS NULL) OR h.blocked)",args![]).await?;

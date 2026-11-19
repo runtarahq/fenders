@@ -430,6 +430,7 @@ impl Store {
         Self::network_reconcile(&mut tx).await?;
         exec(&mut tx,"UPDATE executions SET state='unreachable',updated=now() WHERE reserved AND node_id IN (SELECT id FROM nodes WHERE last_seen<now()-interval '15 seconds') AND state IN ('starting','running','paused')",args![]).await?;
         self.reconcile_app_http(&mut tx).await?;
+        let mut seen = None;
         for e in rows(&mut tx,"SELECT * FROM executions WHERE node_id IS NULL AND desired='running' AND reserved AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=executions.tenant_id AND t.lifecycle_state='active') ORDER BY created,id",args![]).await? {
             let public = !Self::https_connections(&mut tx,s(&e["id"])).await?.is_empty();
             if public && self.current_https_policy(&mut tx).await.is_err() {
@@ -438,9 +439,13 @@ impl Store {
             }
             let candidates=rows(&mut tx,"SELECT n.*,COALESCE(sum(e.cpu_percent),0) used_cpu,COALESCE(sum(e.memory_mib),0) used_memory,count(e.id) used_instances FROM nodes n LEFT JOIN executions e ON e.node_id=n.id AND e.reserved WHERE NOT n.draining AND NOT n.disabled AND n.backend='wasm' AND n.architecture=$1 AND n.runtime=$2 AND n.last_seen>now()-interval '10 seconds' GROUP BY n.id ORDER BY count(e.id),n.id",args![e["spec"]["architecture"],e["spec"]["runtime"]]).await?;
             let mut rejection=Some(crate::placement::Rejection::NoWorker);
+            let mut full=Vec::new();
             for node in candidates {
                 match crate::placement::candidate(&node,&e,public) {
-                    Err(reason) => rejection=Some(rejection.unwrap().max(reason)),
+                    Err(reason) => {
+                        if reason==crate::placement::Rejection::Capacity {full.push(node);}
+                        rejection=Some(rejection.unwrap().max(reason))
+                    },
                     Ok(budget) => {
                     exec(&mut tx,"UPDATE executions SET node_id=$1,egress_budget_launcher=$3,state='starting',updated=now() WHERE id=$2",args![node["id"],e["id"],if budget {node["egress_budget_launcher"].clone()} else {Value::Null}]).await?;
                     Self::audit_system(&mut tx,"scheduler","execution.assign",&e["id"],&e["tenant_id"],json!({"node_id":node["id"],"generation":e["generation"]})).await?;
@@ -448,7 +453,16 @@ impl Store {
                     }
                 }
             }
-            if let Some(reason)=rejection { crate::placement::record(&mut tx,&e,reason).await?; }
+            if let Some(reason)=rejection {
+                crate::placement::record(&mut tx,&e,reason).await?;
+                // Nodes it fits on are full: the workspace's idle
+                // executions on one give way ([`crate::eviction`]), unless
+                // it is an app scaling out.
+                if reason==crate::placement::Rejection::Capacity && optional(&mut tx,"SELECT 1 AS extra FROM app_http_extras WHERE execution_id=$1",args![e["id"]]).await?.is_none() {
+                    if seen.is_none() {seen=Some(self.observed(&mut tx).await?);}
+                    self.make_room_on_nodes(&mut tx,&e,&full,seen.as_ref().unwrap()).await?;
+                }
+            }
         }
         for d in rows(&mut tx,"SELECT d.* FROM deployments d WHERE desired='running' AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=d.tenant_id AND t.lifecycle_state='active') AND NOT EXISTS(SELECT 1 FROM app_http h WHERE h.deployment_id=d.id) AND (spec->>'restart_policy'='always' OR NOT EXISTS(SELECT 1 FROM executions e WHERE e.deployment_id=d.id AND e.revision=d.revision)) AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.deployment_id=d.id AND e.reserved)",args![]).await? {
             if let Err(e)=Self::execution(&mut tx,s(&d["tenant_id"]),s(&d["project_id"]),&d["spec"],Some(s(&d["id"])),n(&d["revision"])).await&& e.status!=StatusCode::TOO_MANY_REQUESTS {return Err(e)}

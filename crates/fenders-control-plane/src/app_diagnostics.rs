@@ -107,6 +107,14 @@ fn diagnostic(reason: Option<&str>, state: &str) -> Option<Value> {
             "The worker could not admit this execution because storage was constrained.",
             "This request did not start the component. After capacity is restored, explicitly run the command again or activate the intended HTTP version. Fenders will not replay this command automatically.",
         ),
+        "evicted" => (
+            "Stopped while idle, to make room for other work of this workspace.",
+            "An app that handled no request for a few seconds gives way when the workspace's allowance or a worker has no room for something else of the workspace. It wakes again on its next request.",
+        ),
+        "making-room" => (
+            "Waiting for idle executions of this workspace to stop and make room.",
+            "Executions of this workspace that handled no request for a few seconds are being stopped to make room for this one. It starts once they have stopped, within its startup deadline.",
+        ),
         "draining-http" | "idle-drain" => (
             "Waiting for HTTP work to drain and stop.",
             "Existing work and compute reservations remain until shutdown is confirmed. An idle app can wake again on its next request.",
