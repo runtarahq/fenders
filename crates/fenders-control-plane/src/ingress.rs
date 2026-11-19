@@ -524,12 +524,35 @@ impl Store {
             row: false,
             bound: true,
         };
-        if !gates.enter(&reservation, entered, share.concurrent) {
-            return Err(quota("ingress allowance exhausted"));
-        }
-        if !self.http_rates.admit(&gate.tenant, share.per_minute) {
-            gates.leave(&reservation);
-            return Err(quota("ingress allowance exhausted"));
+        let mut share = share;
+        let mut entered = Some(entered);
+        loop {
+            let entering = entered.take().expect("not yet entered");
+            if gates.enter(&reservation, entering.clone(), share.concurrent) {
+                if self.http_rates.admit(&gate.tenant, share.per_minute) {
+                    break;
+                }
+                gates.leave(&reservation);
+            }
+            // This edge's share has no room, but the workspace may have:
+            // other edges give back what they do not use at their next
+            // flush ([`crate::shares`]).
+            let (in_flight, admitted) = (
+                gates.in_flight_of(&gate.tenant) as i64,
+                self.http_rates.count(&gate.tenant),
+            );
+            match self
+                .grow_share(&gate.tenant, gate.concurrent, gate.per_minute, |grown| {
+                    grown.concurrent > in_flight && grown.per_minute > admitted
+                })
+                .await
+            {
+                Some(grown) => {
+                    share = grown;
+                    entered = Some(entering);
+                }
+                None => return Err(quota("ingress allowance exhausted")),
+            }
         }
         budgets.take_off(&reservation, &key, true);
         if let (Some((method, path)), Some(app), Some(release)) =
@@ -623,17 +646,18 @@ impl Store {
             bound: route.is_some(),
         };
         let (share, taken) = match self.gateway.shares.of(s(tenant)) {
-            Some(share) => (share, false),
-            None => (
-                self.take_share(
-                    &mut tx,
-                    s(tenant),
-                    n(&limits["http_concurrent_requests"]),
-                    n(&limits["http_requests_per_minute"]),
-                )
-                .await?,
-                true,
-            ),
+            Some(share) => (share, None),
+            None => {
+                let taken = self
+                    .take_share(
+                        &mut tx,
+                        s(tenant),
+                        n(&limits["http_concurrent_requests"]),
+                        n(&limits["http_requests_per_minute"]),
+                    )
+                    .await?;
+                (taken.0, Some(taken))
+            }
         };
         if !self
             .gateway
@@ -709,8 +733,8 @@ impl Store {
             Self::wake_http(&mut tx, s(&app["id"])).await?;
         }
         tx.commit().await?;
-        if taken {
-            self.gateway.shares.set(s(tenant), share);
+        if let Some(taken) = taken {
+            self.gateway.shares.set(s(tenant), taken);
         }
         self.ingress_expired(&expired);
         if let Some(gate) = gate {

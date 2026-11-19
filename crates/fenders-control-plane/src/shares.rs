@@ -52,6 +52,14 @@ impl Limits {
 /// uses, and an even part (of `holders` processes, itself among them) of
 /// what the workspace does not use, but no more than the other processes'
 /// shares leave of the limit.
+/// What a workspace does not use of its limits, here and elsewhere: room a
+/// share may yet grow into.
+pub fn room(limit: Limits, used: Limits, others_use: Limits) -> Limits {
+    limit
+        .zip(used, |l, u| l - u)
+        .zip(others_use, |r, o| (r - o).max(0))
+}
+
 pub fn fair(
     limit: Limits,
     used: Limits,
@@ -70,6 +78,9 @@ pub fn fair(
 
 struct Held {
     share: Limits,
+    /// What the workspace did not use of its limits when the share was
+    /// last taken.
+    room: Limits,
     /// When it was last used: a share nothing uses for a while is given
     /// back.
     used: Instant,
@@ -93,14 +104,21 @@ impl Shares {
         Some(held.share)
     }
 
-    /// The share of `tenant` is now `share`.
-    pub fn set(&self, tenant: &str, share: Limits) {
+    /// The share of `tenant` is now `share`, and the workspace had `room`
+    /// left when it was taken.
+    pub fn set(&self, tenant: &str, (share, room): (Limits, Limits)) {
         let mut inner = self.lock();
         let held = inner.entry(tenant.to_owned()).or_insert(Held {
             share,
+            room,
             used: Instant::now(),
         });
         held.share = share;
+        held.room = room;
+    }
+
+    pub fn room_of(&self, tenant: &str) -> Option<Limits> {
+        self.lock().get(tenant).map(|held| held.room)
     }
 
     /// The workspaces it holds shares of, and whether each has gone unused

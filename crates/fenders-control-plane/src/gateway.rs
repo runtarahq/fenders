@@ -133,7 +133,10 @@ struct Batch {
 #[derive(Default)]
 struct Written {
     /// Shares of workspaces' limits brought to their size, or given back.
-    shares: Vec<(String, Option<crate::shares::Limits>)>,
+    shares: Vec<(
+        String,
+        Option<(crate::shares::Limits, crate::shares::Limits)>,
+    )>,
     /// Leases that were not there to be taken from.
     lost: Vec<crate::lease::Key>,
     /// What each lease asked for was granted: the key, the bytes granted
@@ -546,7 +549,7 @@ impl Store {
         tenant: &str,
         concurrent: i64,
         per_minute: i64,
-    ) -> Result<crate::shares::Limits> {
+    ) -> Result<(crate::shares::Limits, crate::shares::Limits)> {
         use crate::{
             db::{n, one},
             shares::{Limits, fair},
@@ -572,6 +575,7 @@ impl Store {
             connections: n(&others["used_connections"]),
         };
         let share = fair(limit, used, hold, others_use, n(&others["holders"]) + 1);
+        let room = crate::shares::room(limit, used, others_use);
         exec(
             tx,
             "INSERT INTO gateway_sessions(id) VALUES($1) ON CONFLICT(id) DO NOTHING",
@@ -581,7 +585,7 @@ impl Store {
         exec(tx,"INSERT INTO edge_limit_shares(session_id,tenant_id,concurrent,per_minute,connections,used_concurrent,used_per_minute,used_connections) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
             ON CONFLICT(session_id,tenant_id) DO UPDATE SET concurrent=excluded.concurrent,per_minute=excluded.per_minute,connections=excluded.connections,used_concurrent=excluded.used_concurrent,used_per_minute=excluded.used_per_minute,used_connections=excluded.used_connections,updated=clock_timestamp()",
             args![session,tenant,share.concurrent,share.per_minute,share.connections,used.concurrent,used.per_minute,used.connections]).await?;
-        Ok(share)
+        Ok((share, room))
     }
 
     /// This process's share of `tenant`'s limits, taken now if it holds
@@ -609,13 +613,54 @@ impl Store {
         })
         .await;
         match taken {
-            Ok(share) => {
-                self.gateway.shares.set(tenant, share);
-                Ok(share)
+            Ok(taken) => {
+                self.gateway.shares.set(tenant, taken);
+                Ok(taken.0)
             }
             Err(error) => {
                 self.gateway.outage.failed(&error);
                 Err(error)
+            }
+        }
+    }
+
+    /// This process's share of `tenant`'s limits, when it has not room for
+    /// one more request and the workspace has: other processes hold what it
+    /// does not use, and give it back at their next flush. Waits up to two
+    /// seconds for that, taking its share again as they do. `None` when the
+    /// workspace has no room, or none came.
+    pub(crate) async fn grow_share(
+        &self,
+        tenant: &str,
+        concurrent: i64,
+        per_minute: i64,
+        enough: impl Fn(crate::shares::Limits) -> bool,
+    ) -> Option<crate::shares::Limits> {
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let room = self.gateway.shares.room_of(tenant)?;
+            if room.concurrent < 1 && room.per_minute < 1
+                || self.gateway.outage.down_for().is_some()
+            {
+                return None;
+            }
+            if tokio::time::Instant::now() >= until {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let taken = crate::outage::within(crate::outage::READ_WITHIN, async {
+                let mut tx = self.gateway_transaction().await?;
+                let share = self
+                    .take_share(&mut tx, tenant, concurrent, per_minute)
+                    .await?;
+                tx.commit().await?;
+                Ok::<_, crate::error::Error>(share)
+            })
+            .await
+            .ok()?;
+            self.gateway.shares.set(tenant, taken);
+            if enough(taken.0) {
+                return Some(taken.0);
             }
         }
     }
@@ -626,7 +671,12 @@ impl Store {
         &self,
         tx: &mut Tx,
         closing: bool,
-    ) -> Result<Vec<(String, Option<crate::shares::Limits>)>> {
+    ) -> Result<
+        Vec<(
+            String,
+            Option<(crate::shares::Limits, crate::shares::Limits)>,
+        )>,
+    > {
         use crate::db::{n, optional};
         let mut written = Vec::new();
         for (tenant, idle) in self.gateway.shares.held(std::time::Duration::from_secs(30)) {

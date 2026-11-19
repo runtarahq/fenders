@@ -32,6 +32,11 @@
 # control (management API on 19090, nodes' peer on 19091) and an edge
 # (gateway on 19092, run channel on 19093, probes and status on 19095), the
 # edge with its own state directory and only the key fenders-keys derives.
+# LOCAL_EDGES=2 with LOCAL_SPLIT=1 runs two registered edges instead of one:
+# edge-a on the ports above, edge-b on 19192 (gateway), 19193 (run channel)
+# and 19195 (probes), passing each other requests on 19096 and 19196.
+# Clients and shims reach edge-a. Its identities are made with the PKI, so
+# start such an environment from nothing (destroy).
 # LOCAL_PG names the PostgreSQL container and its volume, for a second
 # environment whose database is not the first's; with it, give LOCAL_STATE
 # too, since a state directory and its database go together.
@@ -57,9 +62,30 @@ api() { # METHOD PATH [JSON]
     ${3:+-d "$3"} "$manage/v1$2"
 }
 
+start_edge() { # NAME EDGE_NAME PROBE_PORT GATEWAY_PORT CHANNEL_PORT FORWARD_PORT IDENTITY
+  local name=$1 edge_name=$2 identity=$7
+  # The edge's state holds what it is given of the key, and nothing else.
+  mkdir -p "$state/$name" && chmod 700 "$state/$name"
+  [[ -f $state/$name/edge.key ]] || "$bin/fenders-keys" edge --state "$state/control" --output "$state/$name/edge.key" >/dev/null
+  if running "$state/$name.pid"; then kill "$(cat "$state/$name.pid")"; sleep 1; fi
+  FENDERS_DATABASE_URL=postgresql://postgres:local@127.0.0.1:$pg_port/fenders \
+    setsid nohup "$bin/fenders-control-plane" --role edge --state "$state/$name" --host 127.0.0.1 \
+    --port "$3" --gateway-port "$4" --run-channel-port "$5" ${edge_name:+--edge-name "$edge_name" --forward-port "$6"} \
+    --ca "$state/pki/ca.pem" --cert "$state/pki/$identity.pem" --key "$state/pki/$identity.key" \
+    ${LOCAL_EDGE_ARGS:-} >> "$state/$name.log" 2>&1 < /dev/null &
+  echo $! > "$state/$name.pid"
+  until curl -s --cacert "$state/pki/ca.pem" -o /dev/null "https://127.0.0.1:$3/healthz"; do
+    running "$state/$name.pid" || { tail -5 "$state/$name.log" >&2; exit 1; }
+    sleep 1
+  done
+}
+
 start_control() {
   if running "$state/control.pid"; then kill "$(cat "$state/control.pid")"; sleep 1; fi
-  if running "$state/edge.pid"; then kill "$(cat "$state/edge.pid")"; sleep 1; fi
+  local edge
+  for edge in edge edge-a edge-b; do
+    if running "$state/$edge.pid"; then kill "$(cat "$state/$edge.pid")"; sleep 1; fi
+  done
   local role=all split_args=()
   if [[ ${LOCAL_SPLIT:-0} == 1 ]]; then
     role=control split_args=(--gateway-endpoint "https://127.0.0.1:$gateway_port")
@@ -86,19 +112,23 @@ start_control() {
     sleep 1
   done
   if [[ $role == control ]]; then
-    # The edge's state holds what it is given of the key, and nothing else.
-    mkdir -p "$state/edge" && chmod 700 "$state/edge"
-    [[ -f $state/edge/edge.key ]] || "$bin/fenders-keys" edge --state "$state/control" --output "$state/edge/edge.key" >/dev/null
-    FENDERS_DATABASE_URL=postgresql://postgres:local@127.0.0.1:$pg_port/fenders \
-      setsid nohup "$bin/fenders-control-plane" --role edge --state "$state/edge" --host 127.0.0.1 \
-      --port $edge_port --gateway-port $gateway_port --run-channel-port $channel_port \
-      --ca "$state/pki/ca.pem" --cert "$state/pki/control.pem" --key "$state/pki/control.key" \
-      ${LOCAL_EDGE_ARGS:-} >> "$state/edge.log" 2>&1 < /dev/null &
-    echo $! > "$state/edge.pid"
-    until curl -s --cacert "$state/pki/ca.pem" -o /dev/null "https://127.0.0.1:$edge_port/healthz"; do
-      running "$state/edge.pid" || { tail -5 "$state/edge.log" >&2; exit 1; }
-      sleep 1
-    done
+    local edges=${LOCAL_EDGES:-1}
+    if (( edges == 1 )); then
+      start_edge edge "" $edge_port $gateway_port $channel_port 0 control
+    else
+      # Registered edges, each owning the apps the scheduler gives it.
+      # Clients and shims reach edge-a, as a balancer would put them
+      # anywhere: edge-b's apps are passed to it.
+      local name ports
+      for name in edge-a edge-b; do
+        if [[ $name == edge-a ]]; then ports=($edge_port $gateway_port $channel_port 19096)
+        else ports=(19195 19192 19193 19196); fi
+        api GET /edges | jq -e --arg n "$name" '.items | any(.name == $n)' >/dev/null ||
+          api POST /edges "$(jq -n --arg n "$name" --arg pin "$(jq -er --arg n "$name" '.[$n]' "$state/pins.json")" \
+            --arg endpoint "https://127.0.0.1:${ports[3]}" '{name:$n,cert_sha256:$pin,endpoint:$endpoint}')" >/dev/null
+        start_edge "$name" "$name" "${ports[@]}" "$name"
+      done
+    fi
   fi
   # Public HTTPS is used only under the resolver configuration the operator
   # activated: here, whichever this control plane was started with.
@@ -112,11 +142,15 @@ start_control() {
 down() {
   if running "$state/node.pid"; then sudo kill "$(cat "$state/node.pid")" || true; fi
   if running "$state/control.pid"; then kill "$(cat "$state/control.pid")" || true; fi
-  if running "$state/edge.pid"; then kill "$(cat "$state/edge.pid")" || true; fi
+  local edge
+  for edge in edge edge-a edge-b; do
+    if running "$state/$edge.pid"; then kill "$(cat "$state/$edge.pid")" || true; fi
+  done
   # They drain their connections and write what they hold before they
   # end: the database stays up until they have.
   for _ in $(seq 100); do
-    running "$state/control.pid" || running "$state/edge.pid" || break
+    running "$state/control.pid" || running "$state/edge.pid" || running "$state/edge-a.pid" ||
+      running "$state/edge-b.pid" || break
     sleep 1
   done
   if [[ -d $cgroup ]]; then
@@ -125,7 +159,7 @@ down() {
     sudo find "$cgroup" -depth -type d -exec rmdir {} + 2>/dev/null || true
   fi
   docker stop "$pg" >/dev/null 2>&1 || true
-  rm -f "$state/node.pid" "$state/control.pid" "$state/edge.pid"
+  rm -f "$state/node.pid" "$state/control.pid" "$state/edge.pid" "$state/edge-a.pid" "$state/edge-b.pid"
 }
 
 up() {
@@ -144,7 +178,9 @@ up() {
   # that listens on its socket alone, says it is ready there, and restarts.
   until docker exec "$pg" pg_isready -q -h 127.0.0.1 -U postgres; do sleep 1; done
   sleep 1
-  [[ -f $state/pins.json ]] || "$bin/fenders-pki" --output "$state/pki" \
+  local edge_identities=()
+  [[ ${LOCAL_EDGES:-1} == 2 ]] && edge_identities=(--identity edge-a=127.0.0.1 --identity edge-b=127.0.0.1)
+  [[ -f $state/pins.json ]] || "$bin/fenders-pki" --output "$state/pki" ${edge_identities[@]+"${edge_identities[@]}"} \
     --identity control=127.0.0.1,localhost --identity node=127.0.0.1 > "$state/pins.json"
 
   start_control
@@ -190,7 +226,10 @@ up() {
 }
 
 status() {
-  running "$state/edge.pid" && echo "edge           running  https://127.0.0.1:$edge_port  (log: $state/edge.log)"
+  local edge
+  for edge in edge edge-a edge-b; do
+    running "$state/$edge.pid" && printf '%-14s running  (log: %s)\n' "$edge" "$state/$edge.log"
+  done
   running "$state/control.pid" && echo "control plane  running  $manage  (log: $state/control.log)" \
     || echo "control plane  stopped"
   running "$state/node.pid" && echo "node           running  https://127.0.0.1:$node_port  (log: $state/node.log)" \

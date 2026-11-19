@@ -76,6 +76,7 @@ pub enum Look {
 }
 
 /// A request in flight.
+#[derive(Clone)]
 pub struct Entered {
     pub tenant: String,
     pub app: Option<String>,

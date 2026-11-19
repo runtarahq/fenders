@@ -674,3 +674,46 @@ async fn an_edge_passes_another_edges_requests_to_it() {
     serving.abort();
     l.finish().await;
 }
+
+/// An edge new to a workspace's traffic, while another holds the whole of
+/// its limits and uses little, waits for its share rather than refusing:
+/// the other gives back at its flush.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_waits_for_a_share_the_workspace_has_room_for() {
+    let l = Lab::new().await;
+    let edge = || {
+        Store::from_pool(l.store.pool.clone(), l.root.path())
+            .unwrap()
+            .serving(Serves::Edge)
+    };
+    let (a, b) = (edge(), edge());
+    let node = l.node("wait-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    let host = s(&route["hostname"]).to_owned();
+    // The first edge takes the whole limit, and holds one request.
+    let held = a.ingress_start(&host, 0).await.unwrap().1;
+    a.flush_gateway().await.unwrap();
+    b.flush_gateway().await.unwrap();
+    // The first flushes in a moment, as it does every second.
+    let flushing = {
+        let a = a.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            a.flush_gateway().await.unwrap();
+        })
+    };
+    let started = std::time::Instant::now();
+    let request = b.ingress_start(&host, 0).await.unwrap().1;
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    flushing.await.unwrap();
+    b.ingress_finish(&request, Some(0)).await.unwrap();
+    a.ingress_finish(&held, Some(0)).await.unwrap();
+    l.finish().await;
+}
