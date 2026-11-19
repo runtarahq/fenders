@@ -37,6 +37,9 @@
 # and 19195 (probes), passing each other requests on 19096 and 19196.
 # Clients and shims reach edge-a. Its identities are made with the PKI, so
 # start such an environment from nothing (destroy).
+# LOCAL_NODE_CPU, LOCAL_NODE_MEMORY and LOCAL_NODE_INSTANCES on `up` say
+# what the node holds (400, 4096, 8): its own limits and its registration's.
+# CPU above what is given the node (400) overcommits it.
 # LOCAL_PG names the PostgreSQL container and its volume, for a second
 # environment whose database is not the first's; with it, give LOCAL_STATE
 # too, since a state directory and its database go together.
@@ -197,6 +200,12 @@ up() {
       '{tenant:$tenant,project:$project,node:$node}' > "$state/scope.json"
   fi
 
+  # What the node is declared to hold, placement's and its own:
+  # LOCAL_NODE_CPU above 100 per CPU given overcommits the CPU, each run
+  # being held to its own share.
+  local node_cpu=${LOCAL_NODE_CPU:-400} node_memory=${LOCAL_NODE_MEMORY:-4096} node_instances=${LOCAL_NODE_INSTANCES:-8}
+  api PATCH "/nodes/$(jq -er .node "$state/scope.json")" "$(jq -n --argjson c "$node_cpu" --argjson m "$node_memory" --argjson i "$node_instances" \
+    '{cpu_percent:$c,memory_mib:$m,instances:$i}')" >/dev/null
   sudo install -d -m 0755 "$stage" "$stage/build"
   sudo cp "$build"/{fenders-node,fenders-shim,launch,runtime.elf,compile} "$stage/build/"
   sudo chmod -R a+rX "$stage/build"
@@ -213,7 +222,7 @@ up() {
     --cgroup-root "$cgroup" --control "https://127.0.0.1:$internal_port" \
     --control-pin "$(jq -er .control "$state/pins.json")" \
     --ca "$state/pki/ca.pem" --cert "$state/pki/node.pem" --key "$state/pki/node.key" \
-    --cpu-percent 400 --memory-mib 4096 --max-instances 8 --port $node_port \
+    --cpu-percent "$node_cpu" --memory-mib "$node_memory" --max-instances "$node_instances" --port $node_port \
     --local-destinations --nested-virtualization \
     --metrics-listen 127.0.0.1:19464 ${WARM_RUNS:+--warm-runs "$WARM_RUNS"} "${budget[@]}" > /dev/null 2>> "$state/node.log" < /dev/null &
   sleep 1
