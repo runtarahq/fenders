@@ -63,6 +63,12 @@ struct Args {
     /// The CA the edges' gateway certificate leads to, when not --ca.
     #[arg(long)]
     gateway_ca: Option<PathBuf>,
+    /// The registered edge this process serves as (an edge's name, as
+    /// `POST /v1/edges` registered it): it then serves the apps it owns and
+    /// passes others' requests to their owners. Without it an edge owns
+    /// every app.
+    #[arg(long)]
+    edge_name: Option<String>,
     /// How long the gateway and the run channel serve what they know while
     /// the database cannot be reached, in seconds.
     #[arg(long, default_value_t = 600)]
@@ -179,6 +185,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // the one it was built for, and is started after.
     let credential = if role == Role::Edge {
         store.check_schema().await?;
+        if let Some(name) = &args.edge_name {
+            let edge = store.edge_named(name).await?;
+            store = store.as_edge(edge);
+        }
         None
     } else {
         store.migrate().await?;

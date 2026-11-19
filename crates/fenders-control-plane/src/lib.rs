@@ -19,6 +19,7 @@ pub mod backup;
 pub mod customer_api;
 pub mod db;
 mod dispatch_retention;
+pub mod edges;
 pub mod egress_budget;
 pub mod egress_periods;
 pub mod egress_usage;

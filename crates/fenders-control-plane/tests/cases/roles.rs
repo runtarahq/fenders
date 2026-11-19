@@ -370,3 +370,107 @@ async fn two_edges_hold_a_workspaces_limits_between_them() {
     b.ingress_finish(&held_b, Some(0)).await.unwrap();
     l.finish().await;
 }
+
+/// Registered edges own apps: the scheduler gives each app to the live edge
+/// with the fewest, an edge serves only its own, and the apps of one that
+/// drains go to another.
+#[tokio::test]
+async fn the_scheduler_gives_apps_to_live_edges_and_each_serves_its_own() {
+    let l = Lab::new().await;
+    let register = |name: &'static str, pin: char| {
+        let (store, operator) = (l.store.clone(), l.operator.clone());
+        async move {
+            store
+                .register_edge_keyed(
+                    &operator,
+                    json!({"name":name,"cert_sha256":pin.to_string().repeat(64),"endpoint":format!("https://{name}.internal:9444")}),
+                    None,
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let (first, second) = (register("edge-a", 'a').await, register("edge-b", 'b').await);
+    let edge = |row: &Value| {
+        Store::from_pool(l.store.pool.clone(), l.root.path())
+            .unwrap()
+            .serving(Serves::Edge)
+            .as_edge(s(&row["id"]).to_owned())
+    };
+    let (a, b) = (edge(&first), edge(&second));
+    // Neither is live until it has flushed: no app is placed.
+    let node = l.node("owned-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let owner = || async {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT (SELECT edge_id FROM app_edges WHERE app_id=$1)",
+        )
+        .bind(s(&route["app_id"]))
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(owner().await, None);
+    a.flush_gateway().await.unwrap();
+    b.flush_gateway().await.unwrap();
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    let owned_by = owner().await.unwrap();
+    let (mine, other) = if owned_by == s(&first["id"]) {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    let host = s(&route["hostname"]);
+    let request = mine.ingress_start(host, 0).await.unwrap().1;
+    mine.ingress_finish(&request, Some(0)).await.unwrap();
+    assert_eq!(
+        other.ingress_start(host, 0).await.unwrap_err().status,
+        StatusCode::MISDIRECTED_REQUEST
+    );
+    // The map a balancer may route by.
+    let routes = l
+        .store
+        .edge_routes(&l.operator, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(routes["items"][0]["hostname"], route["hostname"]);
+    assert_eq!(routes["items"][0]["edge_id"], owned_by.as_str());
+    // The owner drains: the app goes to the other edge.
+    l.store
+        .edge_mode_keyed(&l.operator, &owned_by, json!({"draining":true}), None)
+        .await
+        .unwrap();
+    l.store.schedule().await.unwrap();
+    let moved = owner().await.unwrap();
+    assert_ne!(moved, owned_by);
+    // Each edge hears of the move, as its listener would; the shares of
+    // the workspace's limits follow at their flushes.
+    a.gateway.gates.changed();
+    b.gateway.gates.changed();
+    assert_eq!(
+        other.ingress_start(host, 0).await.unwrap_err().status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the other edge holds the workspace's limit until it flushes"
+    );
+    mine.flush_gateway().await.unwrap();
+    other.flush_gateway().await.unwrap();
+    let request = other.ingress_start(host, 0).await.unwrap().1;
+    other.ingress_finish(&request, Some(0)).await.unwrap();
+    assert_eq!(
+        mine.ingress_start(host, 0).await.unwrap_err().status,
+        StatusCode::MISDIRECTED_REQUEST
+    );
+    // Drained and owning nothing, it may be deleted.
+    l.store
+        .delete_edge(&l.operator, &owned_by, "delete-edge")
+        .await
+        .unwrap();
+    l.finish().await;
+}

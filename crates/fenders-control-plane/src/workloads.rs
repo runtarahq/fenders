@@ -420,6 +420,7 @@ impl Store {
         if expire_sessions {
             Self::expire_gateway_sessions(&mut tx).await?;
         }
+        Self::place_apps(&mut tx).await?;
         Self::expire_execution_logs(&mut tx).await?;
         Self::expire_app_events(&mut tx).await?;
         Self::compact_usage_backlog(&mut tx).await?;

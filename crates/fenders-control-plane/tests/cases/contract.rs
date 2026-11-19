@@ -605,6 +605,25 @@ async fn every_operation_answers_as_the_contract_says() {
         Some(json!({"draining":true})),
     )
     .await;
+    let edge = t
+        .ok(&operator, "POST", "/v1/edges", Some(json!({"name":"edge-1","cert_sha256":"b".repeat(64),"endpoint":"https://edge-1.internal:9444"})))
+        .await;
+    t.ok(&operator, "GET", "/v1/edges", None).await;
+    t.ok(&operator, "GET", "/v1/edge-routes", None).await;
+    t.ok(
+        &operator,
+        "PATCH",
+        &format!("/v1/edges/{}", s(&edge["id"])),
+        Some(json!({"draining":true})),
+    )
+    .await;
+    t.ok(
+        &operator,
+        "DELETE",
+        &format!("/v1/edges/{}", s(&edge["id"])),
+        None,
+    )
+    .await;
     let policy = t
         .ok(&operator, "GET", "/v1/public-egress-policy", None)
         .await;

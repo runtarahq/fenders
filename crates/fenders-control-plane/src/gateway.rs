@@ -159,6 +159,9 @@ pub struct Gateway {
     pub outage: crate::outage::Outage,
     /// Its shares of workspaces' limits ([`crate::shares`]).
     pub shares: crate::shares::Shares,
+    /// The registered edge this process serves as, if any: it then owns
+    /// only the apps the scheduler gives it ([`crate::edges`]).
+    pub edge: Option<String>,
 }
 
 impl Default for Gateway {
@@ -172,6 +175,7 @@ impl Default for Gateway {
             renewals: Default::default(),
             outage: Default::default(),
             shares: Default::default(),
+            edge: None,
             extending: Default::default(),
         }
     }
@@ -462,8 +466,8 @@ impl Store {
         } else {
             exec(
                 tx,
-                "INSERT INTO gateway_sessions(id) VALUES($1) ON CONFLICT(id) DO UPDATE SET seen=clock_timestamp()",
-                args![session],
+                "INSERT INTO gateway_sessions(id,edge_id) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET seen=clock_timestamp(),edge_id=excluded.edge_id",
+                args![session, self.gateway.edge],
             )
             .await?;
         }

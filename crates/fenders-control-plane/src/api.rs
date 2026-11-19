@@ -502,6 +502,23 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             store.audit_trail(&p, tenant, page).await?
         }
         ("GET", ["v1", "nodes"]) => store.node_page(&p, list_page(&parts.uri)?).await?,
+        ("GET", ["v1", "edges"]) => store.edge_page(&p, list_page(&parts.uri)?).await?,
+        ("GET", ["v1", "edge-routes"]) => store.edge_routes(&p, list_page(&parts.uri)?).await?,
+        ("POST", ["v1", "edges"]) => {
+            status = StatusCode::CREATED;
+            store
+                .register_edge_keyed(&p, parse(&bytes)?, Some(key))
+                .await?
+        }
+        ("DELETE", ["v1", "edges", edge]) => {
+            no_body(&bytes)?;
+            store.delete_edge(&p, edge, key).await?
+        }
+        ("PATCH", ["v1", "edges", edge]) => {
+            store
+                .edge_mode_keyed(&p, edge, parse(&bytes)?, offered(key))
+                .await?
+        }
         ("GET", ["v1", "public-egress-policy"]) => store.public_egress_policy(&p).await?,
         ("PUT", ["v1", "public-egress-policy"]) => {
             store

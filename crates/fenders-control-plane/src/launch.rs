@@ -49,6 +49,9 @@ pub struct Launch {
     /// The app it may send WebSocket messages for, when that app takes
     /// connections.
     pub websocket_app: Option<String>,
+    /// The registered edge that owns its app, if one does: its HTTP
+    /// requests and WebSocket messages are that edge's.
+    pub owner: Option<String>,
 }
 
 /// One query for all of it. `$1` the execution, `$2` the generation.
@@ -59,7 +62,8 @@ pub(crate) const QUERY: &str = "SELECT e.tenant_id,e.project_id,e.node_id,n.boot
         AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=e.tenant_id AND t.lifecycle_state='active')) AS renewable,
     (e.desired='running' AND e.spec->>'mode'='http') AS http,m.app_id AS managed,m.execution_id=e.id AS serves,m.candidate_execution_id=e.id AS candidate,
     EXISTS(SELECT 1 FROM app_http_extras x WHERE x.execution_id=e.id AND x.app_id=m.app_id AND x.generation=m.generation-CASE WHEN m.candidate_until IS NOT NULL THEN 1 ELSE 0 END) AS extra,
-    (SELECT a.id FROM apps a WHERE a.configuration->>'websocket'='true' AND a.id=COALESCE((SELECT app_id FROM app_http_attempts WHERE execution_id=e.id),(SELECT app_id FROM app_runs WHERE execution_id=e.id))) AS websocket_app
+    (SELECT a.id FROM apps a WHERE a.configuration->>'websocket'='true' AND a.id=COALESCE((SELECT app_id FROM app_http_attempts WHERE execution_id=e.id),(SELECT app_id FROM app_runs WHERE execution_id=e.id))) AS websocket_app,
+    (SELECT x.edge_id FROM app_edges x WHERE x.app_id=COALESCE(m.app_id,(SELECT app_id FROM app_http_attempts WHERE execution_id=e.id))) AS owner
     FROM executions e LEFT JOIN nodes n ON n.id=e.node_id LEFT JOIN app_http m ON m.deployment_id=e.deployment_id
     WHERE e.id=$1 AND e.generation=$2 AND e.reserved";
 
@@ -95,6 +99,7 @@ impl Launch {
             renewable: yes("egress") && yes("renewable"),
             queue,
             websocket_app: text("websocket_app"),
+            owner: text("owner"),
         }
     }
 }

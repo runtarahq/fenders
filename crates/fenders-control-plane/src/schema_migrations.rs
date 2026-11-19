@@ -48,6 +48,7 @@ fn migrations() -> Vec<(String, Vec<&'static str>)> {
     let lease_recalls = [include_str!("../sql/lease_recalls.sql")];
     let websocket_sessions = [include_str!("../sql/websocket_sessions.sql")];
     let limit_shares = [crate::shares::MIGRATION];
+    let edges = [crate::edges::MIGRATION];
     vec![
         (
             digest(format!("{SCHEMA}\0{}", BASELINE.join("\0"))),
@@ -79,6 +80,7 @@ fn migrations() -> Vec<(String, Vec<&'static str>)> {
         (digest(lease_recalls[0]), lease_recalls.to_vec()),
         (digest(websocket_sessions[0]), websocket_sessions.to_vec()),
         (digest(limit_shares[0]), limit_shares.to_vec()),
+        (digest(edges[0]), edges.to_vec()),
     ]
 }
 

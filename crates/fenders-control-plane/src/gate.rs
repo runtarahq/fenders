@@ -61,6 +61,8 @@ pub struct Gate {
     /// The workspace's requests in flight at once, and in a minute.
     pub concurrent: i64,
     pub per_minute: i64,
+    /// The registered edge that owns the app, if one does.
+    pub owner: Option<String>,
 }
 
 /// What to do with a request for a host name.
@@ -355,6 +357,7 @@ mod tests {
             route: Value::Null,
             concurrent: 2,
             per_minute: 600,
+            owner: None,
         }
     }
     fn entered(app: &str) -> Entered {

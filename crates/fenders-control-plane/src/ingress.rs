@@ -181,6 +181,14 @@ impl Rates {
 
 pub use crate::lease::Way;
 
+/// A request of an app another edge owns ([`crate::edges`]).
+pub(crate) fn misdirected() -> Error {
+    Error::new(
+        StatusCode::MISDIRECTED_REQUEST,
+        "another edge serves this app",
+    )
+}
+
 /// The app a host name is for, when it is one that may be served: enabled,
 /// with the HTTP trigger, not blocked, and of a release that did not fail.
 const APP_OF_HOST: &str = "SELECT a.*,h.hostname,h.state AS http_state,h.blocked,h.idle_draining,t.http FROM app_http h JOIN apps a ON a.id=h.app_id JOIN app_triggers t ON t.app_id=a.id JOIN app_releases l ON l.id=a.target_release_id WHERE h.hostname=$1 AND a.desired='enabled' AND t.http AND NOT h.blocked AND l.state<>'failed'";
@@ -380,6 +388,9 @@ impl Store {
             Look::Unknown => self.gate_read(hostname).await?,
         };
         if let Some(gate) = gate {
+            if !self.owns(gate.owner.as_deref()) {
+                return Err(misdirected());
+            }
             let reservation = self.ingress_warm(&gate, request).await?;
             return Ok((Some(gate.route), reservation));
         }
@@ -438,8 +449,13 @@ impl Store {
         let app = optional(&mut tx, APP_OF_HOST, args![hostname]).await?;
         let limits = one(
             &mut tx,
-            "SELECT t.lifecycle_state='active' AS active,t.http_concurrent_requests,t.http_requests_per_minute FROM tenants t WHERE t.id=$1",
-            args![route["tenant_id"]],
+            "SELECT t.lifecycle_state='active' AS active,t.http_concurrent_requests,t.http_requests_per_minute,(SELECT edge_id FROM app_edges WHERE app_id=$2) AS owner FROM tenants t WHERE t.id=$1",
+            args![
+                route["tenant_id"],
+                route["http_app_id"]
+                    .as_str()
+                    .or(app.as_ref().and_then(|app| app["id"].as_str()))
+            ],
         )
         .await?;
         drop(tx);
@@ -470,6 +486,7 @@ impl Store {
             route: route.clone(),
             concurrent: n(&limits["http_concurrent_requests"]),
             per_minute: n(&limits["http_requests_per_minute"]),
+            owner: id(&limits["owner"]),
         }
     }
     /// Admission in memory, for an app that is serving: its workspace's
@@ -581,10 +598,19 @@ impl Store {
         // [`Rates`]).
         let limits = one(
             &mut tx,
-            "SELECT true AS active,t.http_concurrent_requests,t.http_requests_per_minute FROM tenants t WHERE t.id=$1",
-            args![tenant],
+            "SELECT true AS active,t.http_concurrent_requests,t.http_requests_per_minute,(SELECT edge_id FROM app_edges WHERE app_id=$2) AS owner FROM tenants t WHERE t.id=$1",
+            args![
+                tenant,
+                context["http_app_id"]
+                    .as_str()
+                    .or(app.as_ref().and_then(|app| app["id"].as_str()))
+            ],
         )
         .await?;
+        // Another edge's app: its requests are that edge's to admit.
+        if !self.owns(limits["owner"].as_str()) {
+            return Err(misdirected());
+        }
         let entered = crate::gate::Entered {
             tenant: s(tenant).to_owned(),
             app: context["http_app_id"]

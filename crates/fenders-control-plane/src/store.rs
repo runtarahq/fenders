@@ -447,6 +447,22 @@ impl Store {
         }
         self
     }
+    /// This process serves as the registered edge `edge`. Set before the
+    /// store is shared.
+    pub fn as_edge(mut self, edge: String) -> Self {
+        if let Some(gateway) = std::sync::Arc::get_mut(&mut self.gateway) {
+            gateway.edge = Some(edge);
+        }
+        self
+    }
+    /// Whether this process serves the app that `owner` owns: an edge with
+    /// no name owns every app, and an app no edge owns yet is served by any.
+    pub(crate) fn owns(&self, owner: Option<&str>) -> bool {
+        match (&self.gateway.edge, owner) {
+            (Some(mine), Some(owner)) => mine == owner,
+            _ => true,
+        }
+    }
     pub fn serving(mut self, serves: Serves) -> Self {
         self.serves = serves;
         self

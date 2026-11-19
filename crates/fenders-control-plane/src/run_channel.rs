@@ -380,6 +380,16 @@ async fn dispatch(State(store): State<Store>, request: Request) -> Result<Respon
         };
         return Ok((status, Json(answer)).into_response());
     }
+    // An HTTP run's requests, and its WebSocket messages, meet the gateway
+    // in the memory of the edge that owns its app.
+    if (rest == HTTP_NEXT
+        || rest.starts_with(HTTP_RESPONSE)
+        || rest == WS
+        || rest.starts_with(WS_ONE))
+        && !store.owns(launch.owner.as_deref())
+    {
+        return Err(crate::ingress::misdirected());
+    }
     if parts.method == "POST" && rest == HTTP_NEXT {
         let key = launch
             .queue
