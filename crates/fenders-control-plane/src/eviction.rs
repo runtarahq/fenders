@@ -87,6 +87,14 @@ impl Room {
             .plus(need)
             .zip(limit, |wanted, limit| (wanted - limit).max(0))
     }
+    /// Whether it is no more than `other`, in everything.
+    pub fn within(&self, other: Self) -> bool {
+        self.cpu <= other.cpu && self.memory <= other.memory && self.instances <= other.instances
+    }
+    /// The least of each.
+    pub fn least(self, other: Self) -> Self {
+        self.zip(other, i64::min)
+    }
     pub fn is_zero(&self) -> bool {
         self.cpu <= 0 && self.memory <= 0 && self.instances <= 0
     }
@@ -244,7 +252,7 @@ impl Store {
                 self.drain_http(tx, &drain, seen).await?;
             }
             None => {
-                exec(tx,"UPDATE executions SET desired='stopped',generation=generation+1,updated=now() WHERE id=ANY($1::text[]) AND reserved AND desired<>'stopped'",args![ids]).await?;
+                exec(tx,"UPDATE executions SET desired='stopped',generation=generation+1,updated=now() WHERE id IN (SELECT jsonb_array_elements_text($1)) AND reserved AND desired<>'stopped'",args![ids]).await?;
             }
         }
         Self::audit_system(
