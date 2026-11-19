@@ -717,3 +717,49 @@ async fn a_request_waits_for_a_share_the_workspace_has_room_for() {
     a.ingress_finish(&held, Some(0)).await.unwrap();
     l.finish().await;
 }
+
+/// When an app's serving execution changes, the edge holding its queue
+/// hears it and tells the asks waiting there to ask again: the execution
+/// taken over from takes nothing more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edge_hears_a_takeover_and_sends_waiting_asks_back() {
+    let l = Lab::new().await;
+    let edge = Store::from_pool(l.store.pool.clone(), l.root.path())
+        .unwrap()
+        .serving(Serves::Edge);
+    let listening = {
+        let edge = edge.clone();
+        tokio::spawn(async move { edge.listen_for_gates().await })
+    };
+    let node = l.node("takeover-worker").await;
+    approve_component(&l, &node, true, true).await;
+    let (app, version) = define_app(&l, "taken").await;
+    l.http_trigger(&app, true, true, "enable-http").await;
+    l.release(&app, &version, "first").await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The old execution's shim waits on the app's queue, on the edge.
+    let waiting = {
+        let edge = edge.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            edge.exchange
+                .next(&app, "old-execution", std::time::Duration::from_secs(20))
+                .await
+                .is_none()
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Another execution takes over, as the reconciler records it.
+    let started = std::time::Instant::now();
+    sqlx::query(
+        "UPDATE app_http SET execution_id=(SELECT id FROM executions LIMIT 1) WHERE app_id=$1",
+    )
+    .bind(&app)
+    .execute(&l.store.pool)
+    .await
+    .unwrap();
+    assert!(waiting.await.unwrap(), "told to ask again, with nothing");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    listening.abort();
+    l.finish().await;
+}

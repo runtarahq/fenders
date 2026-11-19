@@ -51,7 +51,7 @@ async fn concurrent_startup_records_existing_schema_once_without_replaying_ddl()
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(receipt.as_array().unwrap().len(), 22);
+    assert_eq!(receipt.as_array().unwrap().len(), 23);
     for (index, entry) in receipt.as_array().unwrap().iter().enumerate() {
         assert_eq!(entry["version"], index + 1);
         assert_eq!(s(&entry["checksum"]).len(), 64);
@@ -157,7 +157,7 @@ async fn version_one_upgrade_adds_http_runs_without_rewriting_baseline() {
     assert_eq!(
         versions,
         vec![
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
         ]
     );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM customer_app_runs")

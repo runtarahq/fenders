@@ -521,17 +521,9 @@ impl Store {
                 // They are told once this change is committed (a moment
                 // from now) and again a little later: an ask made before
                 // the commit is still answered by what was true before it.
-                let exchange = self.exchange.clone();
-                let keys = [
-                    crate::run_channel::candidate_key(s(candidate)),
-                    app_id.to_owned(),
-                ];
-                tokio::spawn(async move {
-                    for wait in [200, 800, 2000] {
-                        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
-                        keys.iter().for_each(|key| exchange.close(key));
-                    }
-                });
+                // An edge that holds the queues hears of it from the
+                // database (`fenders_app`) and does the same.
+                self.taken_over(app_id, Some(s(candidate)));
                 None
             } else if e["node_id"].is_null() && e["reserved"] == true && e["waited"] == true {
                 // No node has had room for it beside the one that serves:
@@ -643,6 +635,23 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    /// An execution took over serving `app`, from `candidate`'s queue if
+    /// it was a candidate: asks waiting on either are told to ask again,
+    /// once this change is committed (a moment from now) and again a
+    /// little later, since an ask made before the commit is still answered
+    /// by what was true before it.
+    pub(crate) fn taken_over(&self, app: &str, candidate: Option<&str>) {
+        let exchange = self.exchange.clone();
+        let mut keys = vec![app.to_owned()];
+        keys.extend(candidate.map(crate::run_channel::candidate_key));
+        tokio::spawn(async move {
+            for wait in [200, 800, 2000] {
+                tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                keys.iter().for_each(|key| exchange.close(key));
+            }
+        });
     }
 
     pub(crate) async fn wake_http(tx: &mut Tx, app: &str) -> Result<()> {

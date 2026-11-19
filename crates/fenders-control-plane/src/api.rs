@@ -1554,6 +1554,24 @@ pub(crate) async fn gateway_dispatch(
     State(state): State<ApiState>,
     req: Request,
 ) -> Result<Response> {
+    // Paths under `/_fenders/` are the platform's: the gateway asks an app
+    // for them itself (a WebSocket's events), a client cannot.
+    if req.uri().path().starts_with(crate::websocket::RESERVED) {
+        return Err(Error::missing());
+    }
+    // A request's head is given to the app's shim in one bounded frame: a
+    // target that could not fit beside its headers is refused here, before
+    // anything is admitted or an execution is woken for it.
+    if req
+        .uri()
+        .path_and_query()
+        .is_some_and(|target| target.as_str().len() > GATEWAY_MAX_TARGET)
+    {
+        return Err(Error::new(
+            StatusCode::URI_TOO_LONG,
+            "request target too long",
+        ));
+    }
     // A request of an app another edge owns is passed to it, once.
     if req
         .extensions()
@@ -1576,24 +1594,6 @@ pub(crate) async fn gateway_dispatch(
 }
 
 async fn gateway_dispatch_owned(state: ApiState, req: Request) -> Result<Response> {
-    // Paths under `/_fenders/` are the platform's: the gateway asks an app
-    // for them itself (a WebSocket's events), a client cannot.
-    if req.uri().path().starts_with(crate::websocket::RESERVED) {
-        return Err(Error::missing());
-    }
-    // A request's head is given to the app's shim in one bounded frame: a
-    // target that could not fit beside its headers is refused here, before
-    // anything is admitted or an execution is woken for it.
-    if req
-        .uri()
-        .path_and_query()
-        .is_some_and(|target| target.as_str().len() > GATEWAY_MAX_TARGET)
-    {
-        return Err(Error::new(
-            StatusCode::URI_TOO_LONG,
-            "request target too long",
-        ));
-    }
     if crate::websocket::wanted(req.headers()) {
         let (parts, body) = req.into_parts();
         let host = gateway_host(&parts, &state.domain)?;

@@ -49,6 +49,7 @@ fn migrations() -> Vec<(String, Vec<&'static str>)> {
     let websocket_sessions = [include_str!("../sql/websocket_sessions.sql")];
     let limit_shares = [crate::shares::MIGRATION];
     let edges = [crate::edges::MIGRATION];
+    let app_takeovers = [include_str!("../sql/app_takeovers.sql")];
     vec![
         (
             digest(format!("{SCHEMA}\0{}", BASELINE.join("\0"))),
@@ -81,6 +82,7 @@ fn migrations() -> Vec<(String, Vec<&'static str>)> {
         (digest(websocket_sessions[0]), websocket_sessions.to_vec()),
         (digest(limit_shares[0]), limit_shares.to_vec()),
         (digest(edges[0]), edges.to_vec()),
+        (digest(app_takeovers[0]), app_takeovers.to_vec()),
     ]
 }
 
