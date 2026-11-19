@@ -252,7 +252,15 @@ impl Store {
     }
 
     pub async fn transaction(&self, mutate: bool, recovery: bool) -> Result<Tx> {
-        self.begin_transaction(mutate, recovery, false).await
+        self.begin_transaction(mutate, recovery, false, true).await
+    }
+    /// A transaction under the mutation lock that changes nothing the
+    /// gateway's gates hold ([`crate::gate`]): the gateway's own, which
+    /// admits, settles and flushes. Every other one that takes the lock may
+    /// have changed whether an app serves, and makes what the gates hold
+    /// be read again.
+    pub(crate) async fn gateway_transaction(&self) -> Result<Tx> {
+        self.begin_transaction(true, false, false, false).await
     }
     /// Whether this control plane can serve: it reaches its database, the
     /// database is the one its encryption key is for, and it is not held
@@ -280,9 +288,15 @@ impl Store {
         Ok(status)
     }
     pub(crate) async fn snapshot(&self) -> Result<Tx> {
-        self.begin_transaction(false, false, true).await
+        self.begin_transaction(false, false, true, false).await
     }
-    async fn begin_transaction(&self, mutate: bool, recovery: bool, snapshot: bool) -> Result<Tx> {
+    async fn begin_transaction(
+        &self,
+        mutate: bool,
+        recovery: bool,
+        snapshot: bool,
+        changes_gates: bool,
+    ) -> Result<Tx> {
         let mut tx = self.pool.begin().await?;
         if snapshot {
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -301,6 +315,9 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
             self.load.locked(asked.elapsed());
+            if changes_gates {
+                self.gateway.gates.changed();
+            }
         }
         if !recovery {
             let barrier: Value =

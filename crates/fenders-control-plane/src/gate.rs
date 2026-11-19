@@ -33,7 +33,10 @@
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -93,7 +96,8 @@ struct App {
 
 #[derive(Default)]
 struct Inner {
-    gates: HashMap<String, (Gate, Instant)>,
+    /// What was read of each host name, when, and at which epoch.
+    gates: HashMap<String, (Gate, Instant, u64)>,
     /// Apps whose gates are closed, and since when.
     closed: HashMap<String, Instant>,
     flights: HashMap<String, Entered>,
@@ -111,6 +115,11 @@ impl Inner {
 #[derive(Default)]
 pub struct Gates {
     inner: Mutex<Inner>,
+    /// Advanced by every transaction of this process that may have changed
+    /// whether an app serves. What was read before it is not believed after
+    /// it: a change made here is seen by the next request. One made by
+    /// another process is seen once what was read is no longer [`FRESH`].
+    epoch: AtomicU64,
 }
 
 impl Gates {
@@ -118,39 +127,53 @@ impl Gates {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Something that may change whether an app serves is being changed.
+    pub fn changed(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The epoch to pass to [`read`](Self::read) or [`open`](Self::open):
+    /// taken before what they are given is read.
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
     pub fn look(&self, hostname: &str) -> Look {
+        let epoch = self.epoch();
         let inner = self.lock();
         match inner.gates.get(hostname) {
-            Some((gate, _)) if inner.held(gate.app.as_ref()) => Look::Closed,
-            Some((gate, read)) if read.elapsed() < FRESH => Look::Warm(gate.clone()),
+            Some((gate, _, _)) if inner.held(gate.app.as_ref()) => Look::Closed,
+            Some((gate, read, at)) if *at == epoch && read.elapsed() < FRESH => {
+                Look::Warm(gate.clone())
+            }
             _ => Look::Unknown,
         }
     }
 
-    /// What was just read of `hostname`, without the lock: believed unless
-    /// its app's gate is closed, which only the cold path may open.
-    /// Whether it is.
-    pub fn read(&self, hostname: &str, gate: Gate) -> bool {
+    /// What was read of `hostname` without the lock, from `epoch` on:
+    /// believed unless its app's gate is closed, which only the cold path
+    /// may open. Whether it is.
+    pub fn read(&self, hostname: &str, gate: Gate, epoch: u64) -> bool {
         let mut inner = self.lock();
         if inner.held(gate.app.as_ref()) {
             return false;
         }
         inner
             .gates
-            .insert(hostname.to_owned(), (gate, Instant::now()));
+            .insert(hostname.to_owned(), (gate, Instant::now(), epoch));
         true
     }
 
-    /// What the cold path read of `hostname`, under the lock: its app
-    /// serves, whatever was closed before.
-    pub fn open(&self, hostname: &str, gate: Gate) {
+    /// What the cold path read of `hostname` under the lock, from `epoch`
+    /// on: its app serves, whatever was closed before.
+    pub fn open(&self, hostname: &str, gate: Gate, epoch: u64) {
         let mut inner = self.lock();
         if let Some(app) = &gate.app {
             inner.closed.remove(app);
         }
         inner
             .gates
-            .insert(hostname.to_owned(), (gate, Instant::now()));
+            .insert(hostname.to_owned(), (gate, Instant::now(), epoch));
     }
 
     /// Nothing is known of `hostname` any more.
@@ -334,20 +357,34 @@ mod tests {
     fn a_gate_that_was_read_is_warm_until_its_app_is_closed() {
         let gates = Gates::default();
         assert!(matches!(gates.look("a.example"), Look::Unknown));
-        assert!(gates.read("a.example", gate("a")));
+        assert!(gates.read("a.example", gate("a"), gates.epoch()));
         assert!(matches!(gates.look("a.example"), Look::Warm(_)));
         gates.close("a");
         assert!(matches!(gates.look("a.example"), Look::Closed));
         // What is read without the lock does not open it.
-        assert!(!gates.read("a.example", gate("a")));
+        assert!(!gates.read("a.example", gate("a"), gates.epoch()));
         assert!(matches!(gates.look("a.example"), Look::Closed));
         // Another app's is its own.
-        assert!(gates.read("b.example", gate("b")));
+        assert!(gates.read("b.example", gate("b"), gates.epoch()));
         assert!(matches!(gates.look("b.example"), Look::Warm(_)));
         // The cold path does.
-        gates.open("a.example", gate("a"));
+        gates.open("a.example", gate("a"), gates.epoch());
         assert!(matches!(gates.look("a.example"), Look::Warm(_)));
         gates.forget_all();
+        assert!(matches!(gates.look("a.example"), Look::Unknown));
+    }
+
+    #[test]
+    fn what_was_read_before_a_change_is_not_believed_after_it() {
+        let gates = Gates::default();
+        // Read from an epoch, and something changed while it was read.
+        let epoch = gates.epoch();
+        gates.changed();
+        assert!(gates.read("a.example", gate("a"), epoch));
+        assert!(matches!(gates.look("a.example"), Look::Unknown));
+        assert!(gates.read("a.example", gate("a"), gates.epoch()));
+        assert!(matches!(gates.look("a.example"), Look::Warm(_)));
+        gates.changed();
         assert!(matches!(gates.look("a.example"), Look::Unknown));
     }
 
@@ -355,7 +392,7 @@ mod tests {
     fn an_app_closed_before_anything_was_read_of_it_stays_closed() {
         let gates = Gates::default();
         assert!(gates.close_if_idle("a"));
-        assert!(!gates.read("a.example", gate("a")));
+        assert!(!gates.read("a.example", gate("a"), gates.epoch()));
         assert!(matches!(gates.look("a.example"), Look::Unknown));
     }
 
@@ -397,7 +434,7 @@ mod tests {
         assert_eq!(gates.take_active(), vec!["a".to_owned()]);
         assert!(gates.close_if_idle("a"));
         assert!(matches!(gates.look("a.example"), Look::Unknown));
-        assert!(!gates.read("a.example", gate("a")));
+        assert!(!gates.read("a.example", gate("a"), gates.epoch()));
         // A flush that failed leaves it as it was.
         let gates = Gates::default();
         assert!(gates.enter("1", entered("a"), 2));

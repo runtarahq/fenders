@@ -304,6 +304,8 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
+        // What the gateway knew of the workspace's apps is of before this.
+        self.gateway.gates.forget_all();
         Ok(result)
     }
 }

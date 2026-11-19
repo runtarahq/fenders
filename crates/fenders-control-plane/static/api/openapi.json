@@ -6084,7 +6084,7 @@
           },
           "gateway": {
             "type": "object",
-            "description": "Requests for HTTP apps the gateway admitted and refused, and the request records it dropped because the database did not take them in time.",
+            "description": "Requests for HTTP apps the gateway admitted and refused; of those, the ones that took the cold path, admission in a transaction under the lock all changes share, as a request to an app that is not serving does; and the request records it dropped because the database did not take them in time.",
             "properties": {
               "admitted": {
                 "type": "integer"
@@ -6094,12 +6094,16 @@
               },
               "records_dropped": {
                 "type": "integer"
+              },
+              "cold": {
+                "type": "integer"
               }
             },
             "required": [
               "admitted",
               "refused",
-              "records_dropped"
+              "records_dropped",
+              "cold"
             ]
           }
         },

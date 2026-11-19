@@ -314,7 +314,7 @@ impl Store {
         if !closing && !self.gateway.due() {
             return Ok(());
         }
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.gateway_transaction().await?;
         let period: String = sqlx::query_scalar(&format!("SELECT {PERIOD}::text"))
             .fetch_one(&mut *tx)
             .await?;
@@ -492,7 +492,7 @@ impl Store {
         }
         let want = want.max(need);
         let granted = async {
-            let mut tx = self.transaction(true, false).await?;
+            let mut tx = self.gateway_transaction().await?;
             let granted = self.lease_grant(&mut tx, key, want).await?;
             tx.commit().await?;
             Ok::<_, crate::error::Error>(granted)

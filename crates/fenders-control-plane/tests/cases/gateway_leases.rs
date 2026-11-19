@@ -129,8 +129,11 @@ async fn a_lease_charged_as_a_dead_sessions_is_taken_again_by_a_session_that_liv
     l.finish().await;
 }
 
+/// A request whose handling ended without saying what it passed (its
+/// client went away, or its task was dropped) is charged all it reserved
+/// of the lease, and counted once, whatever a late completion says.
 #[tokio::test]
-async fn a_request_whose_reservation_lapsed_is_charged_what_it_reserved_and_counted_once() {
+async fn a_request_with_no_outcome_is_charged_what_it_reserved_and_counted_once() {
     let l = Lab::new().await;
     let (host, key) = serving(&l).await;
     let (_, request) = l.store.ingress_start(&host, 0).await.unwrap();
@@ -138,12 +141,7 @@ async fn a_request_whose_reservation_lapsed_is_charged_what_it_reserved_and_coun
         l.store.gateway.budgets.holds(&key),
         Some((LEAST - BLOCK, BLOCK, 0))
     );
-    sqlx::query("UPDATE ingress_reservations SET expires=now()-interval '1 second'")
-        .execute(&l.store.pool)
-        .await
-        .unwrap();
-    l.store.schedule().await.unwrap();
-    // What it passed is not known: all it had reserved.
+    l.store.ingress_finish(&request, None).await.unwrap();
     assert_eq!(
         l.store.gateway.budgets.holds(&key),
         Some((LEAST - BLOCK, 0, BLOCK))

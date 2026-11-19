@@ -226,11 +226,12 @@ async fn http_response_failure_expiry_and_lost_completion_never_invent_success_o
         .ingress_complete(&ids[0], Some(0), Some(503))
         .await
         .unwrap();
-    l.store.ingress_finish(&ids[3], None).await.unwrap();
-    sqlx::query("UPDATE ingress_reservations SET expires=now()-interval '1 second'")
-        .execute(&l.store.pool)
-        .await
-        .unwrap();
+    // The rest end with no outcome known, as a request does whose handling
+    // was dropped: never given to the app, it did not run; given to it, it
+    // may have.
+    for id in &ids[1..] {
+        l.store.ingress_finish(id, None).await.unwrap();
+    }
     l.store.schedule().await.unwrap();
     l.store.flush_gateway().await.unwrap();
     let lab = &l;
@@ -456,21 +457,27 @@ async fn the_flusher_writes_a_session_and_keeps_what_it_could_not_write() {
     l.store.flush_gateway().await.unwrap();
     assert_eq!(sessions().await, vec![l.store.gateway.session().to_owned()]);
 
-    // A request that ends is one locked transaction to admit and one to
-    // settle: being given to its app, and its record, are none.
+    // The first request of the app takes the project's lease of the
+    // transfer allowance, one locked transaction; the next takes none.
+    // Being admitted to an app that serves, given to it, recorded and
+    // settled is all in memory.
     let host = format!("app-{app}.apps.test");
-    let before = l.store.load.locked_transactions();
-    let (_, request) = l
-        .store
-        .ingress_wait_request(&host, 0, Some(("GET", "/")))
-        .await
-        .unwrap();
-    l.store.ingress_dispatched(&request);
-    l.store
-        .ingress_complete(&request, Some(0), Some(200))
-        .await
-        .unwrap();
-    assert_eq!(l.store.load.locked_transactions() - before, 2);
+    let mut request = String::new();
+    for cost in [1, 0] {
+        let before = l.store.load.locked_transactions();
+        request = l
+            .store
+            .ingress_wait_request(&host, 0, Some(("GET", "/")))
+            .await
+            .unwrap()
+            .1;
+        l.store.ingress_dispatched(&request);
+        l.store
+            .ingress_complete(&request, Some(0), Some(200))
+            .await
+            .unwrap();
+        assert_eq!(l.store.load.locked_transactions() - before, cost);
+    }
 
     // While no change is admitted the flush fails, and keeps the record.
     sqlx::query("UPDATE recovery_barrier SET active=true")
@@ -490,8 +497,14 @@ async fn the_flusher_writes_a_session_and_keeps_what_it_could_not_write() {
     );
     l.store.flush_gateway().await.unwrap();
     let written = history(&l, app, Some("http"), None, 20).await;
-    assert_eq!(written["items"][0]["id"], request);
-    assert_eq!(written["items"][0]["state"], "succeeded");
+    let written: Vec<&Value> = written["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["id"] == request)
+        .collect();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0]["state"], "succeeded");
 
     // A session nothing has touched for a while is a process that is gone.
     sqlx::query("UPDATE gateway_sessions SET seen=seen-interval '1 minute'")

@@ -18,6 +18,7 @@ pub struct Load {
     lock_wait_micros: AtomicU64,
     admitted: AtomicU64,
     refused: AtomicU64,
+    cold: AtomicU64,
 }
 
 impl Load {
@@ -38,6 +39,11 @@ impl Load {
         .fetch_add(1, Relaxed);
     }
 
+    /// A request took the cold path: admission under the mutation lock.
+    pub(crate) fn cold(&self) {
+        self.cold.fetch_add(1, Relaxed);
+    }
+
     /// Transactions made under the mutation lock.
     pub fn locked_transactions(&self) -> u64 {
         self.locked.load(Relaxed)
@@ -52,6 +58,7 @@ impl Load {
             "gateway": {
                 "admitted": self.admitted.load(Relaxed),
                 "refused": self.refused.load(Relaxed),
+                "cold": self.cold.load(Relaxed),
             },
         })
     }
@@ -74,7 +81,7 @@ mod tests {
             load.snapshot(),
             json!({
                 "database": {"locked_transactions": 2, "lock_wait_ms": 2},
-                "gateway": {"admitted": 1, "refused": 2},
+                "gateway": {"admitted": 1, "refused": 2, "cold": 0},
             })
         );
     }

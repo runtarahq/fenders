@@ -1165,13 +1165,9 @@ async fn a_request_its_client_abandoned_is_settled_at_once_and_charged_nothing()
         domain: "apps.test".into(),
         tls: None,
     });
-    let reservations = || async {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingress_reservations WHERE tenant_id=$1")
-            .bind(&l.tenant)
-            .fetch_one(&l.store.pool)
-            .await
-            .unwrap()
-    };
+    // A request to an app that serves is in flight in the gateway's memory,
+    // not as a row.
+    let reservations = || async { l.store.gateway.gates.in_flight_of(&l.tenant) as i64 };
     let charged = || async {
         sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(sum(bytes),0)::bigint FROM traffic_usage WHERE tenant_id=$1",
@@ -1190,8 +1186,8 @@ async fn a_request_its_client_abandoned_is_settled_at_once_and_charged_nothing()
             .unwrap()
     };
     // Three clients ask, one after another. Nothing takes their requests:
-    // each waits until its request has been admitted and holds a
-    // reservation, then goes away, dropping the request where it stands.
+    // each waits until its request has been admitted and is in flight,
+    // then goes away, dropping the request where it stands.
     for n in 0..3 {
         let mut request = Box::pin(
             gateway.clone().oneshot(
@@ -1213,11 +1209,7 @@ async fn a_request_its_client_abandoned_is_settled_at_once_and_charged_nothing()
             waited += 1;
             assert!(waited < 1500, "the request was never admitted");
         }
-        assert_eq!(
-            reservations().await,
-            1,
-            "an admitted request holds a reservation"
-        );
+        assert_eq!(reservations().await, 1, "an admitted request is in flight");
         drop(request);
         // Settled before the next client asks, not when it would have lapsed.
         let mut held = 1;
@@ -1228,7 +1220,7 @@ async fn a_request_its_client_abandoned_is_settled_at_once_and_charged_nothing()
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_eq!(held, 0, "an abandoned request keeps no reservation");
+        assert_eq!(held, 0, "an abandoned request is not in flight");
     }
     // Each has its record, written by a flush: offered to the app and
     // never answered, so whether it ran is not known.
@@ -1294,12 +1286,6 @@ async fn a_requests_bytes_come_out_of_the_lease_and_stop_where_the_allowance_end
         l.store.gateway.budgets.holds(&key),
         Some((LEAST - BLOCK, BLOCK, 0))
     );
-    let held: i64 = sqlx::query_scalar("SELECT bytes FROM ingress_reservations WHERE id=$1")
-        .bind(&lease)
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    assert_eq!(held, 0);
     let meter = Meter::new(l.store.clone(), &lease);
     // Within the lease bytes pass in memory: no transaction.
     let before = locked();
@@ -1347,20 +1333,23 @@ async fn a_requests_bytes_come_out_of_the_lease_and_stop_where_the_allowance_end
     );
 
     // A body over its size limit is refused whatever the allowance, and a
-    // request whose reservation lapsed passes nothing more.
+    // request of a workspace that is no longer active passes nothing more
+    // once its stream is renewed. The allowance raised, the lease that had
+    // nothing to give is asked again from the next flush on.
     sqlx::query("UPDATE tenants SET transfer_bytes=1000000000000 WHERE id=$1")
         .bind(&l.tenant)
         .execute(&l.store.pool)
         .await
         .unwrap();
+    l.store.flush_gateway().await.unwrap();
     let (_, lease) = l.store.ingress_start(&host, 0).await.unwrap();
     let meter = Meter::new(l.store.clone(), &lease);
     assert!(!meter.admit(Way::In, MAX_REQUEST_BYTES as usize + 1).await);
     assert!(meter.admit(Way::In, 10).await);
     meter.renew().await;
     assert!(meter.admit(Way::In, 10).await);
-    sqlx::query("UPDATE ingress_reservations SET expires=now()-interval '1 second' WHERE id=$1")
-        .bind(&lease)
+    sqlx::query("UPDATE tenants SET lifecycle_state='suspending' WHERE id=$1")
+        .bind(&l.tenant)
         .execute(&l.store.pool)
         .await
         .unwrap();
