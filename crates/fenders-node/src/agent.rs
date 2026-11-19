@@ -483,7 +483,12 @@ impl Agent {
     fn row(&self, id: &str) -> Result<Option<Value>> {
         Ok(self.select_rows("WHERE id=?", [id])?.into_iter().next())
     }
-    fn status(&self, row: &Value) -> Result<Value> {
+    /// What `row`'s run is, read inside the reports' transaction `tx`:
+    /// what it records goes through `tx`. Another of the pool's connections
+    /// would wait for the write lock `tx` holds once it has written a
+    /// report's sequence: ten seconds of retries for each run so recorded,
+    /// with the journal held and no heartbeat sent meanwhile.
+    fn status(&self, tx: &rusqlite::Transaction<'_>, row: &Value) -> Result<Value> {
         if let Some(terminal) = row["terminal"].as_str() {
             serde_json::from_str(terminal).map_err(|_| Error::internal())
         } else if let Some(ended) = lock(&self.ended)?.get(s(&row["id"])).cloned() {
@@ -502,7 +507,14 @@ impl Agent {
                         tenant = self.tenant(s(&row["id"])).as_deref(),
                         "run lost: the node no longer holds it"
                     );
-                    self.set_terminal_with(false, s(&row["id"]), "lost", "run-lost")?;
+                    tx.execute(
+                        "UPDATE assignments SET terminal=? WHERE id=?",
+                        [
+                            json!({"state":"lost","reason":"run-lost"}).to_string(),
+                            s(&row["id"]).to_owned(),
+                        ],
+                    )
+                    .map_err(sql)?;
                     Ok(json!({"state":"lost","reason":"run-lost"}))
                 }
                 Ok(status) if terminal(s(&status["state"])) => {
@@ -539,7 +551,7 @@ impl Agent {
         for row in rows.iter().filter(|r| r["archived"] != true) {
             // One run whose state cannot be read now is reported next time;
             // the others are reported now.
-            let status = match self.status(row) {
+            let status = match self.status(&tx, row) {
                 Ok(status) => status,
                 Err(error) => {
                     tracing::warn!(

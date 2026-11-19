@@ -63,7 +63,12 @@ impl Backend for Fixture {
         self.budget_launcher.get().map(String::as_str)
     }
     fn status(&self, id: &str) -> Result<Value> {
-        load(&self.run_dir(id)?.join("status.json"))
+        // A run the backend does not hold is not found, as a node's says.
+        let dir = self.run_dir(id)?;
+        if !dir.exists() {
+            return Err(Error::missing());
+        }
+        load(&dir.join("status.json"))
     }
     fn lookup_key(&self, key: &str) -> Result<Option<String>> {
         for v in self.list()? {
@@ -936,6 +941,49 @@ async fn archived_assignments_go_in_batches_and_runs_still_reported_are_retained
         .collect::<std::result::Result<_, _>>()
         .unwrap();
     assert_eq!(left, ["e4", "e5"]);
+    drop(agent);
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_run_lost_while_reports_are_made_is_recorded_in_their_transaction_at_once() {
+    let l = Lab::new().await;
+    let first = l.create().await;
+    let second = l.create().await;
+    let agent = l.agent(400, 4096);
+    for _ in 0..2 {
+        agent.step().await.unwrap();
+    }
+    drop(agent);
+    let journal = l.root.path().join("journal/agent.sqlite3");
+    // The run reported last is the one lost: the other's next block of
+    // sequences is written, in the reports' transaction, before it is
+    // reached, as a restarted agent writes it.
+    let (lost, backend): (String, String) = rusqlite::Connection::open(&journal)
+        .unwrap()
+        .query_row(
+            "SELECT id,backend_id FROM assignments ORDER BY rowid DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let alive = if lost == first { second } else { first };
+    // Its run is gone, as one is after its node restarts without it.
+    std::fs::remove_dir_all(l.fixture.run_dir(&backend).unwrap()).unwrap();
+    let agent = l.agent(400, 4096);
+    let started = std::time::Instant::now();
+    agent.step().await.unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "reports took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        l.execution(&lost).await["state"],
+        "lost",
+        "the lost run is reported"
+    );
+    assert!(!l.execution(&alive).await["observation"].is_null());
     drop(agent);
     l.finish().await;
 }
