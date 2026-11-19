@@ -40,6 +40,10 @@ pub struct Launch {
     pub disabled: bool,
     /// Whether it is under the outbound byte limit.
     pub egress: bool,
+    /// Whether its outbound grant may be renewed from memory: it is to run,
+    /// its node is heard from, confined and serves the limit, and its
+    /// workspace is active. Otherwise the database decides.
+    pub renewable: bool,
     /// The queue it takes HTTP requests from, when it takes any.
     pub queue: Option<String>,
     /// The app it may send WebSocket messages for, when that app takes
@@ -48,7 +52,11 @@ pub struct Launch {
 }
 
 /// One query for all of it. `$1` the execution, `$2` the generation.
+/// `$3` the confinement a node must have, `$4` the outbound limit's
+/// contract.
 pub(crate) const QUERY: &str = "SELECT e.tenant_id,e.project_id,e.node_id,n.boot_id,COALESCE(n.disabled,true) AS disabled,e.egress_budget_launcher IS NOT NULL AS egress,
+    (e.desired='running' AND NOT COALESCE(n.disabled,true) AND n.last_seen>now()-interval '15 seconds' AND n.observed_confinement=$3 AND n.observed_egress_budget=$4
+        AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=e.tenant_id AND t.lifecycle_state='active')) AS renewable,
     (e.desired='running' AND e.spec->>'mode'='http') AS http,m.app_id AS managed,m.execution_id=e.id AS serves,m.candidate_execution_id=e.id AS candidate,
     EXISTS(SELECT 1 FROM app_http_extras x WHERE x.execution_id=e.id AND x.app_id=m.app_id AND x.generation=m.generation-CASE WHEN m.candidate_until IS NOT NULL THEN 1 ELSE 0 END) AS extra,
     (SELECT a.id FROM apps a WHERE a.configuration->>'websocket'='true' AND a.id=COALESCE((SELECT app_id FROM app_http_attempts WHERE execution_id=e.id),(SELECT app_id FROM app_runs WHERE execution_id=e.id))) AS websocket_app
@@ -84,6 +92,7 @@ impl Launch {
             boot: text("boot_id"),
             disabled: row["disabled"] != false,
             egress: yes("egress"),
+            renewable: yes("egress") && yes("renewable"),
             queue,
             websocket_app: text("websocket_app"),
         }

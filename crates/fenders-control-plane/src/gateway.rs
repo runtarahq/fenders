@@ -118,6 +118,8 @@ struct Batch {
     leases: crate::lease::Taken,
     /// Apps with a request in flight, or one since the last flush.
     active: Vec<String>,
+    /// Outbound grants renewed from memory.
+    renewed: Vec<crate::renewal::Renewed>,
 }
 
 /// What a flush did for the leases, to be told to their budgets once it
@@ -140,6 +142,8 @@ pub struct Gateway {
     pub gates: crate::gate::Gates,
     /// What is known of the launches whose shims call its run channel.
     pub launches: crate::launch::Launches,
+    /// The outbound grants it renews from memory.
+    pub renewals: crate::renewal::Renewals,
     /// One ask to extend a lease at a time: the others wait, and find it
     /// extended.
     extending: tokio::sync::Mutex<()>,
@@ -153,6 +157,7 @@ impl Default for Gateway {
             budgets: Default::default(),
             gates: Default::default(),
             launches: Default::default(),
+            renewals: Default::default(),
             extending: Default::default(),
         }
     }
@@ -238,7 +243,7 @@ impl Gateway {
     /// Whether a flush has anything to do: something to write, or a session
     /// row to touch.
     fn due(&self) -> bool {
-        if self.budgets.due() || self.gates.due() {
+        if self.budgets.due() || self.gates.due() || self.renewals.due() {
             return true;
         }
         let inner = self.lock();
@@ -270,6 +275,7 @@ impl Gateway {
     fn restore(&self, batch: Batch) {
         self.budgets.restore(batch.leases);
         self.gates.touch(&batch.active);
+        self.renewals.restore(batch.renewed);
         let mut inner = self.lock();
         for id in batch.open {
             if let Some((_, changed)) = inner.open.get_mut(&id) {
@@ -326,6 +332,7 @@ impl Store {
         let mut batch = self.gateway.take();
         batch.leases = self.gateway.budgets.take(&period, closing);
         batch.active = self.gateway.gates.take_active();
+        batch.renewed = self.gateway.renewals.take();
         let written = match self.write_gateway(&mut tx, &batch, closing).await {
             Ok(written) => written,
             Err(error) => {
@@ -391,6 +398,14 @@ impl Store {
                 json!({"hostname": admitted.hostname}),
             )
             .await?;
+        }
+        if !batch.renewed.is_empty() {
+            // What renewals from memory issued, for the status a run's
+            // grant is read with. Never a revision or a deadline back.
+            let renewed: Vec<Value> = batch.renewed.iter().map(|r| json!({"execution":r.execution,"generation":r.generation,"revision":r.revision,"deadline_ms":r.deadline_ms})).collect();
+            exec(tx,"UPDATE execution_egress_budgets b SET revision=GREATEST(b.revision,r.revision),expires=GREATEST(b.expires,to_timestamp(r.deadline_ms/1000.0)),updated=now()
+                FROM jsonb_to_recordset($1) AS r(execution text,generation bigint,revision bigint,deadline_ms bigint)
+                WHERE b.execution_id=r.execution AND b.generation=r.generation AND b.state='active' AND r.revision<=GREATEST(b.revision,b.revision_reserved)",args![Value::Array(renewed)]).await?;
         }
         if !batch.active.is_empty() {
             // An app with a request in flight, or one since the last flush,

@@ -42,6 +42,7 @@ pub mod pickup;
 pub mod pki;
 mod placement;
 pub mod public_egress;
+pub mod renewal;
 pub mod run_channel;
 pub mod schedule;
 mod schema_migrations;

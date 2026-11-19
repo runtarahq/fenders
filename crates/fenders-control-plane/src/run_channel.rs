@@ -163,6 +163,21 @@ impl Store {
                 "launch is not under the outbound byte limit",
             ));
         };
+        // A renewal, asking for no more bytes, is answered from memory
+        // when this process has the run's grant ([`crate::renewal`]).
+        if launch.renewable
+            && ask["bytes"].as_i64() == Some(0)
+            && let (Some(expected), Some(request)) = (
+                ask["expected_revision"].as_i64(),
+                ask["request_id"].as_str(),
+            )
+            && let Some(answer) = self
+                .gateway
+                .renewals
+                .renew(execution, generation, boot, expected, request, &ask)
+        {
+            return Ok(answer);
+        }
         let mut request = json!({
             "boot_id": boot,
             "action": "grant",
@@ -246,9 +261,18 @@ impl Store {
         }
         self.load.run_channel(true);
         let mut tx = self.transaction(false, false).await?;
-        let row = optional(&mut tx, crate::launch::QUERY, args![execution, generation])
-            .await?
-            .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
+        let row = optional(
+            &mut tx,
+            crate::launch::QUERY,
+            args![
+                execution,
+                generation,
+                crate::model::HOST_CONFINEMENT,
+                crate::egress_budget::CONTRACT
+            ],
+        )
+        .await?
+        .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
         drop(tx);
         let launch = crate::launch::Launch::of(execution, &row);
         self.gateway
