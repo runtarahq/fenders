@@ -17,6 +17,20 @@ use std::{
 pub const SCHEMA: &str = include_str!("../schema.sql");
 pub type Tx = Transaction<'static, Postgres>;
 
+/// What a control-plane process serves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Serves {
+    /// Everything: the management API, the scheduler, the nodes' peer, the
+    /// gateway and the run channel. One process, as before.
+    #[default]
+    All,
+    /// The management API, the scheduler and the nodes' peer. Edges serve
+    /// the gateway and the run channel.
+    Control,
+    /// The gateway and the run channel, and the flush of what they hold.
+    Edge,
+}
+
 /// Keep the admission transaction alive even if the awaiting request is cancelled.
 /// Dropping a spawn_blocking handle does not stop its filesystem worker.
 pub(crate) async fn guarded_blocking<G, T, F>(guard: G, work: F) -> Result<(G, T)>
@@ -63,6 +77,8 @@ pub struct Store {
     pub ingress_hosts: std::sync::Arc<crate::ingress::Hosts>,
     /// What the gateway holds in memory until its next flush.
     pub gateway: std::sync::Arc<crate::gateway::Gateway>,
+    /// What this process serves.
+    pub serves: Serves,
     /// What this process has done, counted.
     pub load: std::sync::Arc<crate::load::Load>,
 }
@@ -244,6 +260,7 @@ impl Store {
             http_rates: Default::default(),
             ingress_hosts: Default::default(),
             gateway: Default::default(),
+            serves: Serves::All,
             load: Default::default(),
             api_rates: Default::default(),
             node_turns: Default::default(),
@@ -295,6 +312,20 @@ impl Store {
             .fetch_one(&mut *tx)
             .await
             .unwrap_or(false)
+    }
+    pub fn serving(mut self, serves: Serves) -> Self {
+        self.serves = serves;
+        self
+    }
+    /// What the request exchange shows of HTTP runs, for the reconciler:
+    /// this process's own, or, in a control process, what the edges last
+    /// wrote of theirs.
+    pub(crate) async fn observed(&self, tx: &mut Tx) -> Result<crate::observed::Observed> {
+        if self.serves != Serves::Control {
+            return Ok(self.exchange.observe());
+        }
+        let rows = crate::db::rows(tx,&format!("SELECT o.key,o.kind,o.ready,o.busy,o.idle_ms,o.waiting_ms,o.saturated_ms,GREATEST(0,extract(epoch FROM clock_timestamp()-o.observed_at)*1000)::bigint AS age_ms FROM gateway_observations o JOIN gateway_sessions s ON s.id=o.session_id WHERE s.seen>clock_timestamp()-interval '{}'",crate::gateway::SESSION_DEAD),crate::args![]).await?;
+        Ok(crate::observed::Observed::from_rows(&rows))
     }
     pub fn background_monitor(&self) -> std::sync::Arc<crate::supervision::Monitor> {
         self.background.clone()

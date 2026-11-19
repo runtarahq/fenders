@@ -33,7 +33,13 @@ impl Lab {
             .await
             .unwrap()
     }
-    async fn http_trigger(&self, app: &str, http: bool, manual: bool, key: &str) -> Value {
+    pub(super) async fn http_trigger(
+        &self,
+        app: &str,
+        http: bool,
+        manual: bool,
+        key: &str,
+    ) -> Value {
         let revision = self
             .store
             .app_triggers(&self.operator, &self.tenant, &self.project, app)
@@ -55,7 +61,7 @@ impl Lab {
             .await
             .unwrap()
     }
-    async fn release(&self, app: &str, version: &str, key: &str) -> Value {
+    pub(super) async fn release(&self, app: &str, version: &str, key: &str) -> Value {
         let revision = self
             .store
             .app(&self.operator, &self.tenant, &self.project, app)

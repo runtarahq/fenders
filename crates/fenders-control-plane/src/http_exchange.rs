@@ -222,7 +222,7 @@ pub enum Offer {
 }
 
 /// How pressed a queue is: what scaling an app out is decided on.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pressure {
     /// How long its oldest request has waited for a taker, if one waits.
     pub waiting: Option<Duration>,
@@ -513,6 +513,38 @@ impl Exchange {
             .takers
             .get(taker)
             .is_some_and(|seen| !seen.busy.is_empty())
+    }
+
+    /// What the reconciler reads of the exchange ([`crate::observed`]):
+    /// every shim seen and every queue.
+    pub fn observe(&self) -> crate::observed::Observed {
+        use crate::observed::{Observed, Taker};
+        let inner = self.lock();
+        let takers = inner
+            .takers
+            .iter()
+            .map(|(id, seen)| {
+                let busy = !seen.busy.is_empty();
+                let taker = Taker {
+                    ready: seen.waiting > 0 || seen.asked.elapsed() < PRESENT,
+                    busy,
+                    idle: (!busy).then(|| seen.active.elapsed()),
+                };
+                (id.clone(), taker)
+            })
+            .collect();
+        let queues = inner
+            .queues
+            .iter()
+            .map(|(key, queue)| {
+                let pressure = Pressure {
+                    waiting: queue.requests.front().map(|(.., since)| since.elapsed()),
+                    saturated: queue.saturated.map(|since| since.elapsed()),
+                };
+                (key.clone(), pressure)
+            })
+            .collect();
+        Observed::new(takers, queues)
     }
 
     /// How pressed `key`'s queue is.

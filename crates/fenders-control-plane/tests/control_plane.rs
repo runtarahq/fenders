@@ -67,6 +67,8 @@ mod placement;
 mod placement_retention;
 #[path = "cases/release_input_retention.rs"]
 mod release_input_retention;
+#[path = "cases/roles.rs"]
+mod roles;
 #[path = "cases/run_channel.rs"]
 mod run_channel;
 #[path = "cases/schema_migrations.rs"]

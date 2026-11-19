@@ -120,6 +120,9 @@ struct Batch {
     active: Vec<String>,
     /// Outbound grants renewed from memory.
     renewed: Vec<crate::renewal::Renewed>,
+    /// What the exchange shows, for a control process to read; only an
+    /// edge writes it.
+    observed: Option<Vec<Value>>,
 }
 
 /// What a flush did for the leases, to be told to their budgets once it
@@ -320,7 +323,9 @@ impl Store {
     }
 
     async fn flush(&self, closing: bool) -> Result<()> {
-        if !closing && !self.gateway.due() {
+        // An edge writes what its exchange shows every time: the control
+        // process decides on it.
+        if !closing && self.serves != crate::store::Serves::Edge && !self.gateway.due() {
             return Ok(());
         }
         let mut tx = self.gateway_transaction().await?;
@@ -333,6 +338,9 @@ impl Store {
         batch.leases = self.gateway.budgets.take(&period, closing);
         batch.active = self.gateway.gates.take_active();
         batch.renewed = self.gateway.renewals.take();
+        if self.serves == crate::store::Serves::Edge && !closing {
+            batch.observed = Some(self.exchange.observe().rows());
+        }
         let written = match self.write_gateway(&mut tx, &batch, closing).await {
             Ok(written) => written,
             Err(error) => {
@@ -361,6 +369,12 @@ impl Store {
             exec(
                 tx,
                 "DELETE FROM gateway_sessions WHERE id=$1",
+                args![session],
+            )
+            .await?;
+            exec(
+                tx,
+                "DELETE FROM gateway_observations WHERE session_id=$1",
                 args![session],
             )
             .await?;
@@ -398,6 +412,19 @@ impl Store {
                 json!({"hostname": admitted.hostname}),
             )
             .await?;
+        }
+        if let Some(observed) = &batch.observed {
+            exec(
+                tx,
+                "DELETE FROM gateway_observations WHERE session_id=$1",
+                args![session],
+            )
+            .await?;
+            if !observed.is_empty() {
+                exec(tx,"INSERT INTO gateway_observations(session_id,key,kind,ready,busy,idle_ms,waiting_ms,saturated_ms)
+                    SELECT $1,o.key,o.kind,COALESCE(o.ready,false),COALESCE(o.busy,false),o.idle_ms,o.waiting_ms,o.saturated_ms
+                    FROM jsonb_to_recordset($2) AS o(key text,kind text,ready boolean,busy boolean,idle_ms bigint,waiting_ms bigint,saturated_ms bigint)",args![session,Value::Array(observed.clone())]).await?;
+            }
         }
         if !batch.renewed.is_empty() {
             // What renewals from memory issued, for the status a run's
@@ -545,7 +572,8 @@ impl Store {
         exec(
             tx,
             &format!(
-                "DELETE FROM gateway_sessions WHERE seen<clock_timestamp()-interval '{SESSION_DEAD}'"
+                "WITH gone AS (DELETE FROM gateway_sessions WHERE seen<clock_timestamp()-interval '{SESSION_DEAD}' RETURNING id)
+                DELETE FROM gateway_observations WHERE session_id IN (SELECT id FROM gone) OR NOT EXISTS(SELECT 1 FROM gateway_sessions s WHERE s.id=gateway_observations.session_id)"
             ),
             args![],
         )

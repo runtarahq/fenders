@@ -37,6 +37,7 @@ pub mod load;
 pub mod model;
 pub mod networking;
 pub mod nodes;
+pub mod observed;
 mod orphan_uploads;
 pub mod pickup;
 pub mod pki;

@@ -5,6 +5,7 @@ use crate::{
     db::*,
     error::{Error, Result},
     model::{HOST_CONFINEMENT, Principal, identity, uid},
+    observed::Observed,
     store::{Store, Tx},
     workloads::terminal,
 };
@@ -198,7 +199,7 @@ impl Store {
         Ok(())
     }
 
-    async fn drain_http(&self, tx: &mut Tx, binding: &Value) -> Result<bool> {
+    async fn drain_http(&self, tx: &mut Tx, binding: &Value, seen: &Observed) -> Result<bool> {
         // The app is leaving service: from here its requests are admitted
         // under the lock this transaction holds, and so after it.
         let app = s(&binding["app_id"]);
@@ -219,7 +220,7 @@ impl Store {
             // are idle, and admission is serialized with this, the gate
             // being closed, so they stay idle: stopped at once. A busy one
             // is stopped at the deadline.
-            let busy = self.exchange.busy(s(&e["id"]))
+            let busy = seen.busy(s(&e["id"]))
                 || self.gateway.gates.serving(app) > 0
                 || optional(
                     tx,
@@ -242,6 +243,9 @@ impl Store {
     }
 
     pub(crate) async fn reconcile_app_http(&self, tx: &mut Tx) -> Result<()> {
+        // What the exchange shows of HTTP runs: this process's, or the
+        // edges' as they last wrote it ([`crate::observed`]).
+        let seen = self.observed(tx).await?;
         for binding in rows(tx,"SELECT h.*,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h",args![]).await? {
             let app=one(tx,"SELECT a.*,t.http FROM apps a JOIN app_triggers t ON t.app_id=a.id WHERE a.id=$1",args![binding["app_id"]]).await?;
             let app_id=s(&app["id"]);
@@ -256,17 +260,17 @@ impl Store {
             exec(tx,"UPDATE executions SET desired='stopped',state='stopped',reserved=false,generation=generation+1,finished_at=now(),updated=now() WHERE reserved AND node_id IS NULL AND id IN (SELECT execution_id FROM app_http_extras WHERE app_id=$1 AND generation<>$2)",args![app_id,serving_generation]).await?;
             exec(tx,"DELETE FROM app_http_extras x WHERE x.app_id=$1 AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.id=x.execution_id AND e.reserved)",args![app_id]).await?;
             if replacing {
-                self.replace_http(tx,&app,&binding,want).await?;
+                self.replace_http(tx,&app,&binding,want,&seen).await?;
                 continue;
             }
             if binding["blocked"]==true {
                 // Cleanup survives rollout failure, including transient worker
                 // control errors that require a new stop generation.
-                self.drain_http(tx,&binding).await?;
+                self.drain_http(tx,&binding,&seen).await?;
                 continue;
             }
             if binding["idle_draining"]==true {
-                if self.drain_http(tx,&binding).await? {
+                if self.drain_http(tx,&binding,&seen).await? {
                     exec(tx,"UPDATE app_http SET state='idle',reason=NULL,execution_id=NULL,idle_draining=false,drain_until=NULL,ready_until=NULL,updated=now() WHERE app_id=$1",args![app_id]).await?;
                     Self::wake_http(tx,app_id).await?;
                 }
@@ -277,7 +281,7 @@ impl Store {
                 continue;
             }
             if binding["state"]=="stopping" {
-                if !self.drain_http(tx,&binding).await? {
+                if !self.drain_http(tx,&binding,&seen).await? {
                     if want && binding["expired"]==true {Self::http_failure(tx,&app,"previous-worker-not-stopped").await?;}
                     continue;
                 }
@@ -293,7 +297,7 @@ impl Store {
             if old.is_some() {
                 // What a candidate took over from is stopped once it holds
                 // no request, or at the drain deadline.
-                if binding["state"]=="serving" {self.drain_others(tx,&binding).await?;}
+                if binding["state"]=="serving" {self.drain_others(tx,&binding,&seen).await?;}
                 continue;
             }
             if let Some(e)=optional(tx,"SELECT e.*,n.last_seen>now()-interval '15 seconds' AND NOT n.disabled AND n.observed_confinement=$2 AS healthy FROM executions e LEFT JOIN nodes n ON n.id=e.node_id WHERE e.id=$1",args![binding["execution_id"],HOST_CONFINEMENT]).await? {
@@ -307,7 +311,7 @@ impl Store {
                 // serves once its shim asks the run channel for a request,
                 // which it does only when the component is loaded; one that
                 // was serving stays so while its shim is briefly not asking.
-                let taking=self.run_channel.is_none() || binding["state"]=="serving" || self.exchange.ready(s(&e["id"]));
+                let taking=self.run_channel.is_none() || binding["state"]=="serving" || seen.ready(s(&e["id"]));
                 if e["state"]=="running" && e["desired"]=="running" && e["reserved"]==true && e["healthy"]==true && taking {
                     if binding["state"]=="serving" && app["configuration"]["keep_warm"]==false
                         && one(tx,"SELECT $1::timestamptz<now()-interval '60 seconds' AND NOT EXISTS(SELECT 1 FROM ingress_reservations WHERE execution_id=$2 OR app_id=$3) AS idle",args![binding["last_activity"],e["id"],app_id]).await?["idle"]==true
@@ -319,7 +323,7 @@ impl Store {
                         exec(tx,"UPDATE app_http SET state='stopping',reason='idle-drain',idle_draining=true,drain_until=NULL,updated=now() WHERE app_id=$1",args![app_id]).await?;
                         exec(tx,"UPDATE deployments SET desired='stopped' WHERE id=$1",args![binding["deployment_id"]]).await?;
                         let mut drain=binding.clone();drain["drain_until"]=Value::Null;
-                        self.drain_http(tx,&drain).await?;
+                        self.drain_http(tx,&drain,&seen).await?;
                         continue;
                     }
                     if binding["state"]!="serving" {exec(tx,"UPDATE app_http SET last_activity=now() WHERE app_id=$1",args![app_id]).await?;}
@@ -328,7 +332,7 @@ impl Store {
                     exec(tx,"UPDATE app_releases SET state='ready',reason=NULL,updated=now() WHERE id=$1 AND state='preparing'",args![release["id"]]).await?;
                     exec(tx,"UPDATE apps SET active_release_id=$1,updated=now() WHERE id=$2 AND active_release_id IS DISTINCT FROM $1",args![release["id"],app_id]).await?;
                     if binding["reset_failures"]==true {exec(tx,"UPDATE app_http SET failures=0,failure_window=now() WHERE app_id=$1",args![app_id]).await?;}
-                    self.scale_http(tx,&app,&binding,&release,&e).await?;
+                    self.scale_http(tx,&app,&binding,&release,&e,&seen).await?;
                     continue;
                 }
                 if terminal(s(&e["state"])) && e["reserved"]==false {
@@ -386,14 +390,14 @@ impl Store {
     /// Stops the executions of an app's deployment that are neither the one
     /// its binding names, nor a candidate, nor its extras: each when it
     /// holds no request, or when the binding's drain deadline has passed.
-    async fn drain_others(&self, tx: &mut Tx, binding: &Value) -> Result<()> {
+    async fn drain_others(&self, tx: &mut Tx, binding: &Value, seen: &Observed) -> Result<()> {
         let others=rows(tx,"SELECT e.id,e.node_id,e.state,COALESCE($5::timestamptz<=now(),true) AS deadline,COALESCE($5::timestamptz-interval '26 seconds'<=now(),true) AS settled FROM executions e WHERE e.deployment_id=$1 AND e.reserved AND e.desired<>'stopped' AND e.id IS DISTINCT FROM $2 AND e.id IS DISTINCT FROM $3 AND e.id NOT IN (SELECT execution_id FROM app_http_extras WHERE app_id=$4)",args![binding["deployment_id"],binding["execution_id"],binding["candidate_execution_id"],binding["app_id"],binding["drain_until"]]).await?;
         for e in &others {
             if e["node_id"].is_null() {
                 exec(tx,"UPDATE executions SET desired='stopped',state='stopped',reserved=false,generation=generation+1,finished_at=now(),updated=now() WHERE id=$1",args![e["id"]]).await?;
                 continue;
             }
-            let busy = self.exchange.busy(s(&e["id"]))
+            let busy = seen.busy(s(&e["id"]))
                 || optional(
                     tx,
                     "SELECT id FROM ingress_reservations WHERE execution_id=$1 LIMIT 1",
@@ -423,6 +427,7 @@ impl Store {
         app: &Value,
         binding: &Value,
         want: bool,
+        seen: &Observed,
     ) -> Result<()> {
         let app_id = s(&app["id"]);
         let sequential = "UPDATE app_http SET state='stopping',reason='draining-http',drain_until=now()+interval '30 seconds',ready_until=now()+interval '5 minutes',execution_id=NULL,candidate_execution_id=NULL,candidate_until=NULL,updated=now() WHERE app_id=$1";
@@ -444,7 +449,7 @@ impl Store {
             Some("incompatible-http-entry-point")
         } else if binding["candidate_execution_id"].is_null() {
             // An earlier change's candidate may still be stopping.
-            self.drain_others(tx, binding).await?;
+            self.drain_others(tx, binding, seen).await?;
             let spec =
                 crate::app_runtime::http_spec(release["spec"].clone(), &release["configuration"])?;
             match self
@@ -500,7 +505,7 @@ impl Store {
         } else {
             let candidate = &binding["candidate_execution_id"];
             let e=one(tx,"SELECT e.*,n.last_seen>now()-interval '15 seconds' AND NOT n.disabled AND n.observed_confinement=$2 AS healthy,$3::timestamptz<=now() AS overdue,e.created<now()-interval '10 seconds' AS waited FROM executions e LEFT JOIN nodes n ON n.id=e.node_id WHERE e.id=$1",args![candidate,HOST_CONFINEMENT,binding["candidate_until"]]).await?;
-            let taking = self.run_channel.is_none() || self.exchange.ready(s(candidate));
+            let taking = self.run_channel.is_none() || seen.ready(s(candidate));
             if e["state"] == "running"
                 && e["desired"] == "running"
                 && e["reserved"] == true
@@ -571,6 +576,7 @@ impl Store {
         binding: &Value,
         release: &Value,
         primary: &Value,
+        seen: &Observed,
     ) -> Result<()> {
         let app_id = s(&app["id"]);
         let scale = &app["configuration"]["scale"];
@@ -580,13 +586,13 @@ impl Store {
         if max <= 1 && extras.is_empty() {
             return Ok(());
         }
-        let pressure = self.exchange.pressure(app_id);
+        let pressure = seen.pressure(app_id);
         let pressed = pressure.waiting.is_some_and(|d| d >= SCALE_WAITING)
             || pressure.saturated.is_some_and(|d| d >= SCALE_SATURATED);
         let (mut live, mut starting, mut stopping) = (0i64, false, Vec::new());
         for extra in &extras {
             let id = s(&extra["id"]);
-            if !self.exchange.ready(id) {
+            if !seen.ready(id) {
                 // Not asking yet: starting, unless it has taken too long.
                 if extra["overdue"] == true {
                     stopping.push(extra);
@@ -595,9 +601,7 @@ impl Store {
                     live += 1;
                 }
             } else if 1 + live >= max
-                || (!pressed
-                    && live >= keep
-                    && self.exchange.idle(id).is_some_and(|d| d >= SCALE_IDLE))
+                || (!pressed && live >= keep && seen.idle(id).is_some_and(|d| d >= SCALE_IDLE))
             {
                 // Over the maximum, or with nothing to do beyond the minimum.
                 stopping.push(extra);
@@ -616,7 +620,7 @@ impl Store {
             && !starting
             && (pressed || live < keep)
             && release["state"] == "ready"
-            && self.exchange.ready(s(&primary["id"]))
+            && seen.ready(s(&primary["id"]))
         {
             match Self::execution(
                 tx,
