@@ -358,7 +358,7 @@ impl Store {
         if !closing && self.serves != crate::store::Serves::Edge && !self.gateway.due() {
             return Ok(());
         }
-        let mut tx = self.gateway_transaction().await?;
+        let mut tx = self.flush_transaction().await?;
         let period: String = sqlx::query_scalar(&format!("SELECT {PERIOD}::text"))
             .fetch_one(&mut *tx)
             .await?;
@@ -642,6 +642,49 @@ impl Store {
     /// does not use, and give it back at their next flush. Waits up to two
     /// seconds for that, taking its share again as they do. `None` when the
     /// workspace has no room, or none came.
+    /// This process's share of `tenant`'s limits, and the room the
+    /// workspace had, taken again under the lock for requests short of it:
+    /// at most every [`crate::shares::RETAKE`], however many requests ask.
+    /// The others have the share as it last was, without the lock. The
+    /// limits are read when not given. `None` when it could not be taken.
+    pub(crate) async fn retake_share(
+        &self,
+        tenant: &str,
+        limits: Option<(i64, i64)>,
+    ) -> Option<(crate::shares::Limits, crate::shares::Limits)> {
+        let mut retaken = self.gateway.shares.retaken.lock().await;
+        if retaken
+            .get(tenant)
+            .is_some_and(|at| at.elapsed() < crate::shares::RETAKE)
+        {
+            drop(retaken);
+            return Some((
+                self.gateway.shares.of(tenant)?,
+                self.gateway.shares.room_of(tenant)?,
+            ));
+        }
+        let taken = crate::outage::within(crate::outage::READ_WITHIN, async {
+            let mut tx = self.gateway_transaction().await?;
+            let (concurrent, per_minute) = match limits {
+                Some(limits) => limits,
+                None => {
+                    let row = crate::db::one(&mut tx,"SELECT http_concurrent_requests concurrent,http_requests_per_minute per_minute FROM tenants WHERE id=$1",args![tenant]).await?;
+                    (crate::db::n(&row["concurrent"]), crate::db::n(&row["per_minute"]))
+                }
+            };
+            let share = self
+                .take_share(&mut tx, tenant, concurrent, per_minute)
+                .await?;
+            tx.commit().await?;
+            Ok::<_, crate::error::Error>(share)
+        })
+        .await
+        .ok()?;
+        self.gateway.shares.set(tenant, taken);
+        retaken.insert(tenant.to_owned(), std::time::Instant::now());
+        Some(taken)
+    }
+
     pub(crate) async fn grow_share(
         &self,
         tenant: &str,
@@ -660,18 +703,10 @@ impl Store {
             if tokio::time::Instant::now() >= until {
                 return None;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let taken = crate::outage::within(crate::outage::READ_WITHIN, async {
-                let mut tx = self.gateway_transaction().await?;
-                let share = self
-                    .take_share(&mut tx, tenant, concurrent, per_minute)
-                    .await?;
-                tx.commit().await?;
-                Ok::<_, crate::error::Error>(share)
-            })
-            .await
-            .ok()?;
-            self.gateway.shares.set(tenant, taken);
+            tokio::time::sleep(crate::shares::RETAKE).await;
+            let taken = self
+                .retake_share(tenant, Some((concurrent, per_minute)))
+                .await?;
             if enough(taken.0) {
                 return Some(taken.0);
             }

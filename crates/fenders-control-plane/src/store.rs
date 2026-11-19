@@ -382,7 +382,15 @@ impl Store {
     /// moves it after it commits, if a trigger said it changed any of it
     /// (`sql/gate_changes.sql`).
     pub(crate) async fn watched_transaction(&self) -> Result<Tx> {
-        self.begin_transaction(true, false, false, false).await
+        // Heartbeats and scheduler passes are few, and what keeps every
+        // run and app moving: they do not wait for a turn behind requests.
+        self.begin_with(true, false, false, false, true).await
+    }
+    /// The gateway's flush: under the lock, without waiting for a turn
+    /// behind requests, as what it writes (what the exchange sees, which
+    /// apps serve) is what they wait for.
+    pub(crate) async fn flush_transaction(&self) -> Result<Tx> {
+        self.begin_with(true, false, false, false, true).await
     }
     /// Commits a [`Self::watched_transaction`], and moves the epoch if it
     /// changed what the gates hold.
@@ -546,11 +554,22 @@ impl Store {
         snapshot: bool,
         changes_gates: bool,
     ) -> Result<Tx> {
+        self.begin_with(mutate, recovery, snapshot, changes_gates, false)
+            .await
+    }
+    async fn begin_with(
+        &self,
+        mutate: bool,
+        recovery: bool,
+        snapshot: bool,
+        changes_gates: bool,
+        priority: bool,
+    ) -> Result<Tx> {
         // A transaction that is to wait for the lock waits first, without a
         // connection, for its turn to: a burst of them would otherwise hold
         // every connection while they wait, and a read that takes no lock
         // would wait for one long enough to take the database for gone.
-        let turn = if mutate {
+        let turn = if mutate && !priority {
             Some(
                 self.lock_waiters
                     .clone()

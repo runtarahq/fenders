@@ -447,20 +447,9 @@ impl Store {
     async fn share_with_room(&self, tenant: &str) -> bool {
         let until = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            let taken = crate::outage::within(crate::outage::READ_WITHIN, async {
-                let mut tx = self.gateway_transaction().await?;
-                let limits = one(&mut tx,"SELECT http_concurrent_requests concurrent,http_requests_per_minute per_minute FROM tenants WHERE id=$1",args![tenant]).await?;
-                let taken = self
-                    .take_share(&mut tx, tenant, n(&limits["concurrent"]), n(&limits["per_minute"]))
-                    .await?;
-                tx.commit().await?;
-                Ok::<_, Error>(taken)
-            })
-            .await;
-            let Ok((share, room)) = taken else {
+            let Some((share, room)) = self.retake_share(tenant, None).await else {
                 return false;
             };
-            self.gateway.shares.set(tenant, (share, room));
             if share.concurrent > self.gateway.gates.in_flight_of(tenant) as i64
                 && share.per_minute > self.http_rates.count(tenant)
             {
@@ -469,7 +458,7 @@ impl Store {
             if room.concurrent < 1 && room.per_minute < 1 || tokio::time::Instant::now() >= until {
                 return false;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(crate::shares::RETAKE).await;
         }
     }
     /// Whose `hostname` is, and its workspace's requests a minute.

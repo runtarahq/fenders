@@ -89,7 +89,13 @@ struct Held {
 #[derive(Default)]
 pub struct Shares {
     inner: Mutex<HashMap<String, Held>>,
+    /// When each workspace's share was last taken again for requests
+    /// short of it: one at a time, at most every [`RETAKE`].
+    pub(crate) retaken: tokio::sync::Mutex<HashMap<String, Instant>>,
 }
+
+/// How often a share is taken again, at most, for requests short of it.
+pub const RETAKE: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl Shares {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Held>> {
