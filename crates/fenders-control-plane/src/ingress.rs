@@ -864,7 +864,28 @@ impl Store {
         if !self.wake_settled(reservation).await? {
             return Ok(None);
         }
-        let mut tx = self.gateway_transaction().await?;
+        // Bound to the execution without the mutation lock: the app's row
+        // is locked instead, and read again once it is. Whatever takes an
+        // app's execution out of service (a takeover, an idle stop, an
+        // eviction, a stop) changes that row under the mutation lock: a
+        // request bound before it is seen by it, and one bound after it
+        // finds the app changed. A thousand requests coming to serving apps
+        // together are bound at once, not one after another behind every
+        // scheduler pass. A restored control plane awaiting activation
+        // binds under the lock, which refuses.
+        let mut tx = self.transaction(false, false).await?;
+        let locked = one(
+            &mut tx,
+            "SELECT active FROM recovery_barrier WHERE singleton",
+            args![],
+        )
+        .await?["active"]
+            == true;
+        if locked {
+            tx = self.gateway_transaction().await?;
+        } else {
+            optional(&mut tx,"SELECT h.app_id FROM app_http h JOIN ingress_reservations q ON q.app_id=h.app_id WHERE q.id=$1 FOR SHARE OF h",args![reservation]).await?;
+        }
         let q=optional(&mut tx,"SELECT q.*,h.hostname,h.blocked,a.desired,t.http,a.target_release_id,a.revision FROM ingress_reservations q JOIN apps a ON a.id=q.app_id JOIN app_http h ON h.app_id=a.id JOIN app_triggers t ON t.app_id=a.id WHERE q.id=$1 AND q.expires>now()",args![reservation]).await?.ok_or_else(||Error::new(StatusCode::SERVICE_UNAVAILABLE,"HTTP wake request expired"))?;
         Self::require_workspace_active(&mut tx, s(&q["tenant_id"])).await?;
         if !q["execution_id"].is_null()
@@ -882,12 +903,16 @@ impl Store {
         let route = Self::ingress_route(&mut tx, s(&q["hostname"])).await?;
         if let Some(route) = &route {
             exec(&mut tx,"UPDATE ingress_reservations SET execution_id=$1,expires=now()+interval '90 seconds' WHERE id=$2",args![route["execution_id"],reservation]).await?;
-            exec(
-                &mut tx,
-                "UPDATE app_http SET last_activity=now() WHERE app_id=$1",
-                args![q["app_id"]],
-            )
-            .await?;
+            // Its activity is the flush's to write: the app's row, held
+            // for share, is not written here.
+            if locked {
+                exec(
+                    &mut tx,
+                    "UPDATE app_http SET last_activity=now() WHERE app_id=$1",
+                    args![q["app_id"]],
+                )
+                .await?;
+            }
         }
         tx.commit().await?;
         if let Some(execution) = route.as_ref().and_then(|r| r["execution_id"].as_str()) {

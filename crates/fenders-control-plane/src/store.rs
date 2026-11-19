@@ -57,6 +57,10 @@ where
 /// its pool's 16 connections.
 pub const LOCK_WAITERS: usize = 4;
 
+/// How long a transaction waits for its turn to wait for the lock: as long
+/// as it would wait for the lock itself (`lock_timeout`).
+pub const LOCK_TURN_WAIT: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct Store {
     pub pool: PgPool,
@@ -569,12 +573,19 @@ impl Store {
         // connection, for its turn to: a burst of them would otherwise hold
         // every connection while they wait, and a read that takes no lock
         // would wait for one long enough to take the database for gone.
+        // A request waits for a turn no longer than it would for the lock.
         let turn = if mutate && !priority {
+            let waiting = self.lock_waiters.clone().acquire_owned();
             Some(
-                self.lock_waiters
-                    .clone()
-                    .acquire_owned()
+                tokio::time::timeout(LOCK_TURN_WAIT, waiting)
                     .await
+                    .map_err(|_| {
+                        Error::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "the control plane is busy; try again",
+                        )
+                        .coded("busy")
+                    })?
                     .map_err(|_| Error::internal())?,
             )
         } else {

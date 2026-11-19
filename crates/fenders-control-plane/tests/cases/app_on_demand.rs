@@ -511,9 +511,19 @@ async fn requests_to_an_idle_app_wake_it_once_and_wait_without_the_lock() {
     l.report(&node, &e, "running", 1).await;
     l.store.schedule().await.unwrap();
     assert_eq!(l.http(&app).await["state"], "serving");
+    // Once it serves they go in, the one that woke it bound to its
+    // execution without the lock, and the others warm. One of them opens
+    // the app's gate, closed when it went idle, which only the locked path
+    // does: one locked transaction, not twenty.
+    let serving = locked();
+    let mut leases = Vec::new();
     for waited in waiting {
         let (route, lease) = waited.await.unwrap().unwrap();
         assert_eq!(route["execution_id"], e["id"]);
+        leases.push(lease);
+    }
+    assert!(locked() - serving <= 1, "{} locked", locked() - serving);
+    for lease in leases {
         l.store.ingress_finish(&lease, Some(0)).await.unwrap();
     }
     l.finish().await;
