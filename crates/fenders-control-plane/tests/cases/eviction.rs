@@ -211,3 +211,41 @@ async fn an_idle_app_gives_way_on_a_full_node_to_one_of_its_workspace_and_no_oth
     assert_eq!(l.http(&warm).await["state"], "idle");
     l.finish().await;
 }
+
+#[tokio::test]
+async fn apps_waiting_together_are_each_made_room_for_and_not_twice_for_one() {
+    let l = Lab::new().await;
+    let node = l.node("a").await;
+    for name in ["b", "c", "d"] {
+        l.node(name).await;
+    }
+    approve_component(&l, &node, true, true).await;
+    l.instances(&l.tenant, 2).await;
+    let first = l.warm_app("first").await;
+    let second = l.warm_app("second").await;
+    // Two wait while both are busy.
+    let a = s(&l.deploy("a", true, false, "a").await.unwrap()["resource_id"]).to_owned();
+    let b = s(&l.deploy("b", true, false, "b").await.unwrap()["resource_id"]).to_owned();
+    l.store.schedule().await.unwrap();
+    assert_eq!(l.http(&a).await["reason"], "allowance-exhausted");
+    assert_eq!(l.http(&b).await["reason"], "allowance-exhausted");
+    // Both go quiet: one pass has each give way, one for each.
+    l.quiet(&first).await;
+    l.quiet(&second).await;
+    l.store.schedule().await.unwrap();
+    assert_eq!(l.http(&first).await["reason"], "evicted");
+    assert_eq!(l.http(&second).await["reason"], "evicted");
+    assert_eq!(l.http(&a).await["reason"], "making-room");
+    assert_eq!(l.http(&b).await["reason"], "making-room");
+    let mut fors: Vec<String> = l
+        .evictions()
+        .await
+        .iter()
+        .map(|e| s(&e["detail"]["for"]["app_id"]).to_owned())
+        .collect();
+    fors.sort();
+    let mut waiting = vec![a.clone(), b.clone()];
+    waiting.sort();
+    assert_eq!(fors, waiting, "one for each");
+    l.finish().await;
+}
