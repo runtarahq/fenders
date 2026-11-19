@@ -1,0 +1,63 @@
+[Unit]
+Description=Fenders edge: the gateway and the run channel
+Documentation=https://github.com/runtarahq/fenders/blob/main/deploy/systemd/README.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=fenders-control
+Group=fenders-control
+# Holds STATE/edge.key, which `fenders-keys edge` writes from the control
+# plane's key: the run channel's derived key, not the encryption key.
+StateDirectory=fenders/edge
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/fenders/edge
+EnvironmentFile=/etc/fenders/edge/environment
+LoadCredential=database-url:/etc/fenders/edge/database-url
+LoadCredential=edge.key:/etc/fenders/edge/edge-tls.key
+LoadCredential=gateway.key:/etc/fenders/edge/gateway.key
+ExecStart=/usr/local/bin/fenders-control-plane --role edge \
+    --state /var/lib/fenders/edge \
+    --database-url-file ${CREDENTIALS_DIRECTORY}/database-url \
+    --edge-name ${FENDERS_EDGE_NAME} \
+    --host 0.0.0.0 --port 9095 --gateway-port 9092 --run-channel-port 9093 --forward-port 9096 \
+    --domain ${FENDERS_APP_DOMAIN} \
+    --ca /etc/fenders/edge/ca.pem \
+    --cert /etc/fenders/edge/edge.pem \
+    --key ${CREDENTIALS_DIRECTORY}/edge.key \
+    --gateway-cert /etc/fenders/edge/gateway.pem \
+    --gateway-key ${CREDENTIALS_DIRECTORY}/gateway.key
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=100s
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
+UMask=0077
+LimitCORE=0
+# The gateway and the run channel serve 8192 connections each, and the
+# forward port as many again.
+LimitNOFILE=65536
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

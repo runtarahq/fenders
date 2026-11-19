@@ -1,7 +1,65 @@
 # The run channel off the database, and the edge tier: the plan
 
-Status: E1 to E10 decided on 19 November 2026, as recommended (E7 for
-apps); E11 is proposed. Nothing here is built. It follows
+Status: built on 19 November 2026, every stage, on `feature/edge-tier`.
+[STATUS.md](STATUS.md) says what is true and wins where this file differs.
+This file is the plan as it was decided, kept for its reasoning. E1 to E11
+decided as recommended (E7 for apps; E11 at 10 minutes).
+
+Built differently from what is written below:
+
+- **Stage A: what moves the epoch is marked by triggers.** Every heartbeat
+  and scheduler pass took the lock and moved the epoch, which would have
+  dropped every cached launch dozens of times a second on a fleet. Triggers
+  on what decides whether an app serves set a flag in the transaction and
+  notify `fenders_gates` (`sql/gate_changes.sql`); a heartbeat's, the
+  scheduler's and the run channel's transactions move the epoch only when
+  one fired. The notification is what E9's listener hears.
+- **C1: the reconciler stays in the control process.** It opens tenants'
+  secrets (to size a run's environment), which an edge cannot (E6). It
+  decides from what edges write once a second of their exchange: which
+  shims ask, which are busy or idle, how long requests wait
+  (`gateway_observations`).
+- **C1: an allowance change recalls other processes' leases.** A split
+  control plane's leases are all its edges', and kept an operator from
+  lowering an allowance; the control process marks them recalled and waits
+  up to three seconds for the edges to give back what is unreserved.
+- **C1: the control process sends sample requests to the edges' gateway**
+  (`--gateway-endpoint`): run in its own memory they took a lease it never
+  flushed, and no shim asks its exchange.
+- **C2: a database that hangs is taken for gone** after two seconds (five
+  for the flush), as a paused one showed; and a control process that failed
+  a pass gives sessions 15 seconds before taking them for dead.
+- **C3: a takeover is notified** (`fenders_app`), so that the edge holding
+  an app's queue tells the old execution's waiting asks to ask again, as the
+  one process does.
+- **C4: a request waits up to two seconds for a share** the workspace has
+  room for, rather than being refused with 429 while another edge holds the
+  whole limit until its flush.
+- **C6: no empty data frame between edges.** HTTP/2 ends a connection
+  after a hundred empty DATA frames from its peer; relayed answers carried
+  them, and every request on the shared connection was lost with it.
+- **Not done:** a database role of an edge's own (open); measurement on
+  separate hosts; a balancer that routes by `GET /v1/edge-routes`.
+
+## Evidence
+
+On one machine (12 logical CPUs) that was control process, two edges,
+PostgreSQL in a container and the node, at `feature/edge-tier`'s head:
+
+- `verify_http_live.sh`, `verify_gateway_limits_live.sh`,
+  `verify_egress_limit_live.sh` and `verify_management_api_live.sh` pass,
+  with clients and shims reaching edge-a and edge-b's apps passed to it. The
+  two edges admitted 151 and 180 requests of them.
+- `measure_gateway.sh` through the two edges: 1,530 requests a second to one
+  app and 2,168 across four workspaces (1,325 and 1,563 with one process),
+  all answered 200; 16 MiB responses at 3 a second.
+- The database paused 60 seconds under 32 clients, one edge: 124,921
+  requests, all 200, the longest 2.0 seconds.
+- A release taking over under three clients, through the edge that does not
+  own the app: 120 of 120 answered, four times.
+- edge-b killed under load: its app answered 502 for 15 seconds, then 200
+  from edge-a, which the scheduler gave it once edge-b's session lapsed.
+ It follows
 [gateway-accounting.md](gateway-accounting.md), which took the gateway's
 accounting off the request path. [STATUS.md](STATUS.md) says what is true
 today.
