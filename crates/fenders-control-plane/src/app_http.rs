@@ -297,7 +297,18 @@ impl Store {
         let mut refused: std::collections::HashMap<String, crate::eviction::Room> =
             std::collections::HashMap::new();
         let only = only.map(|apps| json!(apps)).unwrap_or(Value::Null);
-        for mut binding in rows(tx,"SELECT h.*,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h WHERE ($1::jsonb IS NULL OR h.app_id IN (SELECT jsonb_array_elements_text($1::jsonb))) AND NOT (h.state='idle' AND NOT h.idle_draining AND NOT EXISTS(SELECT 1 FROM ingress_reservations q WHERE q.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM app_http_extras x WHERE x.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.deployment_id=h.deployment_id AND e.reserved) AND NOT EXISTS(SELECT 1 FROM app_http_operations x JOIN operations o ON o.id=x.operation_id WHERE x.app_id=h.app_id AND o.state='pending')) ORDER BY h.updated,h.app_id",args![only]).await? {
+        for mut binding in rows(tx,"SELECT h.*,(SELECT tenant_id FROM apps WHERE id=h.app_id) AS tenant_id,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h WHERE ($1::jsonb IS NULL OR h.app_id IN (SELECT jsonb_array_elements_text($1::jsonb))) AND NOT (h.state='idle' AND NOT h.idle_draining AND NOT EXISTS(SELECT 1 FROM ingress_reservations q WHERE q.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM app_http_extras x WHERE x.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.deployment_id=h.deployment_id AND e.reserved) AND NOT EXISTS(SELECT 1 FROM app_http_operations x JOIN operations o ON o.id=x.operation_id WHERE x.app_id=h.app_id AND o.state='pending')) ORDER BY h.updated,h.app_id",args![only]).await? {
+            // Its workspace's allowance refused an app this pass: one that
+            // waits for room as well is passed over until the next, rather
+            // than prepared to be refused too. During a burst of wakes,
+            // hundreds wait, and each pass held the lock for seconds
+            // preparing them.
+            if binding["state"]=="starting" && binding["execution_id"].is_null() && binding["candidate_until"].is_null() && binding["expired"]!=true
+                && let Some((tenant, least)) = binding["tenant_id"].as_str().and_then(|tenant| refused.get(tenant).map(|least| (tenant.to_owned(), *least))) {
+                // Made room for as one needing what was refused.
+                short_of_room.push((tenant, least, s(&binding["app_id"]).to_owned()));
+                continue;
+            }
             let app=one(tx,"SELECT a.*,t.http FROM apps a JOIN app_triggers t ON t.app_id=a.id WHERE a.id=$1",args![binding["app_id"]]).await?;
             let app_id=s(&app["id"]);
             if !Self::workspace_active(tx,s(&app["tenant_id"])).await? {continue;}
@@ -330,7 +341,13 @@ impl Store {
             if binding["state"]=="idle" {
                 Self::wake_http(tx,app_id).await?;
                 // Woken: it is started in this same pass, not the next.
-                match optional(tx,"SELECT h.*,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h WHERE app_id=$1 AND state='starting'",args![app_id]).await? {
+                match optional(tx,"SELECT h.*,(SELECT tenant_id FROM apps WHERE id=h.app_id) AS tenant_id,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h WHERE app_id=$1 AND state='starting'",args![app_id]).await? {
+                    // Its workspace's allowance already refused one this
+                    // pass: woken, it waits for the next to be started.
+                    Some(woken) if let Some(least) = woken["tenant_id"].as_str().and_then(|tenant| refused.get(tenant)) => {
+                        short_of_room.push((s(&woken["tenant_id"]).to_owned(), *least, app_id.to_owned()));
+                        continue;
+                    }
                     Some(woken) => binding = woken,
                     None => continue,
                 }
