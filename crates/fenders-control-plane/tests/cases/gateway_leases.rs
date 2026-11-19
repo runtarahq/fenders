@@ -119,11 +119,13 @@ async fn a_lease_charged_as_a_dead_sessions_is_taken_again_by_a_session_that_liv
     // All of the lease is used, as far as anyone knows.
     assert_eq!(written(&l).await, (0, LEAST, 0));
     // The flush writes the 300 it knows were used and finds no lease to
-    // take them off: it holds nothing, and the next asks for a new lease.
+    // take them off: it holds nothing, and the next request takes a new
+    // lease.
     l.store.flush_gateway().await.unwrap();
     assert_eq!(l.store.gateway.budgets.holds(&key), Some((0, 0, 0)));
     assert_eq!(written(&l).await, (0, LEAST + 300, 1));
-    l.store.flush_gateway().await.unwrap();
+    let (_, next) = l.store.ingress_start(&host, 0).await.unwrap();
+    l.store.ingress_finish(&next, Some(0)).await.unwrap();
     assert_eq!(l.store.gateway.budgets.holds(&key), Some((LEAST, 0, 0)));
     assert_eq!(written(&l).await, (LEAST, LEAST + 300, 1));
     let conservative: i64 =

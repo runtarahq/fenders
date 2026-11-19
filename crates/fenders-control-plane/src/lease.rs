@@ -408,7 +408,13 @@ impl Budgets {
                 } else {
                     inner.budgets.remove(&key);
                 }
-            } else if !closing && budget.available < budget.size() / 2 {
+            } else if !closing
+                && (budget.available < 0 || drawn > 0 && budget.available < budget.size() / 2)
+            {
+                // Brought to its size only while it is drawn on: a lease
+                // of a project with no traffic runs down, and is given
+                // back, rather than hold what outbound grants may need. One
+                // that is short of what is in flight is brought up anyway.
                 taken
                     .asks
                     .push((key.clone(), budget.size() - budget.available));
@@ -599,6 +605,20 @@ mod tests {
         let taken = budgets.take("2026-11-01", false);
         // Two were counted as requests; the lapsed one is counted elsewhere.
         assert_eq!(taken.used[0].requests, 2);
+    }
+
+    #[test]
+    fn a_lease_nothing_draws_on_is_not_brought_to_its_size() {
+        let budgets = Budgets::default();
+        budgets.granted(&key(), "2026-11-01", LEAST, LEAST);
+        assert!(budgets.spend(&key(), LEAST - 100));
+        // Drawn on in this flush: brought to its size.
+        assert_eq!(budgets.take("2026-11-01", false).asks.len(), 1);
+        // Nothing drawn since: left as it is.
+        assert!(budgets.take("2026-11-01", false).asks.is_empty());
+        // Taken back for an allowance change, with nothing drawn: still.
+        budgets.withhold("t");
+        assert!(budgets.take("2026-11-01", false).asks.is_empty());
     }
 
     #[test]

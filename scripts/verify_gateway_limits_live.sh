@@ -126,7 +126,7 @@ jq -n --slurpfile long_idle "$out/long-idle.json" --slurpfile long_h2 "$out/long
   --slurpfile l1 "$out/long-1.json" --slurpfile l6 "$out/long-6.json" \
   --slurpfile wake "$out/wake.json" --slurpfile served "$out/served.json" \
   --rawfile served_body "$out/served.body" --slurpfile starting "$out/after-long-starting.json" \
-  --slurpfile held "$out/after-abandoned.transfer.json" --slurpfile next "$out/after-abandoned.json" --slurpfile gateway "$out/after-abandoned.gateway.json" \
+  --slurpfile held "$out/after-abandoned.transfer.json" --slurpfile next "$out/after-abandoned.json" --slurpfile gateway "$out/after-abandoned.gateway.json" '
   {long_target_at_an_idle_app: {status: $long_idle[0].status, over_http2: $long_h2[0].status,
      state_after: $after_idle[0].state},
    long_targets_while_starting: {first: $l1[0].status, last: $l6[0].status, wake: $wake[0].status,
