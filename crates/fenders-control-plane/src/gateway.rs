@@ -134,6 +134,8 @@ pub struct Gateway {
     inner: Mutex<Inner>,
     /// What this session holds of each project's transfer allowance.
     pub budgets: crate::lease::Budgets,
+    /// What is known of the apps it serves and its requests in flight.
+    pub gates: crate::gate::Gates,
     /// One ask to extend a lease at a time: the others wait, and find it
     /// extended.
     extending: tokio::sync::Mutex<()>,
@@ -145,6 +147,7 @@ impl Default for Gateway {
             session: uid(),
             inner: Default::default(),
             budgets: Default::default(),
+            gates: Default::default(),
             extending: Default::default(),
         }
     }
