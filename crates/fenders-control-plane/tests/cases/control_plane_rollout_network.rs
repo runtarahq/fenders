@@ -54,13 +54,13 @@ impl Network {
                 finished.store(true, Ordering::SeqCst);
             }
         });
-        let base = format!("/v1/tenants/{}/projects/{}", l.tenant, l.project);
+        let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
         let endpoint = json_request(
             l,
             client,
             door,
             "POST",
-            &format!("{base}/external-endpoints"),
+            &format!("{base}/connections"),
             "rollout-tcp",
             Some(json!({"name":"rollout-pg","host":address,"port":port})),
         )
@@ -70,7 +70,7 @@ impl Network {
             client,
             door,
             "GET",
-            &format!("{base}/external-endpoints/{}", s(&endpoint["resource_id"])),
+            &format!("{base}/connections/{}", s(&endpoint["resource_id"])),
             "",
             None,
         )
@@ -198,7 +198,7 @@ impl Network {
         .await;
         assert_eq!(retried["resource_id"], self.receipt["resource_id"]);
         let path = format!(
-            "/v1/tenants/{}/projects/{}/grants/{}/revoke",
+            "/v1/workspaces/{}/projects/{}/grants/{}/revoke",
             l.tenant, l.project, self.grant
         );
         self.revoke =
@@ -232,7 +232,7 @@ impl Network {
         assert_eq!(budget["held_bytes"], 0);
         assert_eq!(budget["no_expiry"], true);
         let path = format!(
-            "/v1/tenants/{}/projects/{}/grants/{}/revoke",
+            "/v1/workspaces/{}/projects/{}/grants/{}/revoke",
             l.tenant, l.project, self.grant
         );
         let operation = json_request(l, client, door, "POST", &path, &self.revoke_key, None).await;

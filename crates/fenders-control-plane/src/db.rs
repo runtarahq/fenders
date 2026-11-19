@@ -73,14 +73,29 @@ pub async fn exec(tx: &mut Tx, sql: &str, args: &[Value]) -> Result<u64> {
         .await?
         .rows_affected())
 }
+/// An id that a request's body names. One that could be no id is a
+/// malformed request and is said to be: `404` is for an id that could be
+/// one and names nothing, and for anything a path names.
+pub fn id(value: &Value) -> Result<&str> {
+    fenders_node_protocol::value::id(value)
+        .map_err(|_| Error::invalid("expected an id: 32 lowercase hexadecimal characters"))
+}
 // Control-plane errors carry the database classification, so these constructors
 // shadow the protocol versions for code that also returns database errors.
 pub fn conflict(message: &'static str) -> Error {
     Error::new(axum::http::StatusCode::CONFLICT, message)
 }
+/// A refusal for want of allowance, or at a limit on what a workspace may
+/// have: not a rate, so waiting does not cure it.
+///
+/// Within the control plane it keeps the status it has always had, which
+/// the scheduler, the gateway and the run channel tell it by, and which the
+/// gateway and the run channel answer with. The management API answers it
+/// `409` ([`QUOTA`] is how it knows one).
 pub fn quota(message: &'static str) -> Error {
-    Error::new(axum::http::StatusCode::TOO_MANY_REQUESTS, message)
+    Error::new(axum::http::StatusCode::TOO_MANY_REQUESTS, message).coded(QUOTA)
 }
+pub const QUOTA: &str = "quota_exhausted";
 #[macro_export]
 macro_rules! args { ($($value:expr),* $(,)?) => { &[$(serde_json::json!($value)),*] }; }
 

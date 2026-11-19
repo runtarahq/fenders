@@ -23,7 +23,7 @@ api() { # METHOD PATH [JSON]
     -H "Idempotency-Key: output-$RANDOM-$RANDOM-$RANDOM" -H 'Content-Type: application/json' \
     ${3:+-d "$3"} "$manage/v1$2"
 }
-scope=/tenants/$(jq -er .tenant "$state/scope.json")/projects/$(jq -er .project "$state/scope.json")
+scope=/workspaces/$(jq -er .tenant "$state/scope.json")/projects/$(jq -er .project "$state/scope.json")
 name=output-$(date +%H%M%S)
 secret_value=live-secret-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
 

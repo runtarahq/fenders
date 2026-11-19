@@ -9,14 +9,12 @@ async fn request(l: &Lab, token: &str, app: &str, key: &str, revision: i64) -> (
             Request::builder()
                 .method("DELETE")
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/apps/{app}",
+                    "/v1/workspaces/{}/projects/{}/apps/{app}?expected_revision={revision}",
                     l.tenant, l.project
                 ))
                 .header("authorization", format!("Bearer {token}"))
                 .header("Idempotency-Key", key)
-                .body(Body::from(
-                    json!({"expected_revision":revision}).to_string(),
-                ))
+                .body(Body::empty())
                 .unwrap(),
         )
         .await
@@ -78,7 +76,9 @@ async fn deletion_is_authorized_atomic_idempotent_and_keeps_a_tombstone() {
         request(&l, s(&editor["token"]), app, &key, revision),
         request(&l, s(&editor["token"]), app, &key, revision)
     );
-    assert_eq!(first.0, StatusCode::ACCEPTED);
+    // Nothing of the app was running, so the deletion is made at once:
+    // 200, where 202 would say it was still to be.
+    assert_eq!(first.0, StatusCode::OK);
     assert_eq!(first, retry);
     assert_eq!(first.1["state"], "succeeded");
     assert_eq!(

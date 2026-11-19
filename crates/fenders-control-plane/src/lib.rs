@@ -14,6 +14,7 @@ pub use fenders_node_protocol::application_headers;
 pub mod apps;
 mod artifact_retention;
 pub mod artifacts;
+pub mod audit_trail;
 pub mod backup;
 pub mod customer_api;
 pub mod db;

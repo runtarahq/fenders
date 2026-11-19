@@ -115,6 +115,19 @@ impl Rates {
         true
     }
 
+    /// How many seconds until `tenant` may be admitted a request again,
+    /// once [`admit`](Self::admit) has refused one: when the oldest second
+    /// still counted leaves the minute. At least one.
+    pub fn retry_after(&self, tenant: &str) -> u64 {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Self::now(&inner);
+        inner
+            .admitted
+            .get(tenant)
+            .and_then(|seconds| seconds.front())
+            .map_or(1, |(second, _)| (second + 60).saturating_sub(now).max(1))
+    }
+
     /// Whether `limit` requests of `tenant` were admitted in the last minute:
     /// what [`admit`](Self::admit) would answer, without admitting one.
     pub fn exhausted(&self, tenant: &str, limit: i64) -> bool {
@@ -503,16 +516,32 @@ impl Store {
         tenant: &str,
         value: Value,
     ) -> Result<Value> {
+        self.update_http_limits_keyed(p, tenant, value, None).await
+    }
+    pub async fn update_http_limits_keyed(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        value: Value,
+        key: Option<&str>,
+    ) -> Result<Value> {
         p.operator()?;
-        id(&json!(tenant))?;
+        crate::model::identity(tenant)?;
         let names = ["concurrent_requests", "requests_per_minute"];
         fields(&value, &names, &names)?;
         let concurrent =
             fenders_node_protocol::value::integer(&value["concurrent_requests"], 1, 10_000)?;
         let rate =
             fenders_node_protocol::value::integer(&value["requests_per_minute"], 1, 10_000_000)?;
+        let request = json!({"kind":"tenant.http-limits","tenant":tenant,"value":value});
         let mut tx = self.transaction(true, false).await?;
         Self::live_principal(&mut tx, p).await?;
+        if let Some(key) = key
+            && let Some(row) =
+                crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
         let row = optional(&mut tx,"UPDATE tenants SET http_concurrent_requests=$2,http_requests_per_minute=$3 WHERE id=$1 RETURNING http_concurrent_requests AS concurrent_requests,http_requests_per_minute AS requests_per_minute",args![tenant,concurrent,rate]).await?.ok_or_else(Error::missing)?;
         Self::audit(
             &mut tx,
@@ -523,6 +552,17 @@ impl Store {
             row.clone(),
         )
         .await?;
+        if let Some(key) = key {
+            crate::customer_api::save_operator_receipt(
+                &mut tx,
+                &p.id,
+                key,
+                Some(tenant),
+                &request,
+                &row,
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(row)
     }
@@ -575,5 +615,27 @@ impl Store {
         }
         tx.commit().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::Rates;
+
+    #[test]
+    fn a_refused_rate_says_when_its_minute_turns() {
+        let rates = Rates::default();
+        assert!(rates.admit("w", 2));
+        rates.advance(20);
+        assert!(rates.admit("w", 2));
+        assert!(!rates.admit("w", 2));
+        // The first admitted leaves the minute 40 seconds from now.
+        assert_eq!(rates.retry_after("w"), 40);
+        rates.advance(39);
+        assert_eq!(rates.retry_after("w"), 1);
+        rates.advance(1);
+        assert!(rates.admit("w", 2));
+        // Never none: a caller told to wait no time would not wait.
+        assert_eq!(rates.retry_after("nobody"), 1);
     }
 }

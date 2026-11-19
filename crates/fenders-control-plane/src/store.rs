@@ -98,6 +98,84 @@ pub(crate) fn token(prefix: &str) -> Result<String> {
             .collect::<String>()
     ))
 }
+/// Which page of a list is asked for: the `limit` newest, or the `limit`
+/// next after the cursor a page before gave as its `next`.
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListPage {
+    pub before: Option<String>,
+    pub limit: Option<i64>,
+}
+impl ListPage {
+    /// As many as a list held before it was paged: for the control plane's
+    /// own reads, which are not the API's.
+    pub(crate) fn whole() -> Self {
+        Self {
+            before: None,
+            limit: Some(1000),
+        }
+    }
+    /// The page, if it asks for no more than the API gives at once.
+    pub fn at_most(self, most: i64) -> Result<Self> {
+        if self.limit.is_some_and(|limit| !(1..=most).contains(&limit)) {
+            return Err(Error::invalid("page limit must be between 1 and 100"));
+        }
+        Ok(self)
+    }
+    /// The cursor and the limit, once they are known to be ones. A cursor
+    /// is the id of the last thing a page showed. That is not said to a
+    /// caller, who passes back what it was given.
+    pub(crate) fn bounds(&self, most: i64) -> Result<(Option<&str>, i64)> {
+        let limit = self.limit.unwrap_or(100);
+        if !(1..=most).contains(&limit) {
+            return Err(Error::invalid("page limit must be between 1 and 100"));
+        }
+        if let Some(before) = &self.before
+            && identity(before).is_err()
+        {
+            return Err(Error::invalid("invalid page cursor"));
+        }
+        Ok((self.before.as_deref(), limit))
+    }
+    /// `{items, next}` of rows read one past the limit: `next` is the
+    /// cursor to the page after this one, or null when there is none.
+    pub(crate) fn page(mut items: Vec<Value>, limit: i64) -> Value {
+        let more = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        let next = match (more, items.last()) {
+            (true, Some(last)) => last["id"].clone(),
+            _ => Value::Null,
+        };
+        json!({"items":items,"next":next})
+    }
+}
+/// Newest first, and after a cursor: for a list of rows `r` of `table`.
+/// `$b` is the cursor's parameter.
+fn after_cursor(table: &str, b: usize) -> String {
+    format!(
+        "(${b}::text IS NULL OR (r.created,r.id)<(SELECT c.created,c.id FROM {table} c WHERE c.id=${b}))"
+    )
+}
+
+/// A workspace `t` as the API shows it to the operator: what it is called,
+/// what it may use, how it stands, and the revisions the operator's own
+/// changes expect. Not a column more: a column added to the table is not
+/// thereby added to the API.
+pub(crate) const WORKSPACE: &str = "jsonb_build_object('id',t.id,'name',t.name,'cpu_percent',t.cpu_percent,'memory_mib',t.memory_mib,'storage_bytes',t.storage_bytes,'instances',t.instances,'transfer_bytes',t.transfer_bytes,'default_app_size',t.default_app_size,'http_concurrent_requests',t.http_concurrent_requests,'http_requests_per_minute',t.http_requests_per_minute,'lifecycle_state',t.lifecycle_state,'lifecycle_revision',t.lifecycle_revision,'lifecycle_reason',t.lifecycle_reason,'allowance_revision',t.allowance_revision,'created',t.created)";
+/// A project `p`: its name as it was given, and the slug made of it.
+pub(crate) const PROJECT: &str = "jsonb_build_object('id',p.id,'tenant_id',p.tenant_id,'name',p.display_name,'slug',p.slug,'is_default',p.is_default,'created',p.created)";
+/// An artifact `a`.
+pub(crate) const ARTIFACT: &str = "jsonb_build_object('id',a.id,'tenant_id',a.tenant_id,'project_id',a.project_id,'digest',a.digest,'size',a.size,'created',a.created,'last_uploaded_at',a.last_uploaded_at)";
+
+/// The same of a row called `r`, as the list of a project's things has it.
+const ARTIFACT_OF_R: &str = "jsonb_build_object('id',r.id,'tenant_id',r.tenant_id,'project_id',r.project_id,'digest',r.digest,'size',r.size,'created',r.created,'last_uploaded_at',r.last_uploaded_at)";
+
+/// An operation `o` as the API shows it. Stopping an execution that is a
+/// run's is shown as what was asked for: cancelling that run.
+pub(crate) const OPERATION: &str = "jsonb_build_object('id',o.id,'kind',CASE WHEN cancelled.id IS NULL THEN o.kind ELSE 'cancel-run' END,'resource_id',COALESCE(cancelled.id,o.resource_id),'state',o.state,'error',o.error,'created',o.created,'updated',o.updated)";
+/// The run an operation `o` cancels, where it is one that does.
+pub(crate) const OPERATION_RUN: &str = "LEFT JOIN LATERAL (SELECT r.id FROM app_runs r WHERE o.kind='stop' AND r.execution_id=o.resource_id LIMIT 1) cancelled ON true";
+
 /// The most rows of each kind a workspace may have: projects, secrets, apps,
 /// and credentials (API keys among them) that still open anything.
 pub(crate) const MAX_PROJECTS: i64 = 256;
@@ -169,6 +247,18 @@ impl Store {
 
     pub async fn transaction(&self, mutate: bool, recovery: bool) -> Result<Tx> {
         self.begin_transaction(mutate, recovery, false).await
+    }
+    /// Whether this control plane can serve: it reaches its database, the
+    /// database is the one its encryption key is for, and it is not held
+    /// after a restore, when no change is admitted.
+    pub async fn ready(&self) -> bool {
+        let Ok(mut tx) = self.transaction(false, false).await else {
+            return false;
+        };
+        sqlx::query_scalar::<_, bool>("SELECT NOT active FROM recovery_barrier WHERE singleton")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap_or(false)
     }
     pub fn background_monitor(&self) -> std::sync::Arc<crate::supervision::Monitor> {
         self.background.clone()
@@ -329,7 +419,8 @@ impl Store {
     ) -> Result<()> {
         sqlx::query(
             // With the label of the key that did it, where a key did.
-            "INSERT INTO audit (tenant_id,actor,action,resource_id,detail,actor_label) VALUES ($1,$2,$3,$4,$5,(SELECT label FROM credentials WHERE id=$2))",
+            // And with the project it was done in, where it was done in one.
+            "INSERT INTO audit (tenant_id,actor,action,resource_id,detail,actor_label,project_id) VALUES ($1,$2,$3,$4,$5,(SELECT label FROM credentials WHERE id=$2),NULLIF(current_setting('fenders.project',true),''))",
         )
         .bind(tenant)
         .bind(&actor.id)
@@ -353,7 +444,7 @@ impl Store {
             Self::require_workspace_active(tx, tenant).await?;
         }
         let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM projects WHERE tenant_id=$1 AND id=$2)",
+            "SELECT EXISTS (SELECT 1 FROM projects WHERE tenant_id=$1 AND id=$2 AND NOT deleted)",
         )
         .bind(tenant)
         .bind(project)
@@ -362,28 +453,73 @@ impl Store {
         if !exists {
             return Err(Error::missing());
         }
+        // What this transaction goes on to record, it records of this
+        // project: the audit trail of a project is what was done in it.
+        sqlx::query("SELECT set_config('fenders.project',$1,true)")
+            .bind(project)
+            .execute(&mut **tx)
+            .await?;
         Ok(())
     }
+    /// Every workspace, for the control plane's own reads.
     pub async fn tenants(&self, p: &Principal) -> Result<Value> {
+        Ok(self.workspaces(p, ListPage::whole()).await?["items"].take())
+    }
+    /// One workspace: any to the operator, and a key its own.
+    pub async fn workspace(&self, p: &Principal, tenant: &str) -> Result<Value> {
+        p.scope(tenant, p.project_id.as_deref(), false, false)?;
+        let mut tx = self.transaction(false, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        sqlx::query_scalar::<_, Value>(&format!("SELECT CASE WHEN $1 THEN {WORKSPACE} ELSE {WORKSPACE}-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE t.id=$2 AND t.deleted_at IS NULL"))
+            .bind(p.role == Role::Operator)
+            .bind(tenant)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(Error::missing)
+    }
+    /// A page of the workspaces a credential may see: all of them to the
+    /// operator, and a key its own.
+    pub async fn workspaces(&self, p: &Principal, page: ListPage) -> Result<Value> {
+        let (before, limit) = page.bounds(1000)?;
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
         let rows = sqlx::query_scalar::<_, Value>(
             // A workspace's own credentials see its plan and its state, not
             // what the operator wrote of it for itself: the reason it gave
             // for a suspension, and the revisions of its own edits.
-            "SELECT CASE WHEN $1 THEN to_jsonb(t) ELSE to_jsonb(t)-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE $1 OR id=$2 ORDER BY created",
+            &format!("SELECT CASE WHEN $1 THEN {WORKSPACE} ELSE {WORKSPACE}-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE ($1 OR t.id=$2) AND t.deleted_at IS NULL AND ($3::text IS NULL OR (t.created,t.id)<(SELECT c.created,c.id FROM tenants c WHERE c.id=$3)) ORDER BY t.created DESC,t.id DESC LIMIT $4"),
         )
         .bind(p.role == Role::Operator)
         .bind(&p.tenant_id)
+        .bind(before)
+        .bind(limit + 1)
         .fetch_all(&mut *tx)
         .await?;
-        Ok(Value::Array(rows))
+        Ok(ListPage::page(rows, limit))
     }
     pub async fn create_tenant(&self, p: &Principal, value: CreateTenant) -> Result<Value> {
+        self.create_tenant_keyed(p, value, None).await
+    }
+    /// With a key, a retry is answered with the tenant the first call made
+    /// and makes no second one. Two tenants may share a name; nothing but
+    /// the key tells a retry from another tenant.
+    pub async fn create_tenant_keyed(
+        &self,
+        p: &Principal,
+        value: CreateTenant,
+        key: Option<&str>,
+    ) -> Result<Value> {
         p.operator()?;
         name(&value.name)?;
         value.allowance.validate()?;
+        let request = json!({"kind":"tenant.create","name":value.name,"allowance":value.allowance});
         let mut tx = self.transaction(true, false).await?;
+        if let Some(key) = key
+            && let Some(row) =
+                crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
         let (row, project_id) =
             Self::create_workspace_records(&mut tx, &value.name, &value.name, &value.allowance)
                 .await?;
@@ -398,6 +534,17 @@ impl Store {
             json!({"default":true}),
         )
         .await?;
+        if let Some(key) = key {
+            crate::customer_api::save_operator_receipt(
+                &mut tx,
+                &p.id,
+                key,
+                Some(id),
+                &request,
+                &row,
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(row)
     }
@@ -409,7 +556,7 @@ impl Store {
         a: &Allowance,
     ) -> Result<(Value, String)> {
         let id = uid();
-        let row = sqlx::query_scalar::<_, Value>("INSERT INTO tenants AS t (id,name,display_name,cpu_percent,memory_mib,storage_bytes,instances,transfer_bytes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_jsonb(t)")
+        let row = sqlx::query_scalar::<_, Value>(&format!("INSERT INTO tenants AS t (id,name,display_name,cpu_percent,memory_mib,storage_bytes,instances,transfer_bytes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING {WORKSPACE}"))
             .bind(&id).bind(name).bind(display_name).bind(a.cpu_percent).bind(a.memory_mib).bind(a.storage_bytes).bind(a.instances).bind(a.transfer_bytes).fetch_one(&mut **tx).await?;
         let project_id = uid();
         sqlx::query("INSERT INTO projects(id,tenant_id,name,display_name,slug,is_default) VALUES ($1,$2,'production','Production','production',true)")
@@ -421,6 +568,18 @@ impl Store {
         p: &Principal,
         tenant: &str,
         value: UpdateAllowance,
+    ) -> Result<Value> {
+        self.update_allowance_keyed(p, tenant, value, None).await
+    }
+    /// A key is not required. With one, a retry is answered as the first
+    /// call was, where without it a lowered allowance might by then be
+    /// refused as below what is in use.
+    pub async fn update_allowance_keyed(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        value: UpdateAllowance,
+        key: Option<&str>,
     ) -> Result<Value> {
         p.operator()?;
         identity(tenant)?;
@@ -435,8 +594,34 @@ impl Store {
         {
             return Err(Error::invalid("default app size is small, medium or large"));
         }
+        let mut request = json!({"kind":"tenant.update","tenant":tenant,"allowance":value.allowance,"default_app_size":value.default_app_size});
+        // Named only when given, so that a retry made before this could be
+        // given is still the request it was.
+        if let Some(expected) = value.expected_revision {
+            request["expected_revision"] = json!(expected);
+        }
         let mut tx = self.transaction(true, false).await?;
         Self::live_principal(&mut tx, p).await?;
+        if let Some(key) = key
+            && let Some(row) =
+                crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
+        if let Some(expected) = value.expected_revision {
+            let current: Option<i64> =
+                sqlx::query_scalar("SELECT allowance_revision FROM tenants WHERE id=$1 FOR UPDATE")
+                    .bind(tenant)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if current.ok_or_else(Error::missing)? != expected {
+                return Err(Error::new(
+                    StatusCode::CONFLICT,
+                    "workspace allowance changed; read it again before changing it",
+                )
+                .coded("revision_conflict"));
+            }
+        }
         if let Some(size) = &value.default_app_size {
             let changed = sqlx::query("UPDATE tenants SET default_app_size=$2 WHERE id=$1")
                 .bind(tenant)
@@ -471,12 +656,25 @@ impl Store {
                 row
             }
             None => {
-                sqlx::query_scalar::<_, Value>("SELECT to_jsonb(t) FROM tenants t WHERE id=$1")
-                    .bind(tenant)
-                    .fetch_one(&mut *tx)
-                    .await?
+                sqlx::query_scalar::<_, Value>(&format!(
+                    "SELECT {WORKSPACE} FROM tenants t WHERE id=$1"
+                ))
+                .bind(tenant)
+                .fetch_one(&mut *tx)
+                .await?
             }
         };
+        if let Some(key) = key {
+            crate::customer_api::save_operator_receipt(
+                &mut tx,
+                &p.id,
+                key,
+                Some(tenant),
+                &request,
+                &row,
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(row)
     }
@@ -491,16 +689,22 @@ impl Store {
                 "allowance is below current usage or reservations",
             ));
         }
-        let row = sqlx::query_scalar::<_, Value>("UPDATE tenants AS t SET cpu_percent=$2,memory_mib=$3,storage_bytes=$4,instances=$5,transfer_bytes=$6 WHERE id=$1 RETURNING to_jsonb(t)")
+        let row = sqlx::query_scalar::<_, Value>(&format!("UPDATE tenants AS t SET cpu_percent=$2,memory_mib=$3,storage_bytes=$4,instances=$5,transfer_bytes=$6 WHERE id=$1 RETURNING {WORKSPACE}"))
             .bind(tenant).bind(a.cpu_percent).bind(a.memory_mib).bind(a.storage_bytes).bind(a.instances).bind(a.transfer_bytes).fetch_optional(&mut **tx).await?.ok_or_else(Error::missing)?;
         Ok(row)
     }
+    /// Every project of a workspace that a credential may see.
     pub async fn projects(&self, p: &Principal, tenant: &str) -> Result<Value> {
+        Ok(self.project_page(p, tenant, ListPage::whole()).await?["items"].take())
+    }
+    pub async fn project_page(&self, p: &Principal, tenant: &str, page: ListPage) -> Result<Value> {
         p.scope(tenant, p.project_id.as_deref(), false, false)?;
+        let (before, limit) = page.bounds(1000)?;
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
-        Ok(Value::Array(sqlx::query_scalar::<_, Value>("SELECT to_jsonb(p) FROM projects p WHERE tenant_id=$1 AND ($2::text IS NULL OR id=$2) ORDER BY created")
-            .bind(tenant).bind(&p.project_id).fetch_all(&mut *tx).await?))
+        let rows = sqlx::query_scalar::<_, Value>(&format!("SELECT {PROJECT} FROM projects p WHERE p.tenant_id=$1 AND NOT p.deleted AND ($2::text IS NULL OR p.id=$2) AND ($3::text IS NULL OR (p.created,p.id)<(SELECT c.created,c.id FROM projects c WHERE c.id=$3)) ORDER BY p.created DESC,p.id DESC LIMIT $4"))
+            .bind(tenant).bind(&p.project_id).bind(before).bind(limit + 1).fetch_all(&mut *tx).await?;
+        Ok(ListPage::page(rows, limit))
     }
     pub async fn create_project(&self, p: &Principal, tenant: &str, value: Named) -> Result<Value> {
         self.create_project_keyed(p, tenant, value, None).await
@@ -525,7 +729,7 @@ impl Store {
         Self::metadata_limit(&mut tx, tenant, "projects", MAX_PROJECTS).await?;
         let id = uid();
         let row = sqlx::query_scalar::<_, Value>(
-            "INSERT INTO projects AS p (id,tenant_id,name,display_name,slug) VALUES ($1,$2,$3,$4,$3) RETURNING to_jsonb(p)",
+            &format!("INSERT INTO projects AS p (id,tenant_id,name,display_name,slug) VALUES ($1,$2,$3,$4,$3) RETURNING {PROJECT}"),
         )
         .bind(&id)
         .bind(tenant)
@@ -538,6 +742,114 @@ impl Store {
             crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
         }
 
+        tx.commit().await?;
+        Ok(row)
+    }
+    /// A project that is gone is kept as a row, because what was done in it
+    /// (operations, usage, the audit trail) still names it.
+    pub(crate) const PROJECT_MIGRATION: &'static str =
+        "ALTER TABLE projects ADD COLUMN IF NOT EXISTS deleted boolean NOT NULL DEFAULT false";
+
+    /// Gives a project another name, and the slug made of it.
+    pub async fn rename_project(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        value: Named,
+        key: &str,
+    ) -> Result<Value> {
+        p.scope(tenant, None, true, false)?;
+        let (display_name, slug) = crate::workspaces::project_name(&value.name)?;
+        let request = json!({"kind":"project.rename","project":project,"name":value.name});
+        let mut tx = self.transaction(true, false).await?;
+        Self::project(&mut tx, p, tenant, project, true).await?;
+        if let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await? {
+            return Ok(row);
+        }
+        let row = sqlx::query_scalar::<_, Value>(&format!("UPDATE projects AS p SET name=$3,slug=$3,display_name=$4 WHERE p.tenant_id=$1 AND p.id=$2 AND NOT p.deleted RETURNING {PROJECT}"))
+            .bind(tenant)
+            .bind(project)
+            .bind(&slug)
+            .bind(&display_name)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(Error::missing)?;
+        Self::audit(
+            &mut tx,
+            p,
+            "project.rename",
+            project,
+            tenant,
+            json!({"name":display_name,"slug":slug}),
+        )
+        .await?;
+        crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+    /// Removes a project that holds nothing. What was done in it stays: its
+    /// operations, its usage, its part of the audit trail. Its name is
+    /// free for another.
+    pub async fn delete_project(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        key: &str,
+    ) -> Result<Value> {
+        p.scope(tenant, None, true, false)?;
+        let request = json!({"kind":"project.delete","project":project});
+        let mut tx = self.transaction(true, false).await?;
+        Self::live_principal(&mut tx, p).await?;
+        // Before the project is looked for: the retry of a deletion that
+        // was made finds its receipt, not a project that is gone.
+        identity(project)?;
+        if let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await? {
+            return Ok(row);
+        }
+        Self::project(&mut tx, p, tenant, project, true).await?;
+        let found: (bool, bool) = sqlx::query_as("SELECT p.is_default,
+            EXISTS(SELECT 1 FROM apps a WHERE a.tenant_id=p.tenant_id AND a.project_id=p.id AND NOT a.deleted)
+            OR EXISTS(SELECT 1 FROM artifacts a WHERE a.tenant_id=p.tenant_id AND a.project_id=p.id AND a.retired_at IS NULL)
+            OR EXISTS(SELECT 1 FROM secrets s WHERE s.tenant_id=p.tenant_id AND s.project_id=p.id)
+            OR EXISTS(SELECT 1 FROM external_endpoints e WHERE e.tenant_id=p.tenant_id AND e.project_id=p.id AND NOT e.deleted)
+            OR EXISTS(SELECT 1 FROM external_https_endpoints e WHERE e.tenant_id=p.tenant_id AND e.project_id=p.id AND NOT e.deleted)
+            OR EXISTS(SELECT 1 FROM executions e WHERE e.tenant_id=p.tenant_id AND e.project_id=p.id AND e.reserved)
+            FROM projects p WHERE p.tenant_id=$1 AND p.id=$2 FOR UPDATE OF p")
+            .bind(tenant)
+            .bind(project)
+            .fetch_one(&mut *tx)
+            .await?;
+        if found.0 {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "a workspace's default project is not deleted",
+            )
+            .coded("in_use"));
+        }
+        if found.1 {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "project still holds apps, artifacts, secrets, connections or runs; delete those first",
+            )
+            .coded("in_use"));
+        }
+        // Its names are given up, so that another project may take them.
+        sqlx::query("UPDATE projects SET deleted=true,name=id,slug=id,display_name=display_name||' (deleted '||id||')' WHERE tenant_id=$1 AND id=$2")
+            .bind(tenant)
+            .bind(project)
+            .execute(&mut *tx)
+            .await?;
+        // A key that was this project's opens nothing now.
+        sqlx::query("UPDATE credentials SET revoked=true WHERE tenant_id=$1 AND project_id=$2 AND NOT revoked")
+            .bind(tenant)
+            .bind(project)
+            .execute(&mut *tx)
+            .await?;
+        let row = json!({"id":project});
+        Self::audit(&mut tx, p, "project.delete", project, tenant, json!({})).await?;
+        crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
         tx.commit().await?;
         Ok(row)
     }
@@ -586,7 +898,10 @@ impl Store {
         limit: i64,
     ) -> Result<()> {
         let counted = match table {
-            "secrets" | "projects" | "apps" => format!("SELECT count(*) FROM {table} WHERE tenant_id=$1"),
+            "secrets" | "apps" => format!("SELECT count(*) FROM {table} WHERE tenant_id=$1"),
+            // A project that was deleted is kept, for what names it; it is
+            // not one of the workspace's projects any more.
+            "projects" => "SELECT count(*) FROM projects WHERE tenant_id=$1 AND NOT deleted".to_owned(),
             // Those that still open anything.
             "credentials" => "SELECT count(*) FROM credentials WHERE tenant_id=$1 AND NOT revoked AND expires>now()".to_owned(),
             _ => return Err(Error::internal()),
@@ -619,9 +934,9 @@ impl Store {
         if let Some(row) = &existing
             && row["retired_at"].is_null()
         {
-            let row = sqlx::query_scalar::<_, Value>(
-                "UPDATE artifacts a SET last_uploaded_at=now() WHERE id=$1 RETURNING to_jsonb(a)",
-            )
+            let row = sqlx::query_scalar::<_, Value>(&format!(
+                "UPDATE artifacts a SET last_uploaded_at=now() WHERE id=$1 RETURNING {ARTIFACT}"
+            ))
             .bind(s(&row["id"]))
             .fetch_one(&mut *tx)
             .await?;
@@ -631,10 +946,7 @@ impl Store {
         let fits: bool = sqlx::query_scalar("SELECT storage_bytes >= $2+(SELECT COALESCE(sum(bytes),0) FROM storage_reservations WHERE tenant_id=$1) FROM tenants WHERE id=$1")
             .bind(tenant).bind(data.len() as i64).fetch_one(&mut *tx).await?;
         if !fits {
-            return Err(Error::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "tenant storage allowance exhausted",
-            ));
+            return Err(crate::db::quota("tenant storage allowance exhausted"));
         }
         // Durable bytes precede the metadata commit. Failed transactions can leave an
         // unreferenced blob, but never a database record pointing to incomplete bytes.
@@ -667,7 +979,7 @@ impl Store {
             .map(|v| s(&v["id"]).to_owned())
             .unwrap_or_else(uid);
         let digest = crate::model::digest(data);
-        let row = sqlx::query_scalar::<_, Value>("INSERT INTO artifacts AS a (id,tenant_id,project_id,digest,size) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET retired_at=NULL,last_uploaded_at=now() RETURNING to_jsonb(a)")
+        let row = sqlx::query_scalar::<_, Value>(&format!("INSERT INTO artifacts AS a (id,tenant_id,project_id,digest,size) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET retired_at=NULL,last_uploaded_at=now() RETURNING {ARTIFACT}"))
             .bind(&id).bind(tenant).bind(project).bind(&digest).bind(data.len() as i64).fetch_one(&mut *tx).await?;
         sqlx::query("INSERT INTO artifact_validations(artifact_id,tenant_id,project_id,runtime) VALUES($1,$2,$3,$4) ON CONFLICT(artifact_id) DO UPDATE SET state='pending',inspection=NULL,error=NULL,node_id=NULL,node_boot=NULL,lease_until=NULL,generation=artifact_validations.generation+1,available_at=now(),updated=now()")
             .bind(&id).bind(tenant).bind(project).bind(crate::artifacts::RUNTIME).execute(&mut *tx).await?;
@@ -683,6 +995,41 @@ impl Store {
         tx.commit().await?;
         Ok(row)
     }
+    /// A project's operations, as the API shows one: what was asked, of
+    /// what, and how it stands. Not the key or the hash of the request that
+    /// asked it, which are the caller's own and nobody else's to read.
+    async fn operations(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        id: Option<&str>,
+        page: ListPage,
+    ) -> Result<Value> {
+        if let Some(id) = id {
+            identity(id)?;
+        }
+        let (before, limit) = page.bounds(1000)?;
+        let mut tx = self.transaction(false, false).await?;
+        Self::project(&mut tx, p, tenant, project, false).await?;
+        let mut rows = sqlx::query_scalar::<_, Value>(&format!(
+            "SELECT {OPERATION} FROM operations o {OPERATION_RUN} WHERE o.tenant_id=$1 AND o.project_id=$2 AND ($3::text IS NULL OR o.id=$3) AND ($4::text IS NULL OR (o.created,o.id)<(SELECT c.created,c.id FROM operations c WHERE c.id=$4)) ORDER BY o.created DESC,o.id DESC LIMIT $5"
+        ))
+        .bind(tenant)
+        .bind(project)
+        .bind(id)
+        .bind(before)
+        .bind(limit + 1)
+        .fetch_all(&mut *tx)
+        .await?;
+        if id.is_some() {
+            rows.pop().ok_or_else(Error::missing)
+        } else {
+            Ok(ListPage::page(rows, limit))
+        }
+    }
+    /// One thing of a kind a project holds, or all of that kind: for the
+    /// control plane's own reads.
     pub async fn resources(
         &self,
         p: &Principal,
@@ -691,12 +1038,36 @@ impl Store {
         kind: &str,
         id: Option<&str>,
     ) -> Result<Value> {
+        let mut found = self
+            .resource_page(p, tenant, project, kind, id, ListPage::whole())
+            .await?;
+        Ok(if id.is_some() {
+            found
+        } else {
+            found["items"].take()
+        })
+    }
+    /// One thing of a kind a project holds, or a page of that kind.
+    pub async fn resource_page(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        kind: &str,
+        id: Option<&str>,
+        page: ListPage,
+    ) -> Result<Value> {
         // Only this exhaustive mapping may introduce an SQL identifier.
         if kind == "external-endpoints" {
-            return self.external_connections(p, tenant, project, id).await;
+            return self
+                .external_connections(p, tenant, project, id, page)
+                .await;
+        }
+        if kind == "operations" {
+            return self.operations(p, tenant, project, id, page).await;
         }
         let (table, projection) = match kind {
-            "artifacts" => ("artifacts", "to_jsonb(r)"),
+            "artifacts" => ("artifacts", ARTIFACT_OF_R),
             "deployments" => ("deployments", "to_jsonb(r)"),
             "executions" => ("executions", "to_jsonb(r)"),
             "operations" => ("operations", "to_jsonb(r)"),
@@ -715,20 +1086,24 @@ impl Store {
         }
         let mut tx = self.transaction(false, false).await?;
         Self::project(&mut tx, p, tenant, project, false).await?;
+        let (before, limit) = page.bounds(1000)?;
         let query = format!(
-            "SELECT {projection} FROM {table} r WHERE tenant_id=$1 AND project_id=$2 AND ($3::text IS NULL OR id=$3) AND ($4<>'artifacts' OR to_jsonb(r)->>'retired_at' IS NULL) ORDER BY created DESC LIMIT 1000"
+            "SELECT {projection} FROM {table} r WHERE r.tenant_id=$1 AND r.project_id=$2 AND ($3::text IS NULL OR r.id=$3) AND ($4<>'artifacts' OR to_jsonb(r)->>'retired_at' IS NULL) AND {} ORDER BY r.created DESC,r.id DESC LIMIT $6",
+            after_cursor(table, 5)
         );
         let mut rows = sqlx::query_scalar::<_, Value>(&query)
             .bind(tenant)
             .bind(project)
             .bind(id)
             .bind(kind)
+            .bind(before)
+            .bind(limit + 1)
             .fetch_all(&mut *tx)
             .await?;
         if id.is_some() {
             rows.pop().ok_or_else(Error::missing)
         } else {
-            Ok(Value::Array(rows))
+            Ok(ListPage::page(rows, limit))
         }
     }
 }

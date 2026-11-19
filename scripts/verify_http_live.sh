@@ -77,17 +77,17 @@ request() { # APP NAME [CURL ARGS…] PATH: writes NAME.body and NAME.json
 }
 
 transfer() { # NAME: the workspace's transfer allowance, what is counted against it and what is held
-  api GET "/tenants/$tenant/usage" |
+  api GET "/workspaces/$tenant/usage" |
     jq '{allowance: .allowance.transfer_bytes, counted: .transfer_allowance.bytes, held: .transfer_allowance.reserved_bytes}' > "$out/$1.transfer.json"
 }
 allow() { # BYTES: sets the workspace's transfer allowance, keeping the rest
-  api PATCH "/tenants/$tenant" "$(jq --argjson bytes "$1" \
+  api PATCH "/workspaces/$tenant" "$(jq --argjson bytes "$1" \
     '{allowance: (.allowance | {cpu_percent,memory_mib,storage_bytes,instances} + {transfer_bytes:$bytes})}' "$out/usage-before.json")" >/dev/null
 }
 
 tenant=$(jq -er .tenant "$state/scope.json")
-scope=/tenants/$tenant/projects/$(jq -er .project "$state/scope.json")
-api GET "/tenants/$tenant/usage" > "$out/usage-before.json"
+scope=/workspaces/$tenant/projects/$(jq -er .project "$state/scope.json")
+api GET "/workspaces/$tenant/usage" > "$out/usage-before.json"
 original=$(jq -er .allowance.transfer_bytes "$out/usage-before.json")
 trap 'allow "$original" || true' EXIT
 mib=1048576

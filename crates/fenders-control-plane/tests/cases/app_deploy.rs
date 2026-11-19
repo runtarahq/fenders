@@ -140,11 +140,12 @@ async fn http_wizard_api_returns_one_durable_operation_and_no_implicit_command()
         Request::builder()
             .method("POST")
             .uri(format!(
-                "/v1/tenants/{}/projects/{}/apps/deploy",
+                "/v1/workspaces/{}/projects/{}/apps/deploy",
                 l.tenant, l.project
             ))
             .header("Authorization", format!("Bearer {}", l.token))
             .header("Idempotency-Key", key)
+            .header("Content-Type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
     };
@@ -478,7 +479,7 @@ async fn deployment_receipt_recovery_is_scoped_and_catalog_exposes_draft_default
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/app-submissions/{}",
+                    "/v1/workspaces/{}/projects/{}/app-submissions/{}",
                     l.tenant, l.project, key
                 ))
                 .header("Authorization", format!("Bearer {}", l.token))
@@ -632,7 +633,7 @@ async fn app_action_receipts_are_scoped_and_busy_state_tracks_reservations() {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/apps/{}/submissions/{}",
+                    "/v1/workspaces/{}/projects/{}/apps/{}/submissions/{}",
                     l.tenant, l.project, app, run_key
                 ))
                 .header("Authorization", format!("Bearer {}", l.token))
@@ -846,7 +847,7 @@ async fn referenced_secret_metadata_is_scoped_even_beyond_the_list_bound() {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/secrets/{}",
+                    "/v1/workspaces/{}/projects/{}/secrets/{}",
                     l.tenant,
                     l.project,
                     s(&secret["id"])

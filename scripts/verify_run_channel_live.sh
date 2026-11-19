@@ -76,9 +76,9 @@ api() { # METHOD PATH [JSON]
     ${3:+-d "$3"} "$manage/v1$2"
 }
 
-tenant=$(api POST /tenants '{"name":"live","allowance":{"cpu_percent":400,"memory_mib":2048,"storage_bytes":1073741824,"instances":4,"transfer_bytes":1073741824}}' | jq -er .id)
-project=$(api POST "/tenants/$tenant/projects" '{"name":"main"}' | jq -er .id)
-scope=/tenants/$tenant/projects/$project
+tenant=$(api POST /workspaces '{"name":"live","allowance":{"cpu_percent":400,"memory_mib":2048,"storage_bytes":1073741824,"instances":4,"transfer_bytes":1073741824}}' | jq -er .id)
+project=$(api POST "/workspaces/$tenant/projects" '{"name":"main"}' | jq -er .id)
+scope=/workspaces/$tenant/projects/$project
 node_port=$((base + 4))
 api POST /nodes "$(jq -n --arg pin "$(jq -er .node "$out/pins.json")" --arg endpoint "https://127.0.0.1:$node_port" \
   '{name:"live-node",cert_sha256:$pin,endpoint:$endpoint,backend:"wasm",architecture:"x86_64",

@@ -25,6 +25,5 @@ SELECT jsonb_build_object(
         (SELECT count(*) FROM app_connection_observations WHERE tenant_id=$1 AND project_id=$2 AND state='pending')
         + (SELECT count(*) FROM app_https_observations WHERE tenant_id=$1 AND project_id=$2 AND state='pending')
 ) AS summary,
-(SELECT count(*) FROM filtered) AS total,
-(SELECT count(*) FROM filtered WHERE $6::timestamptz IS NOT NULL AND (created,id)>=($6::timestamptz,$7)) AS offset
+(SELECT count(*) FROM filtered) AS total
 FROM scoped

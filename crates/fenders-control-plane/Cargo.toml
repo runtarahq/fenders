@@ -25,6 +25,7 @@ clap.workspace = true
 fernet = { version = "=0.2.2", default-features = false, features = ["rustcrypto"] }
 libc = "0.2"
 url = "2"
+percent-encoding = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 base64 = "0.22"

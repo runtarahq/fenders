@@ -46,6 +46,7 @@ as both control plane and node.
 | Area | What | Repeat it with |
 |---|---|---|
 | Embedding, two tenants | An operator credential creates tenants and scoped keys; each key uploads, deploys and runs; neither sees the other; no console is served | `scripts/verify_embedding_live.sh` |
+| The management API | The probes with no credential; one name for a workspace; lists by pages; refusals with a status and a code of their own; a secret rotated and given to a run; deletions refused while in use and made once not; the audit trail as a key and as the operator read it; a workspace suspended and deleted | `scripts/verify_management_api_live.sh` |
 | Commands | A command run through the workload API and a manual run of a deployed app, recorded with their exit | `scripts/verify_run_channel_live.sh` |
 | Run output | Standard output and error read through `GET …/apps/APP/logs`, with the values of the run's secrets masked | `scripts/verify_output_live.sh` |
 | Connections | An app reaches the TCP endpoints and public HTTPS origins it was given and nothing else; removing one stops the runs that hold it | `scripts/verify_connections_live.sh` |
@@ -63,9 +64,63 @@ as both control plane and node.
 
 | Feature | State |
 |---|---|
+| Undoing a deletion | A deleted workspace, project or node is gone to the API for good. Its row stays in the database, with what was used and done under it; nothing restores it |
 | Pause and resume | The API has no such request; a run can only be stopped (`POST …/apps/APP/runs/RUN/cancel`) |
 | Worker host qualification | There is no harness that qualifies a new host for production |
 | A user interface | None is included. `Store::with_assets` lets a wrapping binary serve its own |
+
+## What has changed under `/v1`
+
+`/v1` is not yet stable: nothing is released, and these changes were made in
+place. Each breaks a client written against what was there before.
+
+- **One name for a thing.** A workspace's routes are under `/v1/workspaces`,
+  the operator's among them: creating one is `POST /v1/workspaces`, and its
+  keys, limits and lifecycle are under `/v1/workspaces/W`. `/v1/tenants/…`
+  is no longer answered. A connection is `…/connections`;
+  `…/external-endpoints` is no longer answered. The operator's changes
+  require an `Idempotency-Key` wherever a key's do.
+- **An operation is what was asked.** It has `id`, `kind`, `resource_id`,
+  `state`, `error`, `created` and `updated`, and no longer the key and hash
+  of the request that asked it, the revision it aimed at, or the ids of its
+  workspace and project. Cancelling a run answers an operation of kind
+  `cancel-run` whose `resource_id` is the run, not `stop` of an execution.
+- **`workspace_id`, not `tenant_id`,** in every answer that has one,
+  `GET /v1/me` among them.
+- **Answers are chosen, not rows.** A workspace, a project, an artifact, a
+  connection, a node and the egress policy are answered with the fields
+  the contract names and no others. Gone with that: `display_name`,
+  `settings_revision`, an artifact's `retired_at`, the policy's
+  `singleton`, and a TCP connection's `network_id`, `database`, secret ids
+  and `ca_certificate`.
+- **A project's `name` is the name it was given.** It was the slug, with the
+  given name in `display_name`. The slug is `slug`. The same in a usage
+  answer's `projects`.
+- **Every list is a page.** Workspaces, projects, artifacts, secrets,
+  connections, operations, nodes and API keys were bare arrays (API keys
+  an object with `items` alone), some cut at a thousand rows without
+  saying. Each answers `{items, next}`, newest first, at most 100 at once,
+  with `limit` and `before`. Workspaces, projects and nodes were oldest
+  first. The app list no longer has `offset`, and usage history no longer
+  `next_before`. A version list's `next` is a string. A query parameter a
+  list does not take is `400`.
+- **A diagnostic says what happened, not where to click.** It is `code`,
+  `summary` and `detail` (and `observed_at` of a placement). `actions`,
+  with its labels and targets for a screen, is gone, as are the sentences
+  that sent a reader to Fenders support: the product built on this says
+  what its own users should do.
+- **A deletion has no body.** `DELETE …/apps/APP` takes the app's revision
+  as `?expected_revision=`; a body is `400`.
+- **A suspension's key is its header.** `request_key` in the body of
+  `POST …/lifecycle` is `400`; the key is `Idempotency-Key`.
+
+Not a break: `PATCH /v1/workspaces/W` may name the `allowance_revision` it
+was decided on as `expected_revision`.
+
+Added since, and not breaks: `GET /healthz` and `GET /readyz`;
+`GET /v1/workspaces/W` and its `…/audit`; `PUT` and `DELETE` of a secret;
+`DELETE` of an artifact, a project (and `PATCH` to rename one), a node and
+a workspace.
 
 ## Limits
 
@@ -76,7 +131,8 @@ as both control plane and node.
   changes a minute between them (counted in memory, as the gateway's rate
   is). These are constants. Audit records, operations and request receipts
   are kept for good: their growth is bounded by that rate, not by a
-  retention.
+  retention. A record made before the trail kept a record's project has
+  none, and is not shown to a key of one project.
 - The operator credential is one bearer token, written to
   `STATE/operator.token` at first start. It is not scoped; whoever holds it
   can do anything. It is valid for as long as it is that file's: to replace
@@ -84,20 +140,31 @@ as both control plane and node.
   writes a new one and revokes the old.
 - A tenant's key lives at most 30 days. A host product re-issues it with
   the operator credential.
-- The OpenAPI contract (`/api/openapi.json`) covers the workspace API. The
-  operator calls are described in [EMBEDDING-API.md](EMBEDDING-API.md), not
-  yet in the contract.
+- The OpenAPI contract (`/api/openapi.json`) describes every route the
+  management API answers, the operator's among them (tagged `operator`), and
+  a test fails when the two differ. Every answer has a schema, and the
+  tests hold what the API answers to it: one asks every operation, and the
+  API tests check each answer they are given. The schemas were written from
+  what those tests are answered, with no node attached, so a field is
+  called required only where it identifies or dates a thing, and a few
+  parts no test produces (an app's connection entries, a component's
+  imports) are described only as objects. A workspace, a project, an
+  artifact, a connection, a node, the egress policy, an operation and a
+  diagnostic are described exactly: a field the contract does not name is
+  not answered. The rest may carry fields it does not name; do not depend
+  on one.
 - The node's control protocol has no written, versioned specification: the
   `fenders-node-protocol` crate and the control plane's `/internal` routes are
   the reference ([EMBEDDING-NODE.md](EMBEDDING-NODE.md)).
 - There are no people in the API: no sign-in, sessions, users, roles,
-  invitations or mail, and nothing is served but the API and its contract.
+  invitations or mail, and nothing is served but the API, its contract and
+  two probes (`/healthz`, `/readyz`) that say only whether it is up.
   A credential is the operator's, or a tenant's key with a list of
   permissions; a product with users and roles issues keys that carry what
   it has decided, each with a `label` of its own that the audit trail
   records with every change the key makes.
 - Only the operator's credential issues, lists and revokes a tenant's keys,
-  and suspends or resumes a workspace (`POST /v1/tenants/TENANT/lifecycle`).
+  and suspends or resumes a workspace (`POST /v1/workspaces/TENANT/lifecycle`).
   Its routes are listed in [EMBEDDING-API.md](EMBEDDING-API.md); every
   other route is one a key may be given. The routes that started a workload
   without an app, granted network access or made an ingress route directly,

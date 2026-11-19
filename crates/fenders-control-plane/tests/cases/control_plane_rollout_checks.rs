@@ -21,7 +21,7 @@ impl Schedule {
         // tick injection and no recurring invocation during later cutovers.
         let (expression, target): (String, String) = sqlx::query_as("SELECT to_char(target AT TIME ZONE 'UTC','MI HH24 DD MM')||' *',target::text FROM (SELECT date_trunc('minute',clock_timestamp()+interval '75 seconds') target) t")
             .fetch_one(&l.store.pool).await.unwrap();
-        let base = format!("/v1/tenants/{}/projects/{}", l.tenant, l.project);
+        let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
         let op = json_request(l, client, door, "POST", &format!("{base}/apps/deploy"), "scheduled-deploy",
             Some(json!({"name":"rollout-scheduled","artifact_id":artifact,"configuration":{"size":"medium","env":{"COMMAND_HOLD_MS":"5000"}},
                 "triggers":{"http":false,"manual":false,"schedule":{"enabled":true,"expression":expression,"timezone":"UTC"}}}))).await;
@@ -247,7 +247,7 @@ impl Tenant {
             .unwrap();
             artifacts.push(id);
         }
-        let base = format!("/v1/tenants/{tenant}/projects/{project}");
+        let base = format!("/v1/workspaces/{tenant}/projects/{project}");
         let op = json_request(l, client, door, "POST", &format!("{base}/apps/deploy"), "beta-http-deploy",
             Some(json!({"name":"beta-http","artifact_id":artifacts[0],"configuration":{"size":"small","keep_warm":true},"triggers":{"http":true,"manual":false}}))).await;
         let app = s(&op["resource_id"]).to_owned();

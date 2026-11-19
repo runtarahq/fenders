@@ -1,6 +1,8 @@
 //! Real PostgreSQL tests. Node rows below are protocol fixtures, not VMs.
 #[path = "cases/component_diagnostics.rs"]
 mod component_diagnostics;
+#[path = "cases/contract.rs"]
+mod contract;
 #[path = "cases/customer_api.rs"]
 mod customer_api;
 use axum::{
@@ -370,7 +372,7 @@ async fn tenant_credentials_roles_and_http_boundaries() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/v1/tenants")
+                .uri("/v1/workspaces")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -624,7 +626,7 @@ async fn customer_projects_settings_and_authorization() {
         .filter(|p| p["is_default"] == true)
         .collect();
     assert_eq!(defaults.len(), 1);
-    assert_eq!(defaults[0]["display_name"], "Production");
+    assert_eq!(defaults[0]["name"], "Production");
     assert_eq!(defaults[0]["slug"], "production");
     let input = || serde_json::from_value(json!({"name":"  Staging EU  "})).unwrap();
     let (a, b) = tokio::join!(
@@ -633,7 +635,8 @@ async fn customer_projects_settings_and_authorization() {
     );
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     let created = a.or(b).unwrap();
-    assert_eq!(created["display_name"], "Staging EU");
+    // The name is the one given, trimmed; the slug is made of it.
+    assert_eq!(created["name"], "Staging EU");
     assert_eq!(created["slug"], "staging-eu");
     for duplicate in ["staging eu", "Staging-EU", "PRODUCTION"] {
         assert_eq!(
@@ -690,7 +693,7 @@ async fn customer_projects_settings_and_authorization() {
         api::router(l.store.clone()).oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri(format!("/v1/tenants/{}", l.tenant))
+                .uri(format!("/v1/workspaces/{}", l.tenant))
                 .header("Authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
@@ -718,7 +721,7 @@ async fn customer_projects_settings_and_authorization() {
             .oneshot(
                 Request::builder()
                     .method(method)
-                    .uri(format!("/v1/tenants/{}/settings", l.tenant))
+                    .uri(format!("/v1/workspaces/{}/settings", l.tenant))
                     .header("Authorization", format!("Bearer {}", l.token))
                     .header("content-type", "application/json")
                     .body(Body::from("{}"))
@@ -912,7 +915,7 @@ async fn app_manual_runs_require_explicit_events_and_track_observed_outcomes() {
             Request::builder()
                 .method("POST")
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/apps/{app}/runs",
+                    "/v1/workspaces/{}/projects/{}/apps/{app}/runs",
                     l.tenant, l.project
                 ))
                 .header(
@@ -934,8 +937,16 @@ async fn app_manual_runs_require_explicit_events_and_track_observed_outcomes() {
         l.store
             .run_app(&editor, &l.tenant, &l.project, &app, "run-once")
     );
-    assert_eq!(a.unwrap(), op);
-    assert_eq!(b.unwrap(), op);
+    // The API shows of an operation what was asked and how it stands; the
+    // store's own row has the request's key and hash besides. They are the
+    // same operation.
+    for retried in [a.unwrap(), b.unwrap()] {
+        for shown in ["id", "kind", "resource_id", "state", "created"] {
+            assert_eq!(retried[shown], op[shown], "{shown}");
+        }
+        assert_eq!(retried["request_key"], "run-once");
+    }
+    assert!(op.get("request_key").is_none() && op.get("request_hash").is_none());
     let run = s(&op["resource_id"]);
     let observed = l
         .store
@@ -2034,7 +2045,7 @@ async fn customer_apps_have_scoped_pages_and_nested_version_boundaries() {
                 Request::builder()
                     .method("POST")
                     .uri(format!(
-                        "/v1/tenants/{}/projects/{}/apps",
+                        "/v1/workspaces/{}/projects/{}/apps",
                         l.tenant, l.project
                     ))
                     .header(
@@ -2042,6 +2053,7 @@ async fn customer_apps_have_scoped_pages_and_nested_version_boundaries() {
                         format!("Bearer {}", s(&credential["token"])),
                     )
                     .header("Idempotency-Key", name)
+                    .header("Content-Type", "application/json")
                     .body(Body::from(
                         json!({"name":name,"artifact_id":l.artifact}).to_string(),
                     ))
@@ -2056,7 +2068,7 @@ async fn customer_apps_have_scoped_pages_and_nested_version_boundaries() {
     }
     let mut cursor = None;
     let mut listed = Vec::new();
-    for index in 0..3 {
+    for _ in 0..3 {
         let page = l
             .store
             .apps(
@@ -2076,7 +2088,9 @@ async fn customer_apps_have_scoped_pages_and_nested_version_boundaries() {
         assert_eq!(page["items"].as_array().unwrap().len(), 1);
         assert_eq!(page["summary"]["total"], 3);
         assert_eq!(page["total"], 3);
-        assert_eq!(page["offset"], index);
+        // A page says what there is and where the next begins, not how far
+        // in it is: a client that counts its pages knows.
+        assert!(page.get("offset").is_none());
         listed.push(s(&page["items"][0]["id"]).to_owned());
         cursor = page["next"].as_str().map(str::to_owned);
     }
@@ -2114,7 +2128,7 @@ async fn customer_apps_have_scoped_pages_and_nested_version_boundaries() {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/v1/tenants/{}/projects/{}/apps?{query}",
+                        "/v1/workspaces/{}/projects/{}/apps?{query}",
                         l.tenant, l.project
                     ))
                     .header(
@@ -2380,7 +2394,7 @@ async fn component_validation_claims_are_scoped_atomic_and_durable() {
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/artifacts/{}/inspection",
+                    "/v1/workspaces/{}/projects/{}/artifacts/{}/inspection",
                     l.tenant, l.project, l.artifact
                 ))
                 .header(
@@ -2671,9 +2685,10 @@ async fn schedule_preview_is_scoped_deterministic_and_read_only() {
         serde_json::from_value(json!({"expression":"30 1 * * *","timezone":"America/New_York","after":"2026-11-01T00:00:00Z"})).unwrap()
     };
     let response=api::router(l.store.clone()).oneshot(Request::builder().method("POST")
-        .uri(format!("/v1/tenants/{}/projects/{}/schedules/preview",l.tenant,l.project))
+        .uri(format!("/v1/workspaces/{}/projects/{}/schedules/preview",l.tenant,l.project))
         .header("Authorization",format!("Bearer {}",s(&token["token"])))
-        .body(Body::from(json!({"expression":"30 1 * * *","timezone":"America/New_York","after":"2026-11-01T00:00:00Z"}).to_string())).unwrap()).await.unwrap();
+        .header("Content-Type", "application/json")
+.body(Body::from(json!({"expression":"30 1 * * *","timezone":"America/New_York","after":"2026-11-01T00:00:00Z"}).to_string())).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();

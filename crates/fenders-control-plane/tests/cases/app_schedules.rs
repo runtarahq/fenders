@@ -890,7 +890,7 @@ async fn schedule_test_events_are_explicit_idempotent_and_recovery_fenced() {
         .unwrap();
     let router = api::router(l.store.clone());
     let path = format!(
-        "/v1/tenants/{}/projects/{}/apps/{}/runs",
+        "/v1/workspaces/{}/projects/{}/apps/{}/runs",
         l.tenant, l.project, app
     );
     let request = || {
@@ -899,6 +899,7 @@ async fn schedule_test_events_are_explicit_idempotent_and_recovery_fenced() {
             .uri(&path)
             .header("Authorization", format!("Bearer {}", l.token))
             .header("Idempotency-Key", "test-schedule")
+            .header("Content-Type", "application/json")
             .body(Body::from(json!({"source":"test-schedule"}).to_string()))
             .unwrap()
     };

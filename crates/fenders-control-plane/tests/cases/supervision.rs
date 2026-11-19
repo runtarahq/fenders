@@ -252,7 +252,7 @@ async fn overlap(l: Lab) {
         .await
         .unwrap();
     let path = format!(
-        "/v1/tenants/{}/projects/{}/external-endpoints",
+        "/v1/workspaces/{}/projects/{}/connections",
         l.tenant, l.project
     );
     // Only permission metadata is created; no connection to this address occurs.
@@ -320,7 +320,7 @@ async fn overlap(l: Lab) {
     .unwrap();
     let response = std::str::from_utf8(&response).unwrap();
     assert!(
-        response.starts_with("HTTP/1.1 202 Accepted\r\n"),
+        response.starts_with("HTTP/1.1 201 Created\r\n"),
         "{response}"
     );
     let (_, payload) = response.split_once("\r\n\r\n").unwrap();
@@ -337,11 +337,12 @@ async fn overlap(l: Lab) {
         .post(format!("{origin_b}{path}"))
         .bearer_auth(token)
         .header("Idempotency-Key", &key)
+        .header("Content-Type", "application/json")
         .body(body.clone())
         .send()
         .await
         .unwrap();
-    assert_eq!(retry.status(), StatusCode::ACCEPTED);
+    assert_eq!(retry.status(), StatusCode::CREATED);
     let replay: Value = serde_json::from_slice(&retry.bytes().await.unwrap()).unwrap();
     assert_eq!(receipt, replay);
     let effects: i64 = sqlx::query_scalar(
@@ -364,11 +365,12 @@ async fn overlap(l: Lab) {
         .post(format!("{origin}{path}"))
         .bearer_auth(token)
         .header("Idempotency-Key", &key)
+        .header("Content-Type", "application/json")
         .body(body)
         .send()
         .await
         .unwrap();
-    assert_eq!(recovered.status(), StatusCode::ACCEPTED);
+    assert_eq!(recovered.status(), StatusCode::CREATED);
     let recovered: Value = serde_json::from_slice(&recovered.bytes().await.unwrap()).unwrap();
     assert_eq!(recovered, receipt);
     terminate(&mut restarted).await;
@@ -432,8 +434,9 @@ async fn real_daemon_reports_recovery_failures_resumes_and_resets_observations_o
     assert_eq!(initial["process_id"], failed["process_id"]);
     assert_eq!(
         client
-            .post(format!("{origin}/v1/tenants/{}/projects", l.tenant))
+            .post(format!("{origin}/v1/workspaces/{}/projects", l.tenant))
             .bearer_auth(&l.token)
+            .header("Content-Type", "application/json")
             .body(json!({"name":"recovery-refused"}).to_string())
             .send()
             .await

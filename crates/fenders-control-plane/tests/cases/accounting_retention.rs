@@ -172,7 +172,9 @@ async fn monthly_history_is_scoped_paginated_and_keeps_observations_separate_fro
         .unwrap();
     assert_eq!(first["items"][0]["accounted_bytes"], 600);
     assert_eq!(first["items"][0]["observed_outbound_bytes"], 100);
-    assert!(first["next_before"].is_string());
+    // The cursor is `next`, as in every list, and has no other name.
+    assert!(first["next"].is_string());
+    assert!(first.get("next_before").is_none());
     assert!(
         l.store
             .usage_history(&viewer, &l.tenant, None, Default::default())
@@ -219,14 +221,14 @@ async fn monthly_history_is_scoped_paginated_and_keeps_observations_separate_fro
             &l.tenant,
             Some(&l.project),
             HistoryPage {
-                before: first["next_before"].as_str().map(str::to_owned),
+                before: first["next"].as_str().map(str::to_owned),
                 limit: Some(60),
             },
         )
         .await
         .unwrap();
     assert_eq!(page["items"].as_array().unwrap().len(), 2);
-    assert!(page["next_before"].is_null());
+    assert!(page["next"].is_null());
     let workspace = history(&l, None).await;
     let project = history(&l, Some(&l.project)).await;
     let other = history(&l, Some(s(&other["id"]))).await;
@@ -241,7 +243,7 @@ async fn monthly_history_is_scoped_paginated_and_keeps_observations_separate_fro
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/usage/history?limit=1",
+                    "/v1/workspaces/{}/projects/{}/usage/history?limit=1",
                     l.tenant, l.project
                 ))
                 .header(
@@ -261,7 +263,7 @@ async fn monthly_history_is_scoped_paginated_and_keeps_observations_separate_fro
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/usage/history?extra=1",
+                    "/v1/workspaces/{}/projects/{}/usage/history?extra=1",
                     l.tenant, l.project
                 ))
                 .header(

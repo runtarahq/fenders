@@ -62,7 +62,11 @@ a socket directory) needs no `sslmode`.
 
 The management API is `https://HOST:9090/v1`. Every call takes
 `Authorization: Bearer TOKEN`; every change takes an `Idempotency-Key`
-header, and a retry with the same key returns the original result.
+header of 1 to 128 characters, and a retry with the same key returns the
+original result. The same key with other arguments is `409`. Three kinds of
+change do not require the header: the operator's `PATCH` and `PUT` routes,
+which say what is to be (given a key, they honour it); revoking a key; and
+an upload, which is found again by its content.
 
 ## 3. A node
 
@@ -97,31 +101,39 @@ must be registered with `egress_budget_required` and started with
 
 ## 4. A tenant for each customer
 
-As the operator:
+A tenant is a **workspace** in the API, and that is its only name there:
+every route of one is under `/v1/workspaces/TENANT`, the operator's and the
+key's alike. As the operator:
 
 ```sh
 # A tenant, with what it may use at once and its monthly transfer.
-POST /v1/tenants
+POST /v1/workspaces
 {"name": "acme", "allowance": {"cpu_percent": 200, "memory_mib": 1024,
   "storage_bytes": 1073741824, "instances": 2, "transfer_bytes": 1073741824}}
 # -> {"id": "TENANT", …}; a default project is created with it.
+#    Keep the id: a name is a label, and two tenants may share one. Only
+#    the Idempotency-Key tells a retry from a request for another tenant.
 
-GET  /v1/tenants/TENANT/projects            # -> [{"id": "PROJECT", …}]
-POST /v1/tenants/TENANT/projects            {"name": "staging"}
-PATCH /v1/tenants/TENANT                    {"allowance": {…}}
-PATCH /v1/tenants/TENANT                    {"default_app_size": "medium"}   # for apps that name no size
+GET  /v1/workspaces/TENANT/projects            # -> {"items": [{"id": "PROJECT", …}], "next": null}
+POST /v1/workspaces/TENANT/projects            {"name": "staging"}
+PATCH /v1/workspaces/TENANT                    {"allowance": {…}}          # may add "expected_revision": its allowance_revision
+PATCH /v1/workspaces/TENANT                    {"default_app_size": "medium"}   # for apps that name no size
 
 # A key for that tenant, optionally for one project.
-POST /v1/tenants/TENANT/api-keys
+POST /v1/workspaces/TENANT/api-keys
 {"name": "product", "permissions": ["read", "apps:write", "runs:write"],
  "ttl_seconds": 2592000}
-# -> {"id": …, "token": "fnd_tok_…"}   the token is shown once
-GET    /v1/tenants/TENANT/api-keys          # the tenant's keys, without their tokens
-DELETE /v1/tenants/TENANT/api-keys/KEY      # it stops working at once
+# -> 201 {"id": …, "token": "fnd_tok_…", "replayed": false}   the token is shown once
+#    A retry with the same Idempotency-Key issues nothing and is answered
+#    200 {"id": …, "token": null, "replayed": true}: the token is not kept.
+#    If the first answer was lost, revoke the key by its id and issue another.
+GET    /v1/workspaces/TENANT/api-keys          # the tenant's keys, without their tokens
+DELETE /v1/workspaces/TENANT/api-keys/KEY      # it stops working at once
 
-# Suspend a workspace, or resume it.
-POST /v1/tenants/TENANT/lifecycle
-{"request_key": "…", "expected_revision": 1, "action": "suspend", "reason": "…"}
+# Suspend a workspace, or resume it. expected_revision is the tenant's
+# lifecycle_revision, as GET /v1/workspaces gives it to the operator.
+POST /v1/workspaces/TENANT/lifecycle
+{"expected_revision": 1, "action": "suspend", "reason": "…"}
 ```
 
 Permissions: `read`, `apps:write`, `runs:write`, `projects:write`,
@@ -157,6 +169,43 @@ Schedules and the HTTP trigger are `triggers`; secrets, connections to
 external TCP endpoints and HTTPS origins, releases, events and usage are in
 the contract.
 
+What is made can be changed and removed:
+
+```sh
+PUT    $S/secrets/SECRET     {"value": "…"}     # another value; runs started after have it
+DELETE $S/secrets/SECRET                        # 409 in_use while a release, a run or a connection names it
+DELETE $S/artifacts/ARTIFACT                    # 409 in_use once it is an app's code
+DELETE $S/apps/APP?expected_revision=N
+DELETE $S/connections/CONNECTION
+PATCH  /v1/workspaces/TENANT/projects/PROJECT   {"name": "…"}
+DELETE /v1/workspaces/TENANT/projects/PROJECT   # only one that holds nothing, and not the default
+```
+
+A change names the revision it was decided on as `expected_revision`, and
+is `409 revision_conflict` if the thing has changed since. Which revision is
+the thing's own: an app's `revision` for the app and its versions, releases,
+connections and deletion (`DELETE $S/apps/APP?expected_revision=N`, with no
+body); the `revision` of `GET $S/apps/APP/triggers` for its triggers.
+
+A change to an app, a run or a connection answers with an **operation**:
+`{"id", "kind", "resource_id", "state", "error"}`. It is `202` while `state`
+is `pending` and `200` or `201` once it is `succeeded` or `failed`; nothing
+else is ever `202`. Read `GET $S/operations/OPERATION` until it is no longer
+pending, or the resource it names. If the answer was lost, ask after it by
+the key it was made with: `GET $S/app-submissions/KEY` for a deployment,
+`GET $S/apps/APP/submissions/KEY` for a change to an app,
+`GET $S/endpoint-submissions/KEY` for a connection (the key percent-encoded).
+
+Every list answers `{"items": […], "next": CURSOR or null}`, newest first,
+and takes `limit` (1 to 100, 100 unless said) and `before`. To read on, pass
+`next` back as `before`; it is `null` on the last page. A cursor is to be
+passed back as it was given, not made up. A run's output alone is read the
+other way, oldest first with `after`, and its `next` is always given: more
+may come.
+
+The contract gives every answer a schema, and the tests hold the API to it.
+A field it does not name may still be present: do not depend on one.
+
 ## 6. The boundaries you can rely on, and check
 
 `scripts/verify_embedding_live.sh` asserts each of these on a real node:
@@ -164,13 +213,32 @@ the contract.
 - A tenant key lists only its own workspace.
 - A tenant key asking for another tenant's apps, one of its apps, or to run
   one is answered `404`, as for something that does not exist.
-- A tenant key calling an operator endpoint (`POST /v1/tenants`,
+- A tenant key calling an operator endpoint (`POST /v1/workspaces`,
   `GET /v1/nodes`) is answered `403`.
 - No credential is `401`; a revoked key is `401` at once.
-- Nothing is served but the API and its contract (`/api/openapi.json`).
+- Nothing is served but the API, its contract (`/api/openapi.json`), and
+  the two probes below.
 
 Each run is a VM of its own with its own cgroup and uid on the node, and
 reaches only the destinations its app was given.
+
+`scripts/verify_management_api_live.sh` asks the rest of this page of a
+local environment (`scripts/local_env.sh up`): the probes, paging, what a
+refusal says, rotating and deleting, the audit trail, and removing a
+workspace.
+
+## Whether it is up
+
+Two routes take no credential, at the root and not under `/v1`, for whatever
+watches the control plane:
+
+| | |
+|---|---|
+| `GET /healthz` | `200 {"status": "ok"}` while the process answers. It does not ask the database: restart on this one. |
+| `GET /readyz` | `200 {"status": "ready"}` when it can serve; `503 {"status": "unavailable"}` when it cannot reach its database, or is held after a restore. Route traffic on this one. |
+
+Neither says why. That is the operator's to read, in
+`GET /v1/control-plane/status` and the log.
 
 ## The operator's routes, all of them
 
@@ -178,17 +246,28 @@ What no tenant's key is ever given, whatever it holds:
 
 | | |
 |---|---|
-| Tenants | `POST /v1/tenants` (`GET /v1/tenants` lists them all to the operator, and a key its own) |
-| What a tenant is allowed | `PATCH /v1/tenants/T` (allowance, default app size), `PATCH /v1/tenants/T/http-limits` |
-| Suspending one | `POST /v1/tenants/T/lifecycle` |
-| Its keys | `GET`, `POST /v1/tenants/T/api-keys`, `DELETE /v1/tenants/T/api-keys/KEY` |
-| Nodes | `GET`, `POST /v1/nodes`, `PATCH /v1/nodes/NODE` |
+| Tenants | `POST /v1/workspaces` (`GET /v1/workspaces` lists them all to the operator, and a key its own) |
+| What a tenant is allowed | `PATCH /v1/workspaces/T` (allowance, default app size), `PATCH /v1/workspaces/T/http-limits` |
+| Suspending one | `POST /v1/workspaces/T/lifecycle` |
+| Deleting one | `DELETE /v1/workspaces/T`, once it is suspended. It cannot be undone |
+| Its keys | `GET`, `POST /v1/workspaces/T/api-keys`, `DELETE /v1/workspaces/T/api-keys/KEY` |
+| Nodes | `GET`, `POST /v1/nodes`, `PATCH /v1/nodes/NODE`, `DELETE /v1/nodes/NODE` once it is drained |
 | Public egress policy | `GET`, `PUT /v1/public-egress-policy` |
 | This control plane's loops | `GET /v1/control-plane/status` |
 
 Everything else is the tenant API of section 5, which the operator
-credential may also call. There is no third set: a path in neither is
-answered `404` to everyone.
+credential may also call. There is no third set but the two probes: a path
+in none is answered `404` to everyone.
+
+When a customer leaves: suspend its workspace, wait for `status` to be
+`suspended` (its runs have ended), and delete it. Its keys then open
+nothing, its secrets are destroyed and its storage is released. The record
+of what it used and did stays in the control plane's database, for you to
+keep or remove by your own rules; the API does not read it again.
+
+Both sets are in the contract at `/api/openapi.json`, these tagged
+`operator`. The table of routes in `customer_api.rs` is what the control
+plane answers, and a test holds the contract to it.
 
 ## Building a console on it
 
@@ -205,7 +284,7 @@ knows its own users and calls this API.
   Fenders does not interpret:
 
   ```sh
-  POST /v1/tenants/TENANT/api-keys
+  POST /v1/workspaces/TENANT/api-keys
   {"name": "console", "permissions": ["read", "runs:write"], "ttl_seconds": 900,
    "label": "user:4f2a alice@example.test"}
   ```
@@ -213,12 +292,52 @@ knows its own users and calls this API.
   Every audit record of a change a key makes carries its label, and
   `GET /v1/me` with the key returns it. That is how actions lead back to
   your users.
+- Read the trail with `GET /v1/workspaces/TENANT/audit`: every change made
+  in the workspace, newest first, paged as every list is, and filtered by
+  `action`, `actor_label`, `since` and `until`. With the operator credential
+  each record is whole. With a tenant's key the records its workspace's own
+  keys made are whole, label and detail; a record the operator or the
+  control plane made says what was done, of what and when, with `actor`
+  `operator` or `control-plane` and no detail (the reason you gave for a
+  suspension is yours). A key of one project reads what was done in that
+  project.
 - A key cannot issue, list or revoke keys, whatever it holds: those are the
   operator's.
+
+## What a refusal says
+
+Every refusal is `{"error": …, "code": …, "request_id": …}`, and the
+request's id is in `X-Request-Id` too. `error` is for a person and its
+wording may change. Branch on `code`: it is the status named
+(`not_found`, `unauthorized`, `invalid_request`, …), or, where one status
+stands for things a program treats differently, the reason:
+
+| Status | `code` | What to do |
+|---|---|---|
+| 400 | `idempotency_key_required` | Send `Idempotency-Key` |
+| 403 | `permission_denied` | The key may not; issue one that may |
+| 403 | `workspace_suspended` | Nothing, until the operator resumes it; reads still work |
+| 409 | `idempotency_key_reused` | The key was used for another request: choose a new one |
+| 409 | `already_exists` | Read the one that exists |
+| 409 | `revision_conflict` | Read the resource again and send its revision |
+| 409 | `not_validated` | Wait for the artifact's inspection to be `valid` |
+| 409 | `quota_exhausted` | An allowance or a limit is reached; waiting does not cure it |
+| 409 | `in_use` | Something still names what is to be deleted; change that first |
+| 429 | `rate_limited` | Wait the seconds `Retry-After` gives |
+
+The whole list is the enum of `Error.code` in the contract. Beside it:
+
+- `401` carries `WWW-Authenticate: Bearer`.
+- A route asked with a method it does not take is `405`, with the ones it
+  takes in `Allow`. `HEAD` is answered wherever `GET` is.
+- A body is `application/json`, and an upload `application/wasm`; anything
+  else is `415`. `curl -d` sends a form unless told otherwise.
+- An id in a body that could be no id (not 32 lowercase hexadecimal
+  characters) is `400`. `404` is for one that names nothing, and for
+  anything a path names, another tenant's included.
 
 ## Limits
 
 [STATUS.md](STATUS.md) lists them all. The ones that shape an integration:
 the operator credential is a single unscoped token; keys live 30 days at
-most; the operator calls are not in the OpenAPI contract yet; HTTP apps'
-traffic passes through one control-plane process.
+most; HTTP apps' traffic passes through one control-plane process.

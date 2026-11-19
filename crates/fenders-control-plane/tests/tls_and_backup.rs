@@ -1789,7 +1789,7 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
     );
     assert_eq!(ingress_calls.load(std::sync::atomic::Ordering::SeqCst), 5);
     let sample_url =
-        format!("/v1/tenants/{tenant}/projects/{project}/apps/{demand_id}/http-sample");
+        format!("/v1/workspaces/{tenant}/projects/{project}/apps/{demand_id}/http-sample");
     let sample = |url: &str, token: &str, body: Value| {
         Request::builder()
             .method("POST")
@@ -1797,6 +1797,7 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
             .header("Authorization", format!("Bearer {token}"))
             .header("Cookie", "management-secret=never-forward")
             .header("X-CSRF-Token", "never-forward")
+            .header("Content-Type", "application/json")
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
     };

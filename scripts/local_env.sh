@@ -117,8 +117,8 @@ up() {
 
   # One workspace, project and node, made once.
   if [[ ! -f $state/scope.json ]]; then
-    tenant=$(api POST /tenants '{"name":"local","allowance":{"cpu_percent":800,"memory_mib":4096,"storage_bytes":4294967296,"instances":8,"transfer_bytes":4294967296}}' | jq -er .id)
-    project=$(api POST "/tenants/$tenant/projects" '{"name":"main"}' | jq -er .id)
+    tenant=$(api POST /workspaces '{"name":"local","allowance":{"cpu_percent":800,"memory_mib":4096,"storage_bytes":4294967296,"instances":8,"transfer_bytes":4294967296}}' | jq -er .id)
+    project=$(api POST "/workspaces/$tenant/projects" '{"name":"main"}' | jq -er .id)
     node=$(api POST /nodes "$(jq -n --arg pin "$(jq -er .node "$state/pins.json")" \
       --arg endpoint "https://127.0.0.1:$node_port" \
       '{name:"this-machine",cert_sha256:$pin,endpoint:$endpoint,backend:"wasm",architecture:"x86_64",
@@ -149,7 +149,7 @@ up() {
   sleep 1
   pgrep -f "$stage/build/fenders-node --state" | head -1 > "$state/node.pid"
   for _ in $(seq 30); do
-    [[ $(api GET /nodes | jq -r '.[0].observed_confinement // empty') == landlock6-seccomp-v2 ]] && break
+    [[ $(api GET /nodes | jq -r '.items[0].observed_confinement // empty') == landlock6-seccomp-v2 ]] && break
     sleep 1
   done
   status
@@ -165,13 +165,13 @@ status() {
   if running "$state/control.pid"; then
     echo "management api $manage/v1   token: $state/control/operator.token   CA: $state/pki/ca.pem"
     echo "api contract   $manage/api/openapi.json"
-    api GET /nodes | jq -r '.[] | "node \(.name): confinement=\(.observed_confinement) last_seen=\(.last_seen)"'
+    api GET /nodes | jq -r '.items[] | "node \(.name): confinement=\(.observed_confinement) last_seen=\(.last_seen)"'
     jq -r '"workspace \(.tenant)  project \(.project)"' "$state/scope.json"
   fi
 }
 
 run() {
-  scope=/tenants/$(jq -er .tenant "$state/scope.json")/projects/$(jq -er .project "$state/scope.json")
+  scope=/workspaces/$(jq -er .tenant "$state/scope.json")/projects/$(jq -er .project "$state/scope.json")
   artifact=$(curl -sS --fail-with-body --cacert "$state/pki/ca.pem" -X POST \
     -H "Authorization: Bearer $(cat "$state/control/operator.token")" \
     -H "Idempotency-Key: local-artifact-$RANDOM-$RANDOM" -H 'Content-Type: application/wasm' \

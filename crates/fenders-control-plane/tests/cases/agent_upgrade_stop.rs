@@ -133,7 +133,7 @@ impl Stop {
         let configuration_sha256 = digest(fs::read(backend.join("config.json")).unwrap());
         Self {
             url: format!(
-                "{}/v1/tenants/{}/projects/{}/executions/{execution}",
+                "{}/v1/workspaces/{}/projects/{}/executions/{execution}",
                 api.1, l.tenant, l.project
             ),
             client: api.0,

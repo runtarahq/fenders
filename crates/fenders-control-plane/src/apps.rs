@@ -50,9 +50,10 @@ pub struct AppSubmission<'a> {
 }
 
 impl Store {
-    /// Recover an acknowledged or lost-response deployment without retaining its
-    /// configuration in browser storage. Absence is not proof that an in-flight
-    /// request failed; callers must not automatically submit a new intent.
+    /// What became of a deployment, by the key it was made with: for a caller
+    /// whose answer was lost, without it having kept what it sent. Absence
+    /// is not proof that a request in flight failed; a caller must not
+    /// submit a new intent because of it.
     pub async fn app_submission(
         &self,
         p: &Principal,
@@ -60,7 +61,7 @@ impl Store {
         project: &str,
         key: &str,
     ) -> Result<Value> {
-        identity(key)?;
+        crate::customer_api::submitted_key(key)?;
         let mut tx = self.transaction(false, false).await?;
         Self::project(&mut tx, p, tenant, project, false).await?;
         one(&mut tx, "SELECT id,resource_id,kind,state,error,created,updated FROM operations WHERE tenant_id=$1 AND project_id=$2 AND request_key=$3 AND kind='deploy-app'", args![tenant,project,key]).await
@@ -76,7 +77,7 @@ impl Store {
         app: &str,
         key: &str,
     ) -> Result<Value> {
-        identity(key)?;
+        crate::customer_api::submitted_key(key)?;
         let mut tx = self.transaction(false, false).await?;
         Self::project(&mut tx, p, tenant, project, false).await?;
         identity(app)?;
@@ -86,7 +87,7 @@ impl Store {
             args![tenant, project, app],
         )
         .await?;
-        one(&mut tx,"SELECT o.id,o.resource_id,o.kind,o.state,o.error,o.created,o.updated FROM operations o WHERE o.tenant_id=$1 AND o.project_id=$2 AND o.request_key=$4 AND ((o.kind IN ('delete-app','app-lifecycle','app-triggers','app-connections') AND o.resource_id=$3) OR (o.kind='run-app' AND EXISTS(SELECT 1 FROM app_runs r WHERE r.tenant_id=$1 AND r.project_id=$2 AND r.app_id=$3 AND r.id=o.resource_id)) OR (o.kind='activate-app-release' AND EXISTS(SELECT 1 FROM app_releases l WHERE l.tenant_id=$1 AND l.project_id=$2 AND l.app_id=$3 AND l.id=o.resource_id)) OR (o.kind='attach-app-version' AND EXISTS(SELECT 1 FROM app_versions v WHERE v.tenant_id=$1 AND v.project_id=$2 AND v.app_id=$3 AND v.id=o.resource_id)))",args![tenant,project,app,key]).await
+        one(&mut tx,"SELECT o.id,COALESCE(cancelled.id,o.resource_id) AS resource_id,CASE WHEN cancelled.id IS NULL THEN o.kind ELSE 'cancel-run' END AS kind,o.state,o.error,o.created,o.updated FROM operations o LEFT JOIN LATERAL (SELECT r.id FROM app_runs r WHERE o.kind='stop' AND r.execution_id=o.resource_id AND r.tenant_id=$1 AND r.project_id=$2 AND r.app_id=$3 LIMIT 1) cancelled ON true WHERE o.tenant_id=$1 AND o.project_id=$2 AND o.request_key=$4 AND ((o.kind IN ('delete-app','app-lifecycle','app-triggers','app-connections') AND o.resource_id=$3) OR cancelled.id IS NOT NULL OR (o.kind='run-app' AND EXISTS(SELECT 1 FROM app_runs r WHERE r.tenant_id=$1 AND r.project_id=$2 AND r.app_id=$3 AND r.id=o.resource_id)) OR (o.kind='activate-app-release' AND EXISTS(SELECT 1 FROM app_releases l WHERE l.tenant_id=$1 AND l.project_id=$2 AND l.app_id=$3 AND l.id=o.resource_id)) OR (o.kind='attach-app-version' AND EXISTS(SELECT 1 FROM app_versions v WHERE v.tenant_id=$1 AND v.project_id=$2 AND v.app_id=$3 AND v.id=o.resource_id)))",args![tenant,project,app,key]).await
     }
 
     pub(crate) async fn app_row(
@@ -113,9 +114,10 @@ impl Store {
         identity(artifact)?;
         let row = one(tx, "SELECT v.state,v.inspection,a.digest,a.size FROM artifacts a JOIN artifact_validations v ON v.artifact_id=a.id WHERE a.tenant_id=$1 AND a.project_id=$2 AND a.id=$3 AND a.retired_at IS NULL", args![tenant,project,artifact]).await?;
         if row["state"] != "valid" {
-            return Err(conflict(
-                "component must finish validation before attaching code",
-            ));
+            return Err(
+                conflict("component must finish validation before attaching code")
+                    .coded("not_validated"),
+            );
         }
         validate_inspection(
             &row["inspection"],
@@ -123,9 +125,10 @@ impl Store {
             n(&row["size"]) as usize,
         )?;
         if row["inspection"]["runtime"] != RUNTIME {
-            return Err(conflict(
-                "component requires validation for the supported runtime",
-            ));
+            return Err(
+                conflict("component requires validation for the supported runtime")
+                    .coded("not_validated"),
+            );
         }
         Ok(row["inspection"].clone())
     }
@@ -241,8 +244,9 @@ impl Store {
         Ok((app, version))
     }
 
-    /// The wizard submits one intent. All customer records and any initial HTTP
-    /// reservation commit together; a command still requires a separate event.
+    /// One intent: an app, its code, its release and its triggers. All of its
+    /// records and any initial HTTP reservation commit together; a command
+    /// still requires a separate event.
     pub async fn deploy_app(
         &self,
         p: &Principal,
@@ -374,7 +378,9 @@ impl Store {
         }
         let current = Self::app_row(&mut tx, tenant, project, app).await?;
         if current["revision"] != revision {
-            return Err(conflict("app revision changed; reload before saving"));
+            return Err(
+                conflict("app revision changed; reload before saving").coded("revision_conflict")
+            );
         }
         let inspection = Self::validated_code(&mut tx, tenant, project, artifact).await?;
         // Reattaching the same immutable artifact with a new request key points
@@ -497,15 +503,7 @@ impl Store {
         let counts = one(
             &mut tx,
             include_str!("app_list_counts.sql"),
-            args![
-                tenant,
-                project,
-                search,
-                trigger,
-                status,
-                cursor["created"],
-                cursor["id"]
-            ],
+            args![tenant, project, search, trigger, status],
         )
         .await?;
         let mut items = rows(&mut tx,"SELECT a.*,EXISTS(SELECT 1 FROM app_runs r LEFT JOIN executions e ON e.id=r.execution_id WHERE r.app_id=a.id AND (r.admission='pending' OR e.reserved)) AS command_busy,COALESCE((SELECT bool_and(r.source='schedule' AND (r.admission='pending' OR r.admission='admitted' AND e.node_id IS NULL AND e.reserved)) FROM app_runs r LEFT JOIN executions e ON e.id=r.execution_id WHERE r.app_id=a.id AND (r.admission='pending' OR e.reserved)),false) AS scheduled_work_cancellable FROM customer_app_summaries a WHERE tenant_id=$1 AND project_id=$2 AND ($3::timestamptz IS NULL OR (created,id)<($3::timestamptz,$4)) AND position(lower($5) in lower(name))>0 AND CASE WHEN $7='' THEN true WHEN $7='none' THEN NOT (triggers->>'http')::boolean AND NOT (triggers->>'manual')::boolean AND NOT (triggers->>'schedule')::boolean ELSE (triggers->>$7)::boolean END AND ($8='' OR state=$8) ORDER BY created DESC,id DESC LIMIT $6",args![tenant,project,cursor["created"],cursor["id"],search,limit+1,trigger,status]).await?;
@@ -521,9 +519,7 @@ impl Store {
         for item in &mut items {
             crate::app_diagnostics::app(item);
         }
-        Ok(
-            json!({"items":items,"next":next,"summary":counts["summary"],"total":counts["total"],"offset":counts["offset"]}),
-        )
+        Ok(json!({"items":items,"next":next,"summary":counts["summary"],"total":counts["total"]}))
     }
 
     pub async fn app_versions(
@@ -544,8 +540,9 @@ impl Store {
         let more = items.len() > 100;
         items.truncate(100);
         items.iter_mut().for_each(last_release);
+        // A cursor is text, whatever it is made of: here, a version's number.
         let next = if more {
-            items.last().unwrap()["number"].clone()
+            json!(items.last().unwrap()["number"].to_string())
         } else {
             Value::Null
         };

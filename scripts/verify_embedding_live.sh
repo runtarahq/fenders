@@ -111,9 +111,9 @@ node_pid=$!
 allowance='{"cpu_percent":200,"memory_mib":1024,"storage_bytes":1073741824,"instances":2,"transfer_bytes":1073741824}'
 declare -A tenant project key run_state exit_code
 for name in alpha beta; do
-  tenant[$name]=$(api POST /tenants "$(jq -n --arg n "$name" --argjson a "$allowance" '{name:$n,allowance:$a}')" | jq -er .id)
-  project[$name]=$(api GET "/tenants/${tenant[$name]}/projects" | jq -er '.[0].id')
-  key[$name]=$(api POST "/tenants/${tenant[$name]}/api-keys" \
+  tenant[$name]=$(api POST /workspaces "$(jq -n --arg n "$name" --argjson a "$allowance" '{name:$n,allowance:$a}')" | jq -er .id)
+  project[$name]=$(api GET "/workspaces/${tenant[$name]}/projects" | jq -er '.items[] | select(.is_default) | .id')
+  key[$name]=$(api POST "/workspaces/${tenant[$name]}/api-keys" \
     '{"name":"product","permissions":["read","apps:write","runs:write"],"ttl_seconds":3600}' | jq -er .token)
 done
 
@@ -153,11 +153,11 @@ other=/workspaces/${tenant[beta]}/projects/${project[beta]}
 cross_read=$(as "${key[alpha]}" GET "$other/apps" | status)
 cross_app=$(as "${key[alpha]}" GET "$other/apps/$app_beta" | status)
 cross_run=$(as "${key[alpha]}" POST "$other/apps/$app_beta/runs" '{}' | status)
-cross_list=$(as "${key[alpha]}" GET /workspaces | ok | jq -c '[.[].id]')
-operator_tenants=$(as "${key[alpha]}" POST /tenants "$(jq -n --argjson a "$allowance" '{name:"gamma",allowance:$a}')" | status)
+cross_list=$(as "${key[alpha]}" GET /workspaces | ok | jq -c '[.items[].id]')
+operator_tenants=$(as "${key[alpha]}" POST /workspaces "$(jq -n --argjson a "$allowance" '{name:"gamma",allowance:$a}')" | status)
 operator_nodes=$(as "${key[alpha]}" GET /nodes | status)
 # A key issues no keys, on the operator's route or under its own workspace.
-key_issue=$(as "${key[alpha]}" POST "/tenants/${tenant[alpha]}/api-keys" '{"name":"more","permissions":["read"],"ttl_seconds":60}' | status)
+key_issue=$(as "${key[alpha]}" POST "/workspaces/${tenant[alpha]}/api-keys" '{"name":"more","permissions":["read"],"ttl_seconds":60}' | status)
 key_issue_ws=$(as "${key[alpha]}" POST "/workspaces/${tenant[alpha]}/api-keys" '{"name":"more","permissions":["read"],"ttl_seconds":60}' | status)
 page=$(curl -sS --cacert "$out/pki/ca.pem" -o /dev/null -w '%{http_code}' "$manage/api")
 no_credential=$(curl -sS --cacert "$out/pki/ca.pem" -o /dev/null -w '%{http_code}' "$manage/v1/workspaces")
@@ -165,8 +165,8 @@ console=$(curl -sS --cacert "$out/pki/ca.pem" -o /dev/null -w '%{http_code}' "$m
 root=$(curl -sS --cacert "$out/pki/ca.pem" -o /dev/null -w '%{http_code}' "$manage/")
 contract=$(curl -sS --cacert "$out/pki/ca.pem" -o /dev/null -w '%{http_code}' "$manage/api/openapi.json")
 # A key that was revoked stops working.
-key_id=$(api GET "/tenants/${tenant[beta]}/api-keys" | jq -er '.items[0].id')
-api DELETE "/tenants/${tenant[beta]}/api-keys/$key_id" > /dev/null
+key_id=$(api GET "/workspaces/${tenant[beta]}/api-keys" | jq -er '.items[0].id')
+api DELETE "/workspaces/${tenant[beta]}/api-keys/$key_id" > /dev/null
 revoked=$(as "${key[beta]}" GET /workspaces | status)
 
 jq -n --arg alpha "${run_state[alpha]}" --arg alpha_exit "${exit_code[alpha]}" \

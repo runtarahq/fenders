@@ -6,12 +6,15 @@ use super::*;
 async fn workspace_action(l: &Lab, input: &Value) -> (StatusCode, Value) {
     let mut body = input.clone();
     let tenant = body.as_object_mut().unwrap().remove("id").unwrap();
+    // The request's key is its Idempotency-Key header.
+    let key = body.as_object_mut().unwrap().remove("request_key").unwrap();
     let response = api::router(l.store.clone())
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/v1/tenants/{}/lifecycle", s(&tenant)))
+                .uri(format!("/v1/workspaces/{}/lifecycle", s(&tenant)))
                 .header("Authorization", format!("Bearer {}", l.token))
+                .header("Idempotency-Key", s(&key))
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -37,10 +40,13 @@ async fn suspension_is_atomic_and_concurrent_retries_share_the_audit_receipt() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/v1/tenants/{}/lifecycle", l.tenant))
+                .uri(format!("/v1/workspaces/{}/lifecycle", l.tenant))
                 .header("Authorization", format!("Bearer {}", s(&key["token"])))
                 .header("content-type", "application/json")
-                .body(Body::from(json!({"request_key":uid(),"action":"suspend","reason":"mine","expected_revision":1}).to_string()))
+                .header("Idempotency-Key", uid())
+                .body(Body::from(
+                    json!({"action":"suspend","reason":"mine","expected_revision":1}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -353,5 +359,72 @@ async fn the_operator_credential_is_the_files_and_replacing_the_file_ends_the_ol
         l.store.authenticate(&second).await.unwrap_err().status,
         StatusCode::UNAUTHORIZED
     );
+    l.finish().await;
+}
+
+async fn lifecycle(l: &Lab, key: Option<&str>, body: Value) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/workspaces/{}/lifecycle", l.tenant))
+        .header("Authorization", format!("Bearer {}", l.token))
+        .header("content-type", "application/json");
+    if let Some(key) = key {
+        request = request.header("Idempotency-Key", key);
+    }
+    let response = api::router(l.store.clone())
+        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let mut value: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+    if let Some(v) = value.as_object_mut() {
+        v.remove("request_id");
+    }
+    (status, value)
+}
+
+#[tokio::test]
+async fn a_suspension_takes_its_key_from_the_header_as_every_change_does() {
+    let l = Lab::new().await;
+    let suspend = json!({"action":"suspend","reason":"Unpaid","expected_revision":1});
+    // Any key a caller might choose, not only 32 hex digits.
+    let first = lifecycle(&l, Some("suspend acme/2026-11"), suspend.clone()).await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(first.1["status"], "suspended");
+    // The retry is the first answer, though the revision it expects has passed.
+    assert_eq!(
+        lifecycle(&l, Some("suspend acme/2026-11"), suspend.clone()).await,
+        first
+    );
+    let mut other = suspend.clone();
+    other["reason"] = json!("Another reason");
+    assert_eq!(
+        lifecycle(&l, Some("suspend acme/2026-11"), other).await.0,
+        StatusCode::CONFLICT
+    );
+    // No key at all is a request to make again, and says so: not a 404.
+    let keyless = lifecycle(&l, None, suspend.clone()).await;
+    assert_eq!(keyless.0, StatusCode::BAD_REQUEST, "{}", keyless.1);
+    assert!(s(&keyless.1["error"]).contains("Idempotency-Key"));
+
+    let resume = json!({"action":"resume","reason":"Paid","expected_revision":first.1["revision"]});
+    // The key was once sent in the body. It is the header's alone now: a
+    // body that names one is malformed, and changes nothing.
+    let mut in_body = resume.clone();
+    in_body["request_key"] = json!("resume-1");
+    for header in [None, Some("resume-1")] {
+        let refused = lifecycle(&l, header, in_body.clone()).await;
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST, "{}", refused.1);
+    }
+    let resumed = lifecycle(&l, Some("resume-1"), resume.clone()).await;
+    assert_eq!(resumed.0, StatusCode::OK, "{}", resumed.1);
+    assert_eq!(resumed.1["status"], "active");
+    assert_eq!(lifecycle(&l, Some("resume-1"), resume).await, resumed);
+    let receipts: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_request_receipts")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(receipts, 2);
     l.finish().await;
 }

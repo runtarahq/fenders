@@ -849,7 +849,7 @@ async fn customer_https_metadata_and_validation_are_scoped_reads_without_resolut
         .clone()
         .oneshot(
             Request::get(format!(
-                "/v1/tenants/{}/projects/{}/https-access",
+                "/v1/workspaces/{}/projects/{}/https-access",
                 l.tenant, l.project
             ))
             .header(
@@ -871,7 +871,7 @@ async fn customer_https_metadata_and_validation_are_scoped_reads_without_resolut
     let valid = api
         .oneshot(
             Request::post(format!(
-                "/v1/tenants/{}/projects/{}/https-access/validate",
+                "/v1/workspaces/{}/projects/{}/https-access/validate",
                 l.tenant, l.project
             ))
             .header(

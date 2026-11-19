@@ -518,7 +518,7 @@ async fn http_domain_is_server_owned_and_customer_status_is_project_scoped() {
         tls: None,
     });
     let uri = format!(
-        "/v1/tenants/{}/projects/{}/apps/{app}/triggers",
+        "/v1/workspaces/{}/projects/{}/apps/{app}/triggers",
         l.tenant, l.project
     );
     for (body, expected) in [
@@ -539,6 +539,7 @@ async fn http_domain_is_server_owned_and_customer_status_is_project_scoped() {
                     .uri(&uri)
                     .header("Authorization", format!("Bearer {}", l.token))
                     .header("Idempotency-Key", "on")
+                    .header("Content-Type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
@@ -836,7 +837,7 @@ async fn customer_app_summaries_keep_code_readiness_availability_and_runs_distin
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v1/tenants/{}/projects/{}/apps?trigger=unsupported",
+                    "/v1/workspaces/{}/projects/{}/apps?trigger=unsupported",
                     l.tenant, l.project
                 ))
                 .header("Authorization", format!("Bearer {}", l.token))

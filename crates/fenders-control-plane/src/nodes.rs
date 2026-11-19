@@ -8,8 +8,26 @@ use crate::{
 };
 use axum::http::StatusCode;
 use serde_json::{Value, json};
+/// A node as the API shows it: what it was registered with, what the
+/// operator set, and what it was last seen to be. Columns the control
+/// plane keeps for itself, or once did, are not among them.
+/// A node that is gone is kept as a row, for the executions that name it.
+pub(crate) const DELETION_MIGRATION: &str =
+    "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS deleted boolean NOT NULL DEFAULT false";
+pub(crate) const NODE: &str = "id,name,cert_sha256,endpoint,backend,architecture,runtime,cpu_percent,memory_mib,instances,draining,disabled,egress_budget_launcher,egress_budget_required,retained_egress_launchers,boot_id,last_seen,observed_confinement,observed_egress_budget,observed_launcher_digest,observed_runtime_digest,created";
+
 impl Store {
     pub async fn register_node(&self, p: &Principal, value: Value) -> Result<Value> {
+        self.register_node_keyed(p, value, None).await
+    }
+    /// With a key, a retry is answered with the node the first call
+    /// registered, not refused as a second node of its name.
+    pub async fn register_node_keyed(
+        &self,
+        p: &Principal,
+        value: Value,
+        key: Option<&str>,
+    ) -> Result<Value> {
         p.operator()?;
         fields(
             &value,
@@ -77,8 +95,15 @@ impl Store {
                 "budgeted placement requires an approved launcher",
             ));
         }
+        let request = json!({"kind":"node.register","value":value});
         let mut tx = self.transaction(true, false).await?;
-        let row=one(&mut tx,"INSERT INTO nodes(id,name,cert_sha256,endpoint,backend,architecture,runtime,cpu_percent,memory_mib,instances,egress_budget_launcher,egress_budget_required) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",args![uid(),value["name"],pin,endpoint.as_str().trim_end_matches('/'),value["backend"],value["architecture"],value["runtime"],value["cpu_percent"],value["memory_mib"],value["instances"],value["egress_budget_launcher"],budget]).await?;
+        if let Some(key) = key
+            && let Some(row) =
+                crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
+        let row=one(&mut tx,&format!("INSERT INTO nodes(id,name,cert_sha256,endpoint,backend,architecture,runtime,cpu_percent,memory_mib,instances,egress_budget_launcher,egress_budget_required) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING {NODE}"),args![uid(),value["name"],pin,endpoint.as_str().trim_end_matches('/'),value["backend"],value["architecture"],value["runtime"],value["cpu_percent"],value["memory_mib"],value["instances"],value["egress_budget_launcher"],budget]).await?;
         Self::audit_system(
             &mut tx,
             &p.id,
@@ -88,17 +113,42 @@ impl Store {
             json!({}),
         )
         .await?;
+        if let Some(key) = key {
+            crate::customer_api::save_operator_receipt(&mut tx, &p.id, key, None, &request, &row)
+                .await?;
+        }
         tx.commit().await?;
         Ok(row)
     }
+    /// Every node, for the control plane's own reads.
     pub async fn nodes(&self, p: &Principal) -> Result<Value> {
+        Ok(self.node_page(p, crate::store::ListPage::whole()).await?["items"].take())
+    }
+    pub async fn node_page(&self, p: &Principal, page: crate::store::ListPage) -> Result<Value> {
         p.operator()?;
+        let (before, limit) = page.bounds(1000)?;
         let mut tx = self.transaction(false, false).await?;
-        Ok(json!(
-            rows(&mut tx, "SELECT * FROM nodes ORDER BY created", args![]).await?
-        ))
+        let found = rows(
+            &mut tx,
+            &format!("SELECT {NODE} FROM nodes r WHERE NOT r.deleted AND ($1::text IS NULL OR (r.created,r.id)<(SELECT c.created,c.id FROM nodes c WHERE c.id=$1)) ORDER BY r.created DESC,r.id DESC LIMIT $2"),
+            args![before, limit + 1],
+        )
+        .await?;
+        Ok(crate::store::ListPage::page(found, limit))
     }
     pub async fn node_mode(&self, p: &Principal, node: &str, value: Value) -> Result<Value> {
+        self.node_mode_keyed(p, node, value, None).await
+    }
+    /// A key is not required: the change says what the node is to be, and
+    /// saying it twice changes nothing more. With one, a retry is answered
+    /// as the first call was and leaves no second audit record.
+    pub async fn node_mode_keyed(
+        &self,
+        p: &Principal,
+        node: &str,
+        value: Value,
+        key: Option<&str>,
+    ) -> Result<Value> {
         p.operator()?;
         identity(node)?;
         fields(
@@ -128,10 +178,17 @@ impl Store {
                 "expected node flags and approved launcher digests",
             ));
         }
+        let request = json!({"kind":"node.mode","node":node,"value":value});
         let mut tx = self.transaction(true, false).await?;
+        if let Some(key) = key
+            && let Some(row) =
+                crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
         let old = one(
             &mut tx,
-            "SELECT * FROM nodes WHERE id=$1 FOR UPDATE",
+            "SELECT * FROM nodes WHERE id=$1 AND NOT deleted FOR UPDATE",
             args![node],
         )
         .await?;
@@ -180,10 +237,64 @@ impl Store {
             value.clone(),
         )
         .await?;
-        tx.commit().await?;
         let mut result = value;
         result["id"] = json!(node);
+        if let Some(key) = key {
+            crate::customer_api::save_operator_receipt(
+                &mut tx, &p.id, key, None, &request, &result,
+            )
+            .await?;
+        }
+        tx.commit().await?;
         Ok(result)
+    }
+    /// Removes a node that runs nothing and is to be given nothing: one
+    /// that is draining or disabled, with no execution of its own left.
+    ///
+    /// Its row is kept, because the executions it ran name it; it is
+    /// disabled for good, so its certificate opens nothing, and its name
+    /// and its certificate's pin are free to register again.
+    pub async fn delete_node(&self, p: &Principal, node: &str, key: &str) -> Result<Value> {
+        p.operator()?;
+        identity(node)?;
+        let request = json!({"kind":"node.delete","node":node});
+        let mut tx = self.transaction(true, false).await?;
+        if let Some(row) =
+            crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
+        let found = one(
+            &mut tx,
+            "SELECT n.draining OR n.disabled AS idle,
+                EXISTS(SELECT 1 FROM executions e WHERE e.node_id=n.id AND e.reserved) AS running
+             FROM nodes n WHERE n.id=$1 AND NOT n.deleted FOR UPDATE OF n",
+            args![node],
+        )
+        .await?;
+        if !b(&found["idle"]) {
+            return Err(conflict("drain or disable the node before deleting it").coded("in_use"));
+        }
+        if b(&found["running"]) {
+            return Err(conflict("node still has executions that have not ended").coded("in_use"));
+        }
+        exec(&mut tx,"UPDATE nodes SET deleted=true,disabled=true,draining=true,name='deleted-'||id,cert_sha256='deleted-'||id WHERE id=$1",args![node]).await?;
+        // An inspection it had in hand is another node's to take.
+        exec(&mut tx,"UPDATE artifact_validations SET state='pending',node_id=NULL,node_boot=NULL,lease_until=NULL,generation=generation+1,updated=now() WHERE node_id=$1 AND state='validating'",args![node]).await?;
+        let row = json!({"id":node});
+        Self::audit_system(
+            &mut tx,
+            &p.id,
+            "node.delete",
+            &json!(node),
+            &Value::Null,
+            json!({}),
+        )
+        .await?;
+        crate::customer_api::save_operator_receipt(&mut tx, &p.id, key, None, &request, &row)
+            .await?;
+        tx.commit().await?;
+        Ok(row)
     }
     pub async fn node_identity(&self, pin: &str) -> Result<Value> {
         let mut tx = self.transaction(false, false).await?;
@@ -272,7 +383,8 @@ impl Store {
                     "memory_bytes",
                 ],
             )?;
-            id(&report["id"])?;
+            // A node's report, not a request's body: answered as it was.
+            fenders_node_protocol::value::id(&report["id"])?;
             integer(&report["generation"], 1, i64::MAX)?;
             let Some(e) = optional(
                 &mut tx,

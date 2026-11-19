@@ -27,9 +27,10 @@ impl Store {
         request: &Value,
     ) -> Result<Option<Value>> {
         if key.is_empty() || key.len() > 128 {
-            return Err(Error::invalid(
-                "Idempotency-Key is required (1–128 characters)",
-            ));
+            return Err(
+                Error::invalid("Idempotency-Key is required (1–128 characters)")
+                    .coded("idempotency_key_required"),
+            );
         }
         let previous = optional(
             tx,
@@ -41,7 +42,9 @@ impl Store {
             .as_ref()
             .is_some_and(|p| p["request_hash"] != fingerprint(request))
         {
-            return Err(conflict("idempotency key has different arguments"));
+            return Err(
+                conflict("idempotency key has different arguments").coded("idempotency_key_reused")
+            );
         }
         Ok(previous)
     }
@@ -123,6 +126,93 @@ impl Store {
             crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
         }
 
+        tx.commit().await?;
+        Ok(row)
+    }
+    /// Gives a secret another value. Its id and its name stand, so what
+    /// names it goes on naming it. A run is given a secret's value when it
+    /// is started: runs started after this have the new value, and one that
+    /// is running keeps the old until it ends.
+    pub async fn rotate_secret(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        secret: &str,
+        value: Value,
+        key: &str,
+    ) -> Result<Value> {
+        identity(secret)?;
+        fields(&value, &["value"], &["value"])?;
+        let plain = text(&value["value"])?;
+        if !secret_value_fits(plain) {
+            return Err(Error::invalid(
+                "invalid secret value: 4 to 1024 bytes, without NUL",
+            ));
+        }
+        let mut tx = self.transaction(true, false).await?;
+        Self::project(&mut tx, p, tenant, project, true).await?;
+        // As for a creation: the receipt does not have the value, and a
+        // retry is answered with it whatever value the retry carries.
+        let request = json!({"kind":"secret.rotate","project_id":project,"secret":secret});
+        if let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await? {
+            return Ok(row);
+        }
+        let row = optional(&mut tx,"UPDATE secrets SET ciphertext=convert_to($4,'UTF8'),bound=true WHERE tenant_id=$1 AND project_id=$2 AND id=$3 RETURNING id,name,created",args![tenant,project,secret,crate::secret_binding::seal(&self.cipher,tenant,project,secret,plain.as_bytes())]).await?.ok_or_else(Error::missing)?;
+        Self::audit(&mut tx, p, "secret.rotate", secret, tenant, json!({})).await?;
+        crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+    /// Removes a secret, value and all. Refused while anything would still
+    /// be given it: an app whose release names it, a run that holds it or
+    /// waits to start, a connection that names it.
+    pub async fn delete_secret(
+        &self,
+        p: &Principal,
+        tenant: &str,
+        project: &str,
+        secret: &str,
+        key: &str,
+    ) -> Result<Value> {
+        identity(secret)?;
+        let mut tx = self.transaction(true, false).await?;
+        Self::project(&mut tx, p, tenant, project, true).await?;
+        let request = json!({"kind":"secret.delete","project_id":project,"secret":secret});
+        if let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await? {
+            return Ok(row);
+        }
+        one(
+            &mut tx,
+            "SELECT id FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE",
+            args![tenant, project, secret],
+        )
+        .await?;
+        let used = one(&mut tx,"SELECT
+            EXISTS(SELECT 1 FROM apps a JOIN app_releases r ON r.id IN (a.active_release_id,a.target_release_id)
+                WHERE a.tenant_id=$1 AND a.project_id=$2 AND NOT a.deleted
+                AND EXISTS(SELECT 1 FROM jsonb_each_text(COALESCE(r.configuration->'secret_env','{}'::jsonb)) named WHERE named.value=$3))
+            OR EXISTS(SELECT 1 FROM executions e WHERE e.tenant_id=$1 AND e.project_id=$2 AND e.reserved
+                AND EXISTS(SELECT 1 FROM jsonb_each_text(COALESCE(e.spec->'secret_env','{}'::jsonb)) named WHERE named.value=$3))
+            OR EXISTS(SELECT 1 FROM external_endpoints x WHERE x.tenant_id=$1 AND x.project_id=$2 AND NOT x.deleted
+                AND $3 IN (x.username_secret_id,x.password_secret_id)) AS used",args![tenant,project,secret]).await?;
+        if b(&used["used"]) {
+            return Err(conflict(
+                "secret is named by an app's release, a run or a connection; change those first",
+            )
+            .coded("in_use"));
+        }
+        // A connection that was revoked may still name it; it no longer does.
+        exec(&mut tx,"UPDATE external_endpoints SET username_secret_id=NULLIF(username_secret_id,$3),password_secret_id=NULLIF(password_secret_id,$3) WHERE tenant_id=$1 AND project_id=$2 AND deleted AND $3 IN (username_secret_id,password_secret_id)",args![tenant,project,secret]).await?;
+        exec(
+            &mut tx,
+            "DELETE FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3",
+            args![tenant, project, secret],
+        )
+        .await?;
+        let row = json!({"id":secret});
+        Self::audit(&mut tx, p, "secret.delete", secret, tenant, json!({})).await?;
+        crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
         tx.commit().await?;
         Ok(row)
     }

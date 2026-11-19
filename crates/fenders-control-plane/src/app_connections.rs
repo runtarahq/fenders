@@ -255,7 +255,9 @@ impl Store {
             https = Some(crate::app_https::origins(&origins)?);
         }
         if row["revision"] != value["expected_revision"] {
-            return Err(conflict("app revision changed; reload before saving"));
+            return Err(
+                conflict("app revision changed; reload before saving").coded("revision_conflict")
+            );
         }
         let old=rows(&mut tx,"SELECT * FROM app_endpoint_connections WHERE app_id=$1 AND state='active' ORDER BY endpoint_id",args![app]).await?;
         let op = Self::operation(

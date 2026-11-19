@@ -70,20 +70,20 @@ run() { # APP NAME: starts a run, waits for its end, keeps the run and its outpu
   jq -r '[.items[] | .bytes | @base64d] | join("")' "$out/$2.logs.json" > "$out/$2.txt"
 }
 transfer() { # NAME: the workspace's transfer allowance, what is counted against it and what is held
-  api GET "/tenants/$tenant/usage" |
+  api GET "/workspaces/$tenant/usage" |
     jq '{allowance: .allowance.transfer_bytes, counted: .transfer_allowance.bytes, held: .transfer_allowance.reserved_bytes}' > "$out/$1.transfer.json"
 }
 allow() { # BYTES: sets the workspace's transfer allowance, keeping the rest
-  api PATCH "/tenants/$tenant" "$(jq --argjson bytes "$1" \
+  api PATCH "/workspaces/$tenant" "$(jq --argjson bytes "$1" \
     '{allowance: (.allowance | {cpu_percent,memory_mib,storage_bytes,instances} + {transfer_bytes:$bytes})}' "$out/usage-before.json")" >/dev/null
 }
 
 tenant=$(jq -er .tenant "$state/scope.json")
-scope=/tenants/$tenant/projects/$(jq -er .project "$state/scope.json")
+scope=/workspaces/$tenant/projects/$(jq -er .project "$state/scope.json")
 tag=$(date +%H%M%S)
-api GET /nodes | jq -e '.[0] | .egress_budget_required and .observed_egress_budget != null' >/dev/null ||
+api GET /nodes | jq -e '.items[0] | .egress_budget_required and .observed_egress_budget != null' >/dev/null ||
   { echo 'the local node does not run under the outbound byte limit' >&2; exit 2; }
-api GET "/tenants/$tenant/usage" > "$out/usage-before.json"
+api GET "/workspaces/$tenant/usage" > "$out/usage-before.json"
 original=$(jq -er .allowance.transfer_bytes "$out/usage-before.json")
 docker rm -f "$target" >/dev/null 2>&1 || true
 docker run -d --name "$target" postgres:17-alpine sh -c 'nc -lk -p 9000 -e sh -c "cat >/dev/null"' >/dev/null
@@ -92,7 +92,7 @@ address=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{
 sleep 1
 
 command=$(upload "$repo/build/node/example-command.wasm")
-endpoint=$(api POST "$scope/external-endpoints" \
+endpoint=$(api POST "$scope/connections" \
   "$(jq -n --arg n "live-sink-$tag" --arg h "$address" '{name:$n,host:$h,port:9000}')" | jq -er .resource_id)
 connection=$(jq -n --arg c "$endpoint" '[{connection_id:$c}]')
 sending() { jq -n --arg bytes "$1" '{TEST_MODE:"connect",TEST_CONNECT_BULK:$bytes}'; }

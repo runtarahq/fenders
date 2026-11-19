@@ -23,17 +23,20 @@ async fn call(
         .unwrap();
     let status = response.status();
     let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-    (status, serde_json::from_slice(&body).unwrap())
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    // Whatever a test asks, the answer is one the contract describes.
+    super::contract::conforms(method, path, status, &body);
+    (status, body)
 }
 async fn key(l: &Lab, scope: Option<&str>, permissions: &[&str]) -> Value {
-    let (status, value) = call(l, &l.token, "POST", &format!("/v1/tenants/{}/api-keys", l.tenant),
+    let (status, value) = call(l, &l.token, "POST", &format!("/v1/workspaces/{}/api-keys", l.tenant),
         json!({"name":"automation","project_id":scope,"permissions":permissions,"ttl_seconds":3600}), &uid()).await;
     assert_eq!(status, StatusCode::CREATED, "{value}");
     value
 }
 
 #[tokio::test]
-async fn customer_api_keys_limit_aliases_and_revalidate_revocation() {
+async fn customer_api_keys_are_held_to_their_routes_and_revalidate_revocation() {
     let l = Lab::new().await;
     let k = key(&l, Some(&l.project), &["read", "runs:write"]).await;
     let token = s(&k["token"]);
@@ -50,10 +53,13 @@ async fn customer_api_keys_limit_aliases_and_revalidate_revocation() {
         ("GET", base.clone() + "/executions"),
         (
             "POST",
-            format!("/v1/tenants/{}/projects/{}/executions", l.tenant, l.project),
+            format!(
+                "/v1/workspaces/{}/projects/{}/executions",
+                l.tenant, l.project
+            ),
         ),
         ("GET", "/v1/nodes".into()),
-        ("POST", format!("/v1/tenants/{}/credentials", l.tenant)),
+        ("POST", format!("/v1/workspaces/{}/credentials", l.tenant)),
         ("POST", format!("/v1/workspaces/{}/api-keys", l.tenant)),
     ] {
         let status = call(&l, token, method, &path, json!({}), "deny").await.0;
@@ -126,22 +132,31 @@ async fn customer_api_keys_limit_aliases_and_revalidate_revocation() {
 #[tokio::test]
 async fn customer_api_key_and_project_retries_do_not_duplicate_or_reveal_keys() {
     let l = Lab::new().await;
-    let route = format!("/v1/tenants/{}/api-keys", l.tenant);
+    let route = format!("/v1/workspaces/{}/api-keys", l.tenant);
     let request = json!({"name":"pipeline","project_id":null,"permissions":["read","projects:write"],"ttl_seconds":3600});
     let (a, b) = tokio::join!(
         call(&l, &l.token, "POST", &route, request.clone(), "issue"),
         call(&l, &l.token, "POST", &route, request.clone(), "issue")
     );
-    assert_eq!(a.0, StatusCode::CREATED);
-    assert_eq!(b.0, StatusCode::CREATED);
     assert_eq!(a.1["id"], b.1["id"]);
-    assert_ne!(a.1.get("token").is_some(), b.1.get("token").is_some());
-    let secret =
-        a.1.get("token")
-            .or(b.1.get("token"))
-            .unwrap()
-            .as_str()
-            .unwrap();
+    // One of them issued the key and is shown its token, once. The other
+    // made nothing, and is told that it holds no token for the key.
+    let (issued, replayed) = if a.0 == StatusCode::CREATED {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    assert_eq!(issued.0, StatusCode::CREATED, "{}", issued.1);
+    assert_eq!(issued.1["replayed"], false);
+    assert_eq!(replayed.0, StatusCode::OK, "{}", replayed.1);
+    assert_eq!(replayed.1["replayed"], true);
+    assert!(replayed.1["token"].is_null());
+    let secret = issued.1["token"].as_str().unwrap();
+    // A later retry is told the same, and the key it cannot use is the
+    // operator's to revoke by the id it was given.
+    let later = call(&l, &l.token, "POST", &route, request.clone(), "issue").await;
+    assert_eq!(later, *replayed);
+    assert!(!later.1.to_string().contains(secret));
     let mut different = request.clone();
     different["ttl_seconds"] = json!(7200);
     assert_eq!(
@@ -409,7 +424,7 @@ async fn customer_api_connections_resolve_both_protocols_atomically_without_gran
     for route in [
         format!("{base}/apps/deploy"),
         format!(
-            "/v1/tenants/{}/projects/{}/apps/deploy",
+            "/v1/workspaces/{}/projects/{}/apps/deploy",
             l.tenant, l.project
         ),
     ] {
@@ -544,7 +559,13 @@ async fn a_run_is_cancelled_through_its_app_by_a_key_that_may_run() {
         &request,
     )
     .await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{stopped}");
+    // The run had not been given to a node, so it is stopped already.
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    assert_eq!(stopped["state"], "succeeded");
+    // The operation is of the run that was named, not of the execution
+    // the control plane stopped for it, which no route reads.
+    assert_eq!(stopped["kind"], "cancel-run");
+    assert_eq!(stopped["resource_id"], started["resource_id"]);
     // The same request again is the same answer, not a second stop.
     assert_eq!(
         call(
@@ -590,7 +611,7 @@ async fn a_run_is_cancelled_through_its_app_by_a_key_that_may_run() {
 #[tokio::test]
 async fn the_operator_has_its_own_routes_and_no_others() {
     let l = Lab::new().await;
-    let t = format!("/v1/tenants/{}", l.tenant);
+    let t = format!("/v1/workspaces/{}", l.tenant);
     let p = format!("{t}/projects/{}", l.project);
     let id = uid();
     for (method, path) in [
@@ -628,7 +649,7 @@ async fn the_operator_has_its_own_routes_and_no_others() {
     ];
     let holder = key(&l, None, &every).await;
     for (method, path) in [
-        ("POST", "/v1/tenants".to_owned()),
+        ("POST", "/v1/workspaces".to_owned()),
         ("PATCH", t.clone()),
         ("PATCH", format!("{t}/http-limits")),
         ("POST", format!("{t}/lifecycle")),
@@ -710,7 +731,7 @@ async fn a_tenants_keys_are_the_operators_to_issue() {
     }
     // Nor over the API, on the operator's route or the workspace's name for it.
     for path in [
-        format!("/v1/tenants/{}/api-keys", l.tenant),
+        format!("/v1/workspaces/{}/api-keys", l.tenant),
         format!("/v1/workspaces/{}/api-keys", l.tenant),
     ] {
         let (status, _) = call(&l, s(&key["token"]), "POST", &path, ask.clone(), &uid()).await;
@@ -724,7 +745,7 @@ async fn a_tenants_keys_are_the_operators_to_issue() {
         &l,
         &l.token,
         "POST",
-        &format!("/v1/tenants/{}/api-keys", l.tenant),
+        &format!("/v1/workspaces/{}/api-keys", l.tenant),
         ask.clone(),
         &uid(),
     )
@@ -797,7 +818,7 @@ async fn a_keys_label_is_recorded_with_what_it_does() {
             .any(|k| k["label"] == "user:4f2a alice@example.test")
     );
     // A change each key makes, and one the operator makes.
-    let path = format!("/v1/tenants/{}/projects/{}/secrets", l.tenant, l.project);
+    let path = format!("/v1/workspaces/{}/projects/{}/secrets", l.tenant, l.project);
     for (token, name) in [
         (s(&labelled["token"]), "by-labelled"),
         (s(&plain["token"]), "by-plain"),
@@ -859,7 +880,9 @@ async fn an_uploads_body_is_not_read_for_a_credential_that_may_not_upload_there(
             })));
             let mut request = Request::builder()
                 .method("POST")
-                .uri(format!("/v1/tenants/{tenant}/projects/{project}/artifacts"))
+                .uri(format!(
+                    "/v1/workspaces/{tenant}/projects/{project}/artifacts"
+                ))
                 .header("Authorization", format!("Bearer {token}"))
                 .header("Content-Type", "application/wasm");
             if let Some(declared) = declared {
@@ -980,9 +1003,9 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
     assert_eq!(issue().await.unwrap_err().status, quota);
 
     // Changes in a minute: refused or not, each one counts, and reads do not.
-    let path = format!("/v1/tenants/{}/projects/{}/secrets", l.tenant, l.project);
+    let path = format!("/v1/workspaces/{}/projects/{}/secrets", l.tenant, l.project);
     let token = s(&editor["token"]);
-    let mut last = StatusCode::OK;
+    let mut last = (StatusCode::OK, json!({}));
     for _ in 0..600 {
         last = call(
             &l,
@@ -993,10 +1016,13 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
             // A key names each change it asks for.
             &uid(),
         )
-        .await
-        .0;
+        .await;
     }
-    assert_eq!(last, quota, "the row limit, not yet the rate");
+    // The row limit, not yet the rate: over the API a limit reached is a
+    // conflict with what the workspace has, which waiting does not cure.
+    assert_eq!(last.0, StatusCode::CONFLICT, "{}", last.1);
+    assert_eq!(last.1["code"], "quota_exhausted");
+    assert_eq!(last.1["error"], "workspace metadata limit exhausted");
     let (status, body) = call(
         &l,
         token,
@@ -1006,8 +1032,30 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
         &uid(),
     )
     .await;
-    assert_eq!(status, quota);
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["code"], "rate_limited");
     assert_eq!(body["error"], "too many changes in a minute", "{body}");
+    // It says when to ask again: within the minute the count is kept for.
+    let refused = api::router(l.store.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Idempotency-Key", uid())
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({"name":"x","value":"value"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    let wait: u64 = refused.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&wait), "{wait}");
     assert_eq!(
         call(&l, token, "GET", &path, json!({}), "").await.0,
         StatusCode::OK
@@ -1020,7 +1068,7 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
             "POST",
             &path,
             json!({"name":"x","value":"value"}),
-            ""
+            &uid()
         )
         .await
         .1["error"],
@@ -1066,8 +1114,8 @@ async fn a_workspaces_credentials_do_not_see_the_operators_notes_on_it() {
 async fn management_answers_carry_browser_security_headers() {
     let l = Lab::new().await;
     for (path, token) in [
-        ("/v1/tenants", Some(l.token.as_str())),
-        ("/v1/tenants", None),
+        ("/v1/workspaces", Some(l.token.as_str())),
+        ("/v1/workspaces", None),
         ("/api/openapi.json", None),
         ("/no/such/path", Some(l.token.as_str())),
     ] {
@@ -1187,5 +1235,2589 @@ async fn a_secrets_ciphertext_opens_only_for_its_own_row() {
         .unwrap();
     assert!(!bound);
     assert!(launch("never-bound", after.to_owned()).await.is_err());
+    l.finish().await;
+}
+
+async fn tenants_named(l: &Lab, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM tenants WHERE name=$1")
+        .bind(name)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_retried_tenant_creation_makes_one_tenant() {
+    let l = Lab::new().await;
+    let tenant = json!({"name":"acme","allowance":{"cpu_percent":200,"memory_mib":1024,"storage_bytes":1073741824,"instances":2,"transfer_bytes":1073741824}});
+    // Two at once, as a client that timed out and tried again would send.
+    let (a, b) = tokio::join!(
+        call(
+            &l,
+            &l.token,
+            "POST",
+            "/v1/workspaces",
+            tenant.clone(),
+            "acme"
+        ),
+        call(
+            &l,
+            &l.token,
+            "POST",
+            "/v1/workspaces",
+            tenant.clone(),
+            "acme"
+        )
+    );
+    assert_eq!(a.0, StatusCode::CREATED, "{}", a.1);
+    assert_eq!(a, b);
+    assert_eq!(tenants_named(&l, "acme").await, 1);
+    // One audit record of it, and one default project.
+    let (audits, projects): (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM audit WHERE action='tenant.create' AND resource_id=$1),(SELECT count(*) FROM projects WHERE tenant_id=$1)")
+        .bind(s(&a.1["id"]))
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!((audits, projects), (1, 1));
+    // The key with other arguments is refused, and makes nothing.
+    let mut other = tenant.clone();
+    other["allowance"]["instances"] = json!(3);
+    let refused = call(&l, &l.token, "POST", "/v1/workspaces", other, "acme").await;
+    assert_eq!(refused.0, StatusCode::CONFLICT, "{}", refused.1);
+    // A name is a label, not an identity: another key makes another tenant of it.
+    let second = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/workspaces",
+        tenant.clone(),
+        "acme-2",
+    )
+    .await;
+    assert_eq!(second.0, StatusCode::CREATED, "{}", second.1);
+    assert_ne!(second.1["id"], a.1["id"]);
+    assert_eq!(tenants_named(&l, "acme").await, 2);
+    // Without a key nothing is made: a retry could not be told from a new request.
+    let keyless = call(&l, &l.token, "POST", "/v1/workspaces", tenant, "").await;
+    assert_eq!(keyless.0, StatusCode::BAD_REQUEST, "{}", keyless.1);
+    assert_eq!(tenants_named(&l, "acme").await, 2);
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_retried_node_registration_is_answered_with_the_node() {
+    let l = Lab::new().await;
+    let node = json!({"name":"node-1","cert_sha256":"a".repeat(64),"endpoint":"https://node-1.internal:9443","backend":"wasm","architecture":"x86_64","runtime":"wasmtime-50.0.0-fenders-v1","cpu_percent":200,"memory_mib":1024,"instances":4});
+    let first = call(&l, &l.token, "POST", "/v1/nodes", node.clone(), "node-1").await;
+    assert_eq!(first.0, StatusCode::CREATED, "{}", first.1);
+    // The guide's own example: the same request with the same key.
+    let again = call(&l, &l.token, "POST", "/v1/nodes", node.clone(), "node-1").await;
+    assert_eq!(again, first);
+    // A second node of the name is still refused, and so is the key reused.
+    let duplicate = call(&l, &l.token, "POST", "/v1/nodes", node.clone(), "node-1b").await;
+    assert_eq!(duplicate.0, StatusCode::CONFLICT, "{}", duplicate.1);
+    let mut other = node.clone();
+    other["instances"] = json!(8);
+    let reused = call(&l, &l.token, "POST", "/v1/nodes", other, "node-1").await;
+    assert_eq!(reused.0, StatusCode::CONFLICT, "{}", reused.1);
+    assert_eq!(
+        call(&l, &l.token, "POST", "/v1/nodes", node, "").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM nodes")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(nodes, 1);
+
+    // A node's mode needs no key; with one, a retry leaves one record.
+    let route = format!("/v1/nodes/{}", s(&first.1["id"]));
+    let drain = json!({"draining":true});
+    let a = call(&l, &l.token, "PATCH", &route, drain.clone(), "drain").await;
+    let b = call(&l, &l.token, "PATCH", &route, drain.clone(), "drain").await;
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(a, b);
+    let audits = "SELECT count(*) FROM audit WHERE action='node.mode'";
+    let recorded: i64 = sqlx::query_scalar(audits)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(recorded, 1);
+    assert_eq!(
+        call(
+            &l,
+            &l.token,
+            "PATCH",
+            &route,
+            json!({"draining":false}),
+            "drain"
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        call(&l, &l.token, "PATCH", &route, drain, "").await.0,
+        StatusCode::OK
+    );
+    let recorded: i64 = sqlx::query_scalar(audits)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(recorded, 2);
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn the_operators_other_changes_honour_a_key_and_do_not_require_one() {
+    let l = Lab::new().await;
+    let audits = |action: &'static str| {
+        let pool = l.store.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM audit WHERE action=$1")
+                .bind(action)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    // An allowance: the retry is answered as the first call was, though the
+    // tenant has changed since.
+    let tenant = format!("/v1/workspaces/{}", l.tenant);
+    let allowance = json!({"allowance":{"cpu_percent":300,"memory_mib":2048,"instances":3,"storage_bytes":20000000000i64,"transfer_bytes":10000000}});
+    let first = call(&l, &l.token, "PATCH", &tenant, allowance.clone(), "allow").await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(first.1["cpu_percent"], 300);
+    let size = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &tenant,
+        json!({"default_app_size":"medium"}),
+        "",
+    )
+    .await;
+    assert_eq!(size.0, StatusCode::OK, "{}", size.1);
+    let again = call(&l, &l.token, "PATCH", &tenant, allowance, "allow").await;
+    assert_eq!(again, first);
+    assert_eq!(audits("tenant.allowance").await, 1);
+    assert_eq!(
+        call(
+            &l,
+            &l.token,
+            "PATCH",
+            &tenant,
+            json!({"default_app_size":"large"}),
+            "allow"
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+
+    // HTTP limits.
+    let route = format!("/v1/workspaces/{}/http-limits", l.tenant);
+    let limits = json!({"concurrent_requests":8,"requests_per_minute":120});
+    let a = call(&l, &l.token, "PATCH", &route, limits.clone(), "limits").await;
+    let b = call(&l, &l.token, "PATCH", &route, limits.clone(), "limits").await;
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(a, b);
+    assert_eq!(audits("tenant.http-limits").await, 1);
+    assert_eq!(
+        call(&l, &l.token, "PATCH", &route, limits, "").await.0,
+        StatusCode::OK
+    );
+    assert_eq!(audits("tenant.http-limits").await, 2);
+
+    // The egress policy is guarded by a revision, which a change advances:
+    // a retry without a key is refused, and with one is given the policy.
+    let policy = "/v1/public-egress-policy";
+    let before = call(&l, &l.token, "GET", policy, json!({}), "").await.1;
+    sqlx::query("UPDATE public_egress_policy SET enabled=true,digest=repeat('a',64)")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let disable = json!({"expected_revision":before["revision"],"enabled":false});
+    let a = call(&l, &l.token, "PUT", policy, disable.clone(), "egress").await;
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(a.1["enabled"], false);
+    assert_ne!(a.1["revision"], before["revision"]);
+    let b = call(&l, &l.token, "PUT", policy, disable.clone(), "egress").await;
+    assert_eq!((b.0, &b.1["revision"]), (StatusCode::OK, &a.1["revision"]));
+    assert_eq!(
+        call(&l, &l.token, "PUT", policy, disable, "").await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(audits("public-egress.activate").await, 1);
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn what_became_of_a_request_is_found_by_whatever_key_it_was_made_with() {
+    let l = Lab::new().await;
+    l.validated().await;
+    let k = key(
+        &l,
+        Some(&l.project),
+        &["read", "apps:write", "runs:write", "connections:write"],
+    )
+    .await;
+    let token = s(&k["token"]);
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
+    let found = |path: String| {
+        let (l, base) = (&l, base.clone());
+        async move { call(l, token, "GET", &(base + &path), json!({}), "").await }
+    };
+
+    // A key is its caller's to choose: here with a space, a slash and a hash.
+    let chosen = "deploy 2026/11 #1";
+    let encoded = "deploy%202026%2F11%20%231";
+    let (status, deployed) = call(
+        &l,
+        token,
+        "POST",
+        &(base.clone() + "/apps/deploy"),
+        json!({"name":"found","artifact_id":l.artifact,"triggers":{"manual":true,"http":false}}),
+        chosen,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{deployed}");
+    let (status, submission) = found(format!("/app-submissions/{encoded}")).await;
+    assert_eq!(status, StatusCode::OK, "{submission}");
+    assert_eq!(submission["id"], deployed["id"]);
+    assert_eq!(submission["resource_id"], deployed["resource_id"]);
+
+    // A short one, which is no identifier.
+    let app = s(&deployed["resource_id"]);
+    let (status, run) = call(
+        &l,
+        token,
+        "POST",
+        &format!("{base}/apps/{app}/runs"),
+        json!({}),
+        "r1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    let (status, submission) = found(format!("/apps/{app}/submissions/r1")).await;
+    assert_eq!(status, StatusCode::OK, "{submission}");
+    assert_eq!(submission["id"], run["id"]);
+    // An app's actions are found through that app, a deployment is not one.
+    assert_eq!(
+        found(format!("/apps/{app}/submissions/{encoded}")).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    let (status, connection) = call(
+        &l,
+        token,
+        "POST",
+        &(base.clone() + "/connections"),
+        json!({"type":"https","name":"example","origin":"https://example.com"}),
+        "connect 1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{connection}");
+    let (status, submission) = found("/endpoint-submissions/connect%201".into()).await;
+    assert_eq!(status, StatusCode::OK, "{submission}");
+    assert_eq!(submission["id"], connection["id"]);
+
+    // A key nothing was made with, one no request could carry, and bytes
+    // that are no text all name nothing.
+    for missing in ["never-sent".to_owned(), "k".repeat(129), "%ff".to_owned()] {
+        for path in [
+            format!("/app-submissions/{missing}"),
+            format!("/apps/{app}/submissions/{missing}"),
+            format!("/endpoint-submissions/{missing}"),
+        ] {
+            assert_eq!(found(path.clone()).await.0, StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_refusals_code_says_why_where_the_status_does_not() {
+    let l = Lab::new().await;
+    let writer = key(&l, None, &["read", "apps:write", "projects:write"]).await;
+    let reader = key(&l, None, &["read"]).await;
+    let (writer, reader) = (s(&writer["token"]), s(&reader["token"]));
+    let projects = format!("/v1/workspaces/{}/projects", l.tenant);
+    let base = format!("{projects}/{}", l.project);
+    let refused = |token: &'static str,
+                   method: &'static str,
+                   path: String,
+                   body: Value,
+                   key: &'static str| {
+        let l = &l;
+        let token = match token {
+            "operator" => l.token.clone(),
+            "writer" => writer.to_owned(),
+            _ => reader.to_owned(),
+        };
+        async move {
+            let (status, value) = call(l, &token, method, &path, body, key).await;
+            (status, s(&value["code"]).to_owned())
+        }
+    };
+    let named = json!({"name":"Coded"});
+
+    // 400: the key is missing, not the body malformed.
+    assert_eq!(
+        refused("writer", "POST", projects.clone(), named.clone(), "").await,
+        (StatusCode::BAD_REQUEST, "idempotency_key_required".into())
+    );
+    assert_eq!(
+        refused("writer", "POST", projects.clone(), json!({"nom":"x"}), "k0").await,
+        (StatusCode::BAD_REQUEST, "invalid_request".into())
+    );
+    // 409, three ways: the key was used for something else, the thing
+    // exists, the caller's copy is old.
+    assert_eq!(
+        call(&l, writer, "POST", &projects, named.clone(), "k1")
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        refused(
+            "writer",
+            "POST",
+            projects.clone(),
+            json!({"name":"Another"}),
+            "k1"
+        )
+        .await,
+        (StatusCode::CONFLICT, "idempotency_key_reused".into())
+    );
+    assert_eq!(
+        refused("writer", "POST", projects.clone(), named.clone(), "k2").await,
+        (StatusCode::CONFLICT, "already_exists".into())
+    );
+    // The lab's component has not been inspected.
+    let deploy =
+        json!({"name":"coded","artifact_id":l.artifact,"triggers":{"manual":true,"http":false}});
+    assert_eq!(
+        refused(
+            "writer",
+            "POST",
+            base.clone() + "/apps/deploy",
+            deploy,
+            "k3"
+        )
+        .await,
+        (StatusCode::CONFLICT, "not_validated".into())
+    );
+    let app = l.command_app().await;
+    assert_eq!(
+        refused(
+            "writer",
+            "PATCH",
+            format!("{base}/apps/{app}"),
+            json!({"desired":"stopped","expected_revision":999}),
+            "k4"
+        )
+        .await,
+        (StatusCode::CONFLICT, "revision_conflict".into())
+    );
+    // 403: the key may not, as against the workspace may not.
+    assert_eq!(
+        refused("reader", "POST", projects.clone(), named.clone(), "k5").await,
+        (StatusCode::FORBIDDEN, "permission_denied".into())
+    );
+    assert_eq!(
+        refused("reader", "GET", "/v1/nodes".into(), json!({}), "").await,
+        (StatusCode::FORBIDDEN, "permission_denied".into())
+    );
+    let suspend = json!({"action":"suspend","reason":"Coded","expected_revision":1});
+    let lifecycle = format!("/v1/workspaces/{}/lifecycle", l.tenant);
+    assert_eq!(
+        call(&l, &l.token, "POST", &lifecycle, suspend, "k6")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        refused(
+            "writer",
+            "POST",
+            projects.clone(),
+            json!({"name":"Suspended"}),
+            "k7"
+        )
+        .await,
+        (StatusCode::FORBIDDEN, "workspace_suspended".into())
+    );
+    // A status with one meaning keeps its own name.
+    assert_eq!(
+        refused(
+            "writer",
+            "GET",
+            format!("{projects}/{}/apps", uid()),
+            json!({}),
+            ""
+        )
+        .await,
+        (StatusCode::NOT_FOUND, "not_found".into())
+    );
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn an_exhausted_allowance_is_a_conflict_and_not_a_rate() {
+    let l = Lab::new().await;
+    let k = key(&l, Some(&l.project), &["read", "apps:write"]).await;
+    // Room for what the lab uploaded and nothing more.
+    sqlx::query("UPDATE tenants SET storage_bytes=1024 WHERE id=$1")
+        .bind(&l.tenant)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let mut component = b"\0asm\x0d\0\x01\0".to_vec();
+    component.resize(2048, 0);
+    let response = api::router(l.store.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/workspaces/{}/projects/{}/artifacts",
+                    l.tenant, l.project
+                ))
+                .header("Authorization", format!("Bearer {}", s(&k["token"])))
+                .header("Content-Type", "application/wasm")
+                .body(Body::from(component.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(response.headers().get("retry-after").is_none());
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+    assert_eq!(body["code"], "quota_exhausted", "{body}");
+    assert_eq!(body["error"], "tenant storage allowance exhausted");
+    // Inside the control plane it is still told by the status it had,
+    // which the scheduler and the gateway go by.
+    let refused = l
+        .store
+        .upload(&l.operator, &l.tenant, &l.project, &component)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(refused.code(), "quota_exhausted");
+    l.finish().await;
+}
+
+/// One request, with the headers of its answer.
+async fn answer(
+    l: &Lab,
+    token: Option<&str>,
+    method: &str,
+    path: &str,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut request = Request::builder().method(method).uri(path);
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {token}"));
+    }
+    let response = api::router(l.store.clone())
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let (status, headers) = (response.status(), response.headers().clone());
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    (status, headers, body.to_vec())
+}
+
+#[tokio::test]
+async fn a_refusal_names_the_credential_wanted_and_the_methods_taken() {
+    let l = Lab::new().await;
+    let k = key(&l, None, &["read"]).await;
+    let token = s(&k["token"]);
+    let projects = format!("/v1/workspaces/{}/projects", l.tenant);
+    let app = format!("{projects}/{}/apps/{}", l.project, uid());
+
+    // No credential, and one that opens nothing: a bearer token is wanted.
+    for token in [None, Some("fnd_tok_nothing")] {
+        let (status, headers, _) = answer(&l, token, "GET", "/v1/me").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(headers["www-authenticate"], "Bearer");
+    }
+
+    // A path that is one, asked with a method it does not take.
+    let allowed = |path: String, token: String, method: &'static str| {
+        let l = &l;
+        async move {
+            let (status, headers, body) = answer(l, Some(&token), method, &path).await;
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+            assert_eq!(body["code"], "method_not_allowed");
+            headers["allow"].to_str().unwrap().to_owned()
+        }
+    };
+    assert_eq!(
+        allowed(projects.clone(), token.into(), "DELETE").await,
+        "GET, HEAD, POST"
+    );
+    assert_eq!(
+        allowed(app.clone(), token.into(), "PUT").await,
+        "GET, HEAD, PATCH, DELETE"
+    );
+    assert_eq!(
+        allowed(format!("{app}/triggers"), token.into(), "POST").await,
+        "GET, HEAD, PUT"
+    );
+    assert_eq!(
+        allowed("/v1/me".into(), token.into(), "POST").await,
+        "GET, HEAD"
+    );
+    // The operator is told of its own routes too, where a path has them.
+    assert_eq!(
+        allowed("/v1/workspaces".into(), l.token.clone(), "DELETE").await,
+        "GET, HEAD, POST"
+    );
+    assert_eq!(
+        allowed("/v1/nodes".into(), l.token.clone(), "PUT").await,
+        "GET, HEAD, POST"
+    );
+    // A key is not told of them: of /v1/workspaces it may only list, a route
+    // of the operator's is refused it as ever, and /v1/nodes is nothing it
+    // could use by any method.
+    let (status, headers, _) = answer(&l, Some(token), "POST", "/v1/workspaces").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(headers.get("allow").is_none());
+    assert_eq!(
+        allowed("/v1/workspaces".into(), token.into(), "DELETE").await,
+        "GET, HEAD"
+    );
+    for method in ["GET", "PUT"] {
+        let (status, headers, _) = answer(&l, Some(token), method, "/v1/nodes").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method}");
+        assert!(headers.get("allow").is_none());
+    }
+    // A path that is none stays unknown to everyone, by any method.
+    for token in [token, l.token.as_str()] {
+        let (status, headers, _) = answer(&l, Some(token), "DELETE", "/v1/nothing").await;
+        assert!(
+            matches!(status, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN),
+            "{status}"
+        );
+        assert!(headers.get("allow").is_none());
+    }
+
+    // HEAD is GET without the body, to a key as to the operator.
+    for (token, path) in [
+        (token, projects.as_str()),
+        (token, "/v1/me"),
+        (l.token.as_str(), "/v1/nodes"),
+    ] {
+        let (status, headers, body) = answer(&l, Some(token), "HEAD", path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert!(body.is_empty());
+        assert_eq!(headers["cache-control"], "no-store");
+    }
+    // And is refused as GET would be.
+    let (status, _, body) = answer(&l, Some(token), "HEAD", "/v1/nodes").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.is_empty());
+    // A change by HEAD is not one.
+    let (status, _, _) = answer(
+        &l,
+        Some(token),
+        "HEAD",
+        &format!("{app}/runs/{}/cancel", uid()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_body_is_what_it_says_it_is_or_is_not_read() {
+    let l = Lab::new().await;
+    let k = key(&l, None, &["read", "apps:write", "projects:write"]).await;
+    let token = s(&k["token"]);
+    let send = |path: String, media: Option<&'static str>, body: Vec<u8>| {
+        let l = &l;
+        async move {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Idempotency-Key", uid());
+            if let Some(media) = media {
+                request = request.header("Content-Type", media);
+            }
+            let response = api::router(l.store.clone())
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                    .unwrap();
+            (status, body)
+        }
+    };
+    let projects = format!("/v1/workspaces/{}/projects", l.tenant);
+    let project = |name: &str| json!({"name":name}).to_string().into_bytes();
+    // JSON sent as a form, as curl -d does unasked, or as nothing at all.
+    for media in [
+        Some("application/x-www-form-urlencoded"),
+        Some("text/plain"),
+        None,
+    ] {
+        let (status, body) = send(projects.clone(), media, project("Unsaid")).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{media:?}");
+        assert_eq!(body["code"], "unsupported_media_type");
+    }
+    let made: i64 = sqlx::query_scalar("SELECT count(*) FROM projects WHERE display_name='Unsaid'")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(made, 0);
+    // Its parameters and its case are not what is asked about.
+    for (media, name) in [
+        ("application/json", "Plain"),
+        ("application/json; charset=utf-8", "Charset"),
+        ("Application/JSON", "Shouted"),
+    ] {
+        let (status, body) = send(projects.clone(), Some(media), project(name)).await;
+        assert_eq!(status, StatusCode::CREATED, "{media}: {body}");
+    }
+    // A request with no body says nothing about one.
+    let app = l.command_app().await;
+    let runs = format!("{projects}/{}/apps/{app}/runs", l.project);
+    let runner = key(&l, None, &["read", "runs:write"]).await;
+    let response = api::router(l.store.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&runs)
+                .header("Authorization", format!("Bearer {}", s(&runner["token"])))
+                .header("Idempotency-Key", uid())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    // A component is application/wasm, and JSON is not one.
+    let artifacts = format!("{projects}/{}/artifacts", l.project);
+    let component = b"\0asm\x0d\0\x01\0 another".to_vec();
+    for media in [
+        Some("application/json"),
+        Some("application/octet-stream"),
+        None,
+    ] {
+        let (status, body) = send(artifacts.clone(), media, component.clone()).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{media:?}");
+        assert_eq!(body["code"], "unsupported_media_type");
+    }
+    let (status, body) = send(artifacts, Some("application/wasm"), component).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn an_id_that_could_be_none_is_malformed_in_a_body_and_missing_in_a_path() {
+    let l = Lab::new().await;
+    let app = l.command_app().await;
+    let k = key(&l, None, &["read", "apps:write"]).await;
+    let token = s(&k["token"]);
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
+    let triggers = json!({"manual":true,"http":false});
+    let revision = l
+        .store
+        .app(&l.operator, &l.tenant, &l.project, &app)
+        .await
+        .unwrap()["revision"]
+        .clone();
+    let cases = [
+        (
+            "POST",
+            format!("{base}/apps/deploy"),
+            json!({"name":"malformed","artifact_id":"@","triggers":triggers}),
+        ),
+        (
+            "POST",
+            format!("{base}/apps"),
+            json!({"name":"malformed","artifact_id":"@"}),
+        ),
+        (
+            "POST",
+            format!("{base}/apps/{app}/versions"),
+            json!({"artifact_id":"@","expected_revision":revision}),
+        ),
+        (
+            "POST",
+            format!("{base}/apps/{app}/releases"),
+            json!({"version_id":"@","expected_revision":revision}),
+        ),
+        (
+            "PUT",
+            format!("{base}/apps/{app}/connections"),
+            json!({"connections":[{"connection_id":"@"}],"expected_revision":revision}),
+        ),
+    ];
+    for (method, path, body) in &cases {
+        // No id at all: too short, not hexadecimal, upper case, not a string.
+        for malformed in [
+            json!("abc"),
+            json!("z".repeat(32)),
+            json!("A".repeat(32)),
+            json!(7),
+        ] {
+            let body = serde_json::from_str::<Value>(
+                &body.to_string().replace("\"@\"", &malformed.to_string()),
+            )
+            .unwrap();
+            let (status, answer) = call(&l, token, method, path, body, &uid()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {answer}");
+            assert_eq!(answer["code"], "invalid_request");
+        }
+        // One that could be an id, and names nothing.
+        let body = serde_json::from_str::<Value>(&body.to_string().replace('@', &uid())).unwrap();
+        let (status, answer) = call(&l, token, method, path, body, &uid()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {answer}");
+    }
+    // What a path names is missing either way: a path names a thing.
+    for path in [
+        format!("{base}/apps/abc"),
+        format!("{base}/artifacts/{}", "Z".repeat(32)),
+        format!("/v1/workspaces/{}/projects/abc/apps", l.tenant),
+    ] {
+        assert_eq!(
+            call(&l, token, "GET", &path, json!({}), "").await.0,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let limits = json!({"concurrent_requests":8,"requests_per_minute":120});
+    assert_eq!(
+        call(
+            &l,
+            &l.token,
+            "PATCH",
+            "/v1/workspaces/abc/http-limits",
+            limits,
+            ""
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn accepted_means_still_pending_and_nothing_else() {
+    let l = Lab::new().await;
+    l.validated().await;
+    let k = key(
+        &l,
+        Some(&l.project),
+        &["read", "apps:write", "runs:write", "connections:write"],
+    )
+    .await;
+    let token = s(&k["token"]);
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
+    // Every change that answers with an operation, as it is first made and
+    // as it is retried: 202 exactly when the operation is pending.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut change = async |method: &str, path: String, body: Value, made: StatusCode| {
+        let key = uid();
+        for attempt in ["first", "retry"] {
+            let (status, op) = call(&l, token, method, &path, body.clone(), &key).await;
+            let expected = if op["state"] == "pending" {
+                StatusCode::ACCEPTED
+            } else {
+                made
+            };
+            assert_eq!(status, expected, "{attempt} {method} {path}: {op}");
+            seen.insert((s(&op["kind"]).to_owned(), s(&op["state"]).to_owned()));
+        }
+        call(&l, token, method, &path, body, &key).await.1
+    };
+    let deploy = |name: &str, http: bool| json!({"name":name,"artifact_id":l.artifact,"triggers":{"manual":true,"http":http}});
+    // With no node, an HTTP app waits for one; a command app needs none.
+    let web = change(
+        "POST",
+        format!("{base}/apps/deploy"),
+        deploy("web", true),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(web["state"], "pending");
+    let app = change(
+        "POST",
+        format!("{base}/apps/deploy"),
+        deploy("job", false),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(app["state"], "succeeded");
+    let app = s(&app["resource_id"]).to_owned();
+    let revision = async || {
+        l.store
+            .app(&l.operator, &l.tenant, &l.project, &app)
+            .await
+            .unwrap()["revision"]
+            .clone()
+    };
+    let connection = change(
+        "POST",
+        format!("{base}/connections"),
+        json!({"type":"https","name":"example","origin":"https://example.com"}),
+        StatusCode::CREATED,
+    )
+    .await;
+    let run = change(
+        "POST",
+        format!("{base}/apps/{app}/runs"),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(run["state"], "pending");
+    change(
+        "POST",
+        format!("{base}/apps/{app}/runs/{}/cancel", s(&run["resource_id"])),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        "PUT",
+        format!("{base}/apps/{app}/triggers"),
+        json!({"manual":false,"expected_revision":1}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        "PATCH",
+        format!("{base}/apps/{app}"),
+        json!({"desired":"stopped","expected_revision":revision().await}),
+        StatusCode::OK,
+    )
+    .await;
+    // A deletion says its revision in its query, and has no body.
+    let delete = format!("{base}/apps/{app}?expected_revision={}", revision().await);
+    let deleted = uid();
+    for attempt in ["first", "retry"] {
+        let response = api::router(l.store.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&delete)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Idempotency-Key", &deleted)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let op: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        let expected = if op["state"] == "pending" {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(status, expected, "{attempt} DELETE {delete}: {op}");
+        seen.insert((s(&op["kind"]).to_owned(), s(&op["state"]).to_owned()));
+    }
+    // Revoking a connection takes no body.
+    let revoke = format!("{base}/connections/{}", s(&connection["resource_id"]));
+    let revoked = uid();
+    for attempt in ["first", "retry"] {
+        let response = api::router(l.store.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&revoke)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Idempotency-Key", &revoked)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let op: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        let expected = if op["state"] == "pending" {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(status, expected, "{attempt} DELETE {revoke}: {op}");
+        seen.insert((s(&op["kind"]).to_owned(), s(&op["state"]).to_owned()));
+    }
+    // Both were met: an operation pending, and operations made.
+    assert!(seen.iter().any(|(_, state)| state == "pending"), "{seen:?}");
+    assert!(
+        seen.iter().any(|(_, state)| state == "succeeded"),
+        "{seen:?}"
+    );
+    assert!(seen.len() >= 8, "{seen:?}");
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn the_api_has_one_name_for_a_thing() {
+    let l = Lab::new().await;
+    let k = key(&l, None, &["read", "connections:write"]).await;
+    let token = s(&k["token"]);
+    let tenants = format!("/v1/tenants/{}", l.tenant);
+    let workspace = format!("/v1/workspaces/{}", l.tenant);
+    // A workspace was once also a tenant, and a connection an external
+    // endpoint. Those names are no routes now, to a key or the operator.
+    for (method, path) in [
+        ("GET", "/v1/tenants".to_owned()),
+        ("POST", "/v1/tenants".to_owned()),
+        ("GET", format!("{tenants}/projects")),
+        ("GET", format!("{tenants}/projects/{}/apps", l.project)),
+        ("GET", format!("{tenants}/api-keys")),
+        ("POST", format!("{tenants}/lifecycle")),
+        (
+            "GET",
+            format!("{workspace}/projects/{}/external-endpoints", l.project),
+        ),
+        (
+            "POST",
+            format!("{workspace}/projects/{}/external-endpoints", l.project),
+        ),
+    ] {
+        let as_operator = call(&l, &l.token, method, &path, json!({}), "k").await;
+        assert_eq!(as_operator.0, StatusCode::NOT_FOUND, "{method} {path}");
+        let as_key = call(&l, token, method, &path, json!({}), "k").await;
+        assert!(
+            matches!(as_key.0, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN),
+            "{method} {path}: {}",
+            as_key.0
+        );
+    }
+    // The operator's routes are where the workspace's are.
+    let workspaces = call(&l, &l.token, "GET", "/v1/workspaces", json!({}), "").await;
+    assert_eq!(workspaces.0, StatusCode::OK);
+    let keys = call(
+        &l,
+        &l.token,
+        "GET",
+        &format!("{workspace}/api-keys"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(keys.0, StatusCode::OK, "{}", keys.1);
+    let limits = json!({"concurrent_requests":8,"requests_per_minute":120});
+    let limited = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &format!("{workspace}/http-limits"),
+        limits.clone(),
+        "",
+    )
+    .await;
+    assert_eq!(limited.0, StatusCode::OK, "{}", limited.1);
+    // And a key is refused them there, as it was.
+    for (method, path, body) in [
+        ("GET", format!("{workspace}/api-keys"), json!({})),
+        ("PATCH", format!("{workspace}/http-limits"), limits),
+        ("POST", "/v1/workspaces".to_owned(), json!({})),
+        (
+            "PATCH",
+            workspace.clone(),
+            json!({"default_app_size":"large"}),
+        ),
+    ] {
+        let refused = call(&l, token, method, &path, body, "k").await;
+        assert_eq!(refused.0, StatusCode::FORBIDDEN, "{method} {path}");
+        assert_eq!(refused.1["code"], "permission_denied");
+    }
+    // A connection is a connection, to make and to read.
+    let connections = format!("{workspace}/projects/{}/connections", l.project);
+    let made = call(
+        &l,
+        token,
+        "POST",
+        &connections,
+        json!({"type":"https","name":"example","origin":"https://example.com"}),
+        "connect",
+    )
+    .await;
+    assert_eq!(made.0, StatusCode::CREATED, "{}", made.1);
+    let read = call(
+        &l,
+        token,
+        "GET",
+        &format!("{connections}/{}", s(&made.1["resource_id"])),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(read.0, StatusCode::OK, "{}", read.1);
+    assert_eq!(read.1["name"], "example");
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn an_operation_says_what_was_asked_and_nothing_of_who_asked() {
+    let l = Lab::new().await;
+    let app = l.command_app().await;
+    let writer = key(&l, Some(&l.project), &["read", "runs:write"]).await;
+    let reader = key(&l, Some(&l.project), &["read"]).await;
+    let (writer, reader) = (s(&writer["token"]), s(&reader["token"]));
+    let base = format!("/v1/workspaces/{}/projects/{}", l.tenant, l.project);
+    let (status, run) = call(
+        &l,
+        writer,
+        "POST",
+        &format!("{base}/apps/{app}/runs"),
+        json!({}),
+        "the writer's own key",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    let names = |operation: &Value| {
+        operation
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let shown = "created,error,id,kind,resource_id,state,updated";
+    assert_eq!(names(&run), shown);
+    let cancel = format!("{base}/apps/{app}/runs/{}/cancel", s(&run["resource_id"]));
+    let (_, cancelled) = call(&l, writer, "POST", &cancel, json!({}), "cancel it").await;
+    assert_eq!(names(&cancelled), shown);
+
+    // Another key of the project reads the operations: what was done, and
+    // not the keys the writer made its requests with.
+    let (status, listed) = call(
+        &l,
+        reader,
+        "GET",
+        &format!("{base}/operations"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = listed["items"].as_array().unwrap();
+    assert!(listed.len() >= 2);
+    for operation in listed {
+        assert_eq!(names(operation), shown);
+    }
+    let text = Value::Array(listed.clone()).to_string();
+    assert!(!text.contains("the writer's own key") && !text.contains("cancel it"));
+    // The cancellation is read as it was answered, wherever it is read.
+    let read = listed
+        .iter()
+        .find(|operation| operation["id"] == cancelled["id"])
+        .unwrap();
+    assert_eq!(read["kind"], "cancel-run");
+    assert_eq!(read["resource_id"], run["resource_id"]);
+    let (_, one) = call(
+        &l,
+        reader,
+        "GET",
+        &format!("{base}/operations/{}", s(&cancelled["id"])),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(&one, read);
+    // By the key it was made with, through the app it was made of.
+    let (status, found) = call(
+        &l,
+        reader,
+        "GET",
+        &format!("{base}/apps/{app}/submissions/cancel%20it"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(&found, read);
+
+    // A workspace is a workspace in what is answered, as in what is asked.
+    let (_, me) = call(&l, reader, "GET", "/v1/me", json!({}), "").await;
+    assert_eq!(me["workspace_id"], l.tenant);
+    assert!(me.get("tenant_id").is_none());
+    let (_, read) = call(
+        &l,
+        reader,
+        "GET",
+        &format!("{base}/apps/{app}"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(read["workspace_id"], l.tenant);
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn every_list_is_pages_of_items_newest_first() {
+    let l = Lab::new().await;
+    let operator = l.token.clone();
+    let workspace = format!("/v1/workspaces/{}", l.tenant);
+    let project = format!("{workspace}/projects/{}", l.project);
+    // Three of each kind of thing, beside what the lab has.
+    for n in 0..3 {
+        let allowance = json!({"cpu_percent":100,"memory_mib":512,"storage_bytes":1048576,"instances":1,"transfer_bytes":1048576});
+        for (path, body) in [
+            (
+                "/v1/workspaces".to_owned(),
+                json!({"name":format!("w{n}"),"allowance":allowance}),
+            ),
+            (
+                format!("{workspace}/projects"),
+                json!({"name":format!("Project {n}")}),
+            ),
+            (
+                format!("{project}/secrets"),
+                json!({"name":format!("secret-{n}"),"value":"value"}),
+            ),
+            (
+                format!("{project}/connections"),
+                json!({"type":"https","name":format!("origin-{n}"),"origin":format!("https://o{n}.example.com")}),
+            ),
+            (
+                format!("{workspace}/api-keys"),
+                json!({"name":format!("key-{n}"),"permissions":["read"],"ttl_seconds":60}),
+            ),
+            (
+                "/v1/nodes".to_owned(),
+                json!({"name":format!("node-{n}"),"cert_sha256":format!("{n}").repeat(64),"endpoint":format!("https://node-{n}.internal:9443"),"backend":"wasm","architecture":"x86_64","runtime":"wasmtime-50.0.0-fenders-v1","cpu_percent":200,"memory_mib":1024,"instances":4}),
+            ),
+        ] {
+            let made = call(&l, &operator, "POST", &path, body, &uid()).await;
+            assert!(made.0.is_success(), "POST {path}: {}", made.1);
+        }
+        l.store
+            .upload(
+                &l.operator,
+                &l.tenant,
+                &l.project,
+                format!("\0asm\x0d\0\x01\0 {n}").as_bytes(),
+            )
+            .await
+            .unwrap();
+    }
+    for list in [
+        "/v1/workspaces".to_owned(),
+        format!("{workspace}/projects"),
+        format!("{workspace}/api-keys"),
+        "/v1/nodes".to_owned(),
+        format!("{project}/artifacts"),
+        format!("{project}/secrets"),
+        format!("{project}/connections"),
+        format!("{project}/operations"),
+    ] {
+        // All at once: items, and no page after them.
+        let (status, whole) = call(&l, &operator, "GET", &list, json!({}), "").await;
+        assert_eq!(status, StatusCode::OK, "{list}: {whole}");
+        assert!(whole["next"].is_null(), "{list}");
+        let whole: Vec<Value> = whole["items"].as_array().unwrap().clone();
+        assert!(whole.len() >= 3, "{list}: {}", whole.len());
+        // Newest first.
+        let created: Vec<&str> = whole.iter().map(|item| s(&item["created"])).collect();
+        assert!(
+            created.windows(2).all(|pair| pair[0] >= pair[1]),
+            "{list}: {created:?}"
+        );
+        // The same by twos: each page's next continues it, and the last has none.
+        let mut walked = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let path = match &cursor {
+                Some(cursor) => format!("{list}?limit=2&before={cursor}"),
+                None => format!("{list}?limit=2"),
+            };
+            let (status, page) = call(&l, &operator, "GET", &path, json!({}), "").await;
+            assert_eq!(status, StatusCode::OK, "{path}: {page}");
+            let items = page["items"].as_array().unwrap();
+            assert!(items.len() <= 2 && !items.is_empty(), "{path}");
+            walked.extend(items.iter().cloned());
+            match page["next"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break,
+            }
+            assert_eq!(items.len(), 2, "{path}: a page with a next is a full one");
+            assert!(walked.len() <= whole.len(), "{list} does not end");
+        }
+        assert_eq!(walked, whole, "{list}");
+        // What a list takes, and nothing else.
+        for (query, status) in [
+            ("limit=0", StatusCode::BAD_REQUEST),
+            ("limit=101", StatusCode::BAD_REQUEST),
+            ("limit=many", StatusCode::BAD_REQUEST),
+            ("before=not-a-cursor", StatusCode::BAD_REQUEST),
+            ("offset=2", StatusCode::BAD_REQUEST),
+            ("limit=100", StatusCode::OK),
+        ] {
+            let path = format!("{list}?{query}");
+            assert_eq!(
+                call(&l, &operator, "GET", &path, json!({}), "").await.0,
+                status,
+                "{path}"
+            );
+        }
+        // A cursor that names nothing has nothing after it.
+        let (status, page) = call(
+            &l,
+            &operator,
+            "GET",
+            &format!("{list}?before={}", uid()),
+            json!({}),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page, json!({"items":[],"next":null}), "{list}");
+    }
+    // A key's lists are its own, paged the same.
+    let k = key(&l, None, &["read"]).await;
+    let (_, mine) = call(&l, s(&k["token"]), "GET", "/v1/workspaces", json!({}), "").await;
+    assert_eq!(mine["items"].as_array().unwrap().len(), 1);
+    assert_eq!(mine["items"][0]["id"], l.tenant);
+    assert!(mine["next"].is_null());
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_change_names_the_revision_it_was_decided_on() {
+    let l = Lab::new().await;
+    let app = l.command_app().await;
+    let k = key(&l, None, &["read", "apps:write"]).await;
+    let token = s(&k["token"]);
+    let route = format!(
+        "/v1/workspaces/{}/projects/{}/apps/{app}",
+        l.tenant, l.project
+    );
+    let (_, read) = call(&l, token, "GET", &route, json!({}), "").await;
+    let revision = read["revision"].as_i64().unwrap();
+    let delete = |query: String, body: Option<Value>| {
+        let (l, route) = (&l, route.clone());
+        async move {
+            let mut request = Request::builder()
+                .method("DELETE")
+                .uri(format!("{route}{query}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Idempotency-Key", uid());
+            let body = match body {
+                Some(body) => {
+                    request = request.header("Content-Type", "application/json");
+                    Body::from(body.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = api::router(l.store.clone())
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                    .unwrap();
+            (status, body)
+        }
+    };
+    // A deletion has no body: the revision it is of is in its query. One
+    // in a body, as it once was sent, is not read.
+    let in_body = delete(String::new(), Some(json!({"expected_revision":revision}))).await;
+    assert_eq!(in_body.0, StatusCode::BAD_REQUEST, "{}", in_body.1);
+    for query in [
+        "",
+        "?expected_revision=",
+        "?expected_revision=soon",
+        "?revision=1",
+    ] {
+        assert_eq!(
+            delete(query.to_owned(), None).await.0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+    let stale = delete(format!("?expected_revision={}", revision + 1), None).await;
+    assert_eq!(stale.0, StatusCode::CONFLICT);
+    assert_eq!(stale.1["code"], "revision_conflict");
+    let (_, still) = call(&l, token, "GET", &route, json!({}), "").await;
+    assert_eq!(still["revision"], revision);
+    let deleted = delete(format!("?expected_revision={revision}"), None).await;
+    assert!(deleted.0.is_success(), "{}", deleted.1);
+    assert_eq!(deleted.1["kind"], "delete-app");
+    assert_eq!(
+        call(&l, token, "GET", &route, json!({}), "").await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // A workspace's allowance has a revision too, which the operator's
+    // change may name: then one decided on an allowance since changed is
+    // refused, where without it the later change silently wins.
+    let workspace = format!("/v1/workspaces/{}", l.tenant);
+    let (_, listed) = call(&l, &l.token, "GET", "/v1/workspaces", json!({}), "").await;
+    let current = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["id"] == l.tenant)
+        .unwrap()["allowance_revision"]
+        .as_i64()
+        .unwrap();
+    let allowance = |instances: i64| json!({"cpu_percent":400,"memory_mib":4096,"instances":instances,"storage_bytes":20000000000i64,"transfer_bytes":10000000});
+    let first = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &workspace,
+        json!({"allowance":allowance(5),"expected_revision":current}),
+        "",
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(first.1["allowance_revision"], current + 1);
+    let stale = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &workspace,
+        json!({"allowance":allowance(6),"expected_revision":current}),
+        "",
+    )
+    .await;
+    assert_eq!(stale.0, StatusCode::CONFLICT, "{}", stale.1);
+    assert_eq!(stale.1["code"], "revision_conflict");
+    // Without one the change is made, as it was.
+    let unguarded = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &workspace,
+        json!({"allowance":allowance(6)}),
+        "",
+    )
+    .await;
+    assert_eq!(unguarded.0, StatusCode::OK, "{}", unguarded.1);
+    assert_eq!(unguarded.1["instances"], 6);
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn whether_it_is_up_and_can_serve_is_asked_without_a_credential() {
+    let l = Lab::new().await;
+    let probe = |path: &'static str, token: Option<&'static str>| {
+        let l = &l;
+        async move {
+            let mut request = Request::builder().uri(path);
+            if let Some(token) = token {
+                request = request.header("Authorization", format!("Bearer {token}"));
+            }
+            let response = api::router(l.store.clone())
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                    .unwrap();
+            super::contract::conforms("GET", path, status, &body);
+            (status, headers, body)
+        }
+    };
+    // No credential, and one that opens nothing, are answered the same.
+    for token in [None, Some("fnd_tok_nothing")] {
+        let (status, headers, body) = probe("/healthz", token).await;
+        assert_eq!((status, &body), (StatusCode::OK, &json!({"status":"ok"})));
+        assert_eq!(headers["cache-control"], "no-store");
+        let (status, _, body) = probe("/readyz", token).await;
+        assert_eq!(
+            (status, &body),
+            (StatusCode::OK, &json!({"status":"ready"}))
+        );
+    }
+    // Nothing else is, and these are only at the root, only by GET.
+    for (method, path) in [
+        ("GET", "/v1/healthz"),
+        ("GET", "/health"),
+        ("POST", "/healthz"),
+        ("GET", "/v1/control-plane/status"),
+    ] {
+        let response = api::router(l.store.clone())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {path}"
+        );
+    }
+    // After a restore, until the operator activates it, no change is
+    // admitted: it is up, and not ready. It says only that.
+    sqlx::query("UPDATE recovery_barrier SET active=true")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let (status, _, body) = probe("/readyz", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body, json!({"status":"unavailable"}));
+    assert_eq!(probe("/healthz", None).await.0, StatusCode::OK);
+    sqlx::query("UPDATE recovery_barrier SET active=false")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(probe("/readyz", None).await.0, StatusCode::OK);
+    // A database that is not there: up, and not ready.
+    l.store.pool.close().await;
+    assert_eq!(probe("/healthz", None).await.0, StatusCode::OK);
+    assert_eq!(
+        probe("/readyz", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    sqlx::query(&format!("DROP SCHEMA {} CASCADE", l.schema))
+        .execute(&l.admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_workspace_is_read_by_itself() {
+    let l = Lab::new().await;
+    let route = format!("/v1/workspaces/{}", l.tenant);
+    let (status, mine) = call(&l, &l.token, "GET", &route, json!({}), "").await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["id"], l.tenant);
+    assert_eq!(mine["name"], "alpha");
+    assert_eq!(mine["lifecycle_revision"], 1);
+    // It is the workspace the list has.
+    let (_, listed) = call(&l, &l.token, "GET", "/v1/workspaces", json!({}), "").await;
+    assert_eq!(listed["items"][0], mine);
+    // A key reads its own, without what is the operator's; one of a
+    // project reads the workspace its project is of.
+    for scope in [None, Some(l.project.as_str())] {
+        let k = key(&l, scope, &["read"]).await;
+        let (status, read) = call(&l, s(&k["token"]), "GET", &route, json!({}), "").await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["id"], l.tenant);
+        assert_eq!(read["instances"], mine["instances"]);
+        for operators in [
+            "lifecycle_revision",
+            "lifecycle_reason",
+            "allowance_revision",
+        ] {
+            assert!(read.get(operators).is_none(), "{operators}");
+        }
+    }
+    // Another's, and one that is none, do not exist to it or to anyone.
+    let other = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/workspaces",
+        json!({"name":"other","allowance":{"cpu_percent":100,"memory_mib":512,"storage_bytes":1048576,"instances":1,"transfer_bytes":1048576}}),
+        "other",
+    )
+    .await;
+    let k = key(&l, None, &["read"]).await;
+    for (token, id, expected) in [
+        (
+            s(&k["token"]),
+            s(&other.1["id"]).to_owned(),
+            StatusCode::NOT_FOUND,
+        ),
+        (s(&k["token"]), uid(), StatusCode::NOT_FOUND),
+        (l.token.as_str(), uid(), StatusCode::NOT_FOUND),
+        (l.token.as_str(), "abc".to_owned(), StatusCode::NOT_FOUND),
+        (
+            l.token.as_str(),
+            s(&other.1["id"]).to_owned(),
+            StatusCode::OK,
+        ),
+    ] {
+        let status = call(
+            &l,
+            token,
+            "GET",
+            &format!("/v1/workspaces/{id}"),
+            json!({}),
+            "",
+        )
+        .await
+        .0;
+        assert_eq!(status, expected, "{id}");
+    }
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_workspaces_audit_trail_is_read_by_the_operator_and_by_its_keys() {
+    let l = Lab::new().await;
+    let workspace = format!("/v1/workspaces/{}", l.tenant);
+    let project = format!("{workspace}/projects/{}", l.project);
+    let issue = |label: &'static str, scope: Option<String>| {
+        let (l, workspace) = (&l, workspace.clone());
+        async move {
+            let (status, key) = call(
+                l,
+                &l.token,
+                "POST",
+                &format!("{workspace}/api-keys"),
+                json!({"name":"audited","project_id":scope,"permissions":["read","secrets:write","connections:write"],"ttl_seconds":3600,"label":label}),
+                &uid(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{key}");
+            key
+        }
+    };
+    let alice = issue("user:alice", None).await;
+    let bob = issue("user:bob", Some(l.project.clone())).await;
+    let (alice_token, bob_token) = (s(&alice["token"]), s(&bob["token"]));
+    // Alice and Bob each do something in the project; the operator
+    // changes the workspace's limits.
+    for (token, name) in [(alice_token, "alice-secret"), (bob_token, "bob-secret")] {
+        let made = call(
+            &l,
+            token,
+            "POST",
+            &format!("{project}/secrets"),
+            json!({"name":name,"value":"hunter22"}),
+            &uid(),
+        )
+        .await;
+        assert_eq!(made.0, StatusCode::CREATED, "{}", made.1);
+    }
+    let limited = call(
+        &l,
+        &l.token,
+        "PATCH",
+        &format!("{workspace}/http-limits"),
+        json!({"concurrent_requests":8,"requests_per_minute":120}),
+        "",
+    )
+    .await;
+    assert_eq!(limited.0, StatusCode::OK);
+    let trail = |token: &'static str, query: &'static str| {
+        let (l, workspace) = (&l, workspace.clone());
+        let token = match token {
+            "operator" => l.token.clone(),
+            "alice" => alice_token.to_owned(),
+            _ => bob_token.to_owned(),
+        };
+        async move {
+            let (status, page) = call(
+                l,
+                &token,
+                "GET",
+                &format!("{workspace}/audit{query}"),
+                json!({}),
+                "",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{query}: {page}");
+            page
+        }
+    };
+    let actions = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| s(&record["action"]).to_owned())
+            .collect()
+    };
+
+    // The operator reads all of it, newest first, each record whole.
+    let all = trail("operator", "").await;
+    let items = all["items"].as_array().unwrap();
+    let sequences: Vec<i64> = items
+        .iter()
+        .map(|r| r["sequence"].as_i64().unwrap())
+        .collect();
+    assert!(
+        sequences.windows(2).all(|pair| pair[0] > pair[1]),
+        "{sequences:?}"
+    );
+    assert_eq!(items[0]["action"], "tenant.http-limits");
+    assert_eq!(items[0]["actor"], l.operator.id);
+    assert_eq!(items[0]["detail"]["concurrent_requests"], 8);
+    let by_bob = &items[1];
+    assert_eq!(by_bob["action"], "secret.create");
+    assert_eq!(by_bob["actor"], bob["id"]);
+    assert_eq!(by_bob["actor_label"], "user:bob");
+    assert_eq!(by_bob["project_id"], l.project);
+    assert!(!all.to_string().contains("hunter22"));
+    // What was done in no project has none.
+    assert!(items[0]["project_id"].is_null());
+
+    // Alice's key reads the same trail. What keys of her workspace did is
+    // whole, the label of each on it: that is how a product tells its
+    // users apart. What the operator did happened, and is the operator's.
+    let hers = trail("alice", "").await;
+    let hers = hers["items"].as_array().unwrap();
+    assert_eq!(hers.len(), items.len());
+    assert_eq!(hers[1], *by_bob);
+    assert_eq!(hers[2]["actor_label"], "user:alice");
+    let operators = &hers[0];
+    assert_eq!(operators["action"], "tenant.http-limits");
+    assert_eq!(operators["sequence"], items[0]["sequence"]);
+    assert_eq!(operators["actor"], "operator");
+    assert!(operators["detail"].is_null() && operators["actor_label"].is_null());
+    assert!(
+        !Value::Array(hers.clone())
+            .to_string()
+            .contains(&l.operator.id)
+    );
+
+    // Bob's key is of one project: it reads what was done in that project.
+    let his = trail("bob", "").await;
+    // The two secrets, the component the lab uploaded there, and the
+    // issuing of his own key for it; nothing of the workspace at large.
+    assert_eq!(
+        actions(&his),
+        [
+            "secret.create",
+            "secret.create",
+            "api-key.create",
+            "artifact.upload"
+        ]
+    );
+    assert!(
+        !actions(&his)
+            .iter()
+            .any(|action| action.starts_with("tenant.") || action == "project.create")
+    );
+    assert!(
+        his["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record["project_id"] == l.project)
+    );
+
+    // By action, by label, by time; and by pages.
+    assert_eq!(
+        actions(&trail("alice", "?action=secret.create").await).len(),
+        2
+    );
+    let labelled = trail("operator", "?actor_label=user:alice").await;
+    assert_eq!(actions(&labelled), ["secret.create"]);
+    assert_eq!(labelled["items"][0]["actor"], alice["id"]);
+    assert!(
+        trail("operator", "?actor_label=user:nobody").await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        trail("operator", "?until=2000-01-01T00:00:00Z").await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        trail("operator", "?since=2000-01-01T00:00:00Z").await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        items.len()
+    );
+    let first = trail("operator", "?limit=2").await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    let cursor = s(&first["next"]).to_owned();
+    let (_, second) = call(
+        &l,
+        &l.token,
+        "GET",
+        &format!("{workspace}/audit?limit=2&before={cursor}"),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(second["items"][0], items[2]);
+    let mut walked = 0;
+    let mut cursor: Option<String> = None;
+    loop {
+        let query = cursor.map_or("?limit=3".to_owned(), |c| format!("?limit=3&before={c}"));
+        let (_, page) = call(
+            &l,
+            &l.token,
+            "GET",
+            &format!("{workspace}/audit{query}"),
+            json!({}),
+            "",
+        )
+        .await;
+        walked += page["items"].as_array().unwrap().len();
+        match page["next"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    assert_eq!(walked, items.len());
+
+    // Malformed, and not its own.
+    for query in [
+        "?limit=0",
+        "?before=soon",
+        "?since=yesterday",
+        "?actor=x",
+        "?action=",
+    ] {
+        let refused = call(
+            &l,
+            alice_token,
+            "GET",
+            &format!("{workspace}/audit{query}"),
+            json!({}),
+            "",
+        )
+        .await;
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST, "{query}");
+    }
+    let other = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/workspaces",
+        json!({"name":"other","allowance":{"cpu_percent":100,"memory_mib":512,"storage_bytes":1048576,"instances":1,"transfer_bytes":1048576}}),
+        "other",
+    )
+    .await;
+    for (token, expected) in [
+        (alice_token, StatusCode::NOT_FOUND),
+        (l.token.as_str(), StatusCode::OK),
+    ] {
+        let read = call(
+            &l,
+            token,
+            "GET",
+            &format!("/v1/workspaces/{}/audit", s(&other.1["id"])),
+            json!({}),
+            "",
+        )
+        .await;
+        assert_eq!(read.0, expected);
+    }
+    let nothing = call(
+        &l,
+        &l.token,
+        "GET",
+        &format!("/v1/workspaces/{}/audit", uid()),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(nothing.0, StatusCode::NOT_FOUND);
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_secret_is_given_another_value_and_deleted_when_nothing_names_it() {
+    let l = Lab::new().await;
+    let node = l.node("worker").await;
+    let k = key(&l, Some(&l.project), &["read", "secrets:write"]).await;
+    let token = s(&k["token"]);
+    let secrets = format!("/v1/workspaces/{}/projects/{}/secrets", l.tenant, l.project);
+    let (status, made) = call(
+        &l,
+        token,
+        "POST",
+        &secrets,
+        json!({"name":"token","value":"first-value"}),
+        "make",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    let id = s(&made["id"]).to_owned();
+    let route = format!("{secrets}/{id}");
+
+    // Another value: the same secret, by id and by name.
+    let (status, rotated) = call(
+        &l,
+        token,
+        "PUT",
+        &route,
+        json!({"value":"second-value"}),
+        "rotate",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rotated}");
+    assert_eq!(rotated, made);
+    assert!(!rotated.to_string().contains("value"));
+    // A retry is the first answer, whatever it carries, and changes nothing:
+    // were it compared with what is stored, it would say whether a guess
+    // was right.
+    let (status, again) = call(
+        &l,
+        token,
+        "PUT",
+        &route,
+        json!({"value":"a-guess-at-it"}),
+        "rotate",
+    )
+    .await;
+    assert_eq!((status, &again), (StatusCode::OK, &rotated));
+    // A run started now is given the value it has now.
+    let app = l
+        .try_configured_app(json!({"secret_env":{"TOKEN":id}}))
+        .await
+        .unwrap();
+    let op = l.start_app(&app, "run").await.unwrap();
+    l.store.schedule().await.unwrap();
+    let e = l.run(&op).await;
+    let given = l
+        .store
+        .assignment(s(&node["id"]), s(&e["id"]), n(&e["generation"]))
+        .await
+        .unwrap()["spec"]["env"]["TOKEN"]
+        .clone();
+    assert_eq!(given, "second-value");
+    // What a value must be, as when it was made; and a secret that is none.
+    for (path, body, expected) in [
+        (
+            route.clone(),
+            json!({"value":"abc"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            route.clone(),
+            json!({"name":"other","value":"long-enough"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!("{secrets}/{}", uid()),
+            json!({"value":"long-enough"}),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            call(&l, token, "PUT", &path, body, &uid()).await.0,
+            expected,
+            "{path}"
+        );
+    }
+
+    // It is named by an app's release and held by a run: not to be deleted.
+    let delete = |path: String, key: &'static str| {
+        let l = &l;
+        async move {
+            let response = api::router(l.store.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(&path)
+                        .header("Authorization", format!("Bearer {token}"))
+                        .header("Idempotency-Key", key)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                    .unwrap();
+            super::contract::conforms("DELETE", &path, status, &body);
+            (status, body)
+        }
+    };
+    let held = delete(route.clone(), "delete-held").await;
+    assert_eq!(held.0, StatusCode::CONFLICT, "{}", held.1);
+    assert_eq!(held.1["code"], "in_use");
+    assert_eq!(
+        call(&l, token, "GET", &route, json!({}), "").await.0,
+        StatusCode::OK
+    );
+
+    // One that nothing names goes, value and all.
+    let (_, spare) = call(
+        &l,
+        token,
+        "POST",
+        &secrets,
+        json!({"name":"spare","value":"spare-value"}),
+        "spare",
+    )
+    .await;
+    let spare_route = format!("{secrets}/{}", s(&spare["id"]));
+    let gone = delete(spare_route.clone(), "delete-spare").await;
+    assert_eq!(gone.0, StatusCode::OK, "{}", gone.1);
+    assert_eq!(gone.1, json!({"id":spare["id"]}));
+    assert_eq!(
+        call(&l, token, "GET", &spare_route, json!({}), "").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM secrets WHERE id=$1")
+        .bind(s(&spare["id"]))
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    // The retry is the first answer; another request for it finds nothing.
+    assert_eq!(delete(spare_route.clone(), "delete-spare").await, gone);
+    assert_eq!(
+        delete(spare_route, "delete-again").await.0,
+        StatusCode::NOT_FOUND
+    );
+    // Its name is free again.
+    let (status, _) = call(
+        &l,
+        token,
+        "POST",
+        &secrets,
+        json!({"name":"spare","value":"another-one"}),
+        "spare-2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // Both changes are in the trail, and no value is.
+    let recorded: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM audit WHERE action LIKE 'secret.%' ORDER BY sequence",
+    )
+    .fetch_all(&l.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded,
+        [
+            "secret.create",
+            "secret.rotate",
+            "secret.create",
+            "secret.delete",
+            "secret.create"
+        ]
+    );
+    let reader = key(&l, Some(&l.project), &["read"]).await;
+    assert_eq!(
+        call(
+            &l,
+            s(&reader["token"]),
+            "PUT",
+            &route,
+            json!({"value":"long-enough"}),
+            "no"
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    l.finish().await;
+}
+
+/// A request with no body, as a deletion is, checked against the contract.
+async fn bare(l: &Lab, token: &str, method: &str, path: &str, key: &str) -> (StatusCode, Value) {
+    let response = api::router(l.store.clone())
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Idempotency-Key", key)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    super::contract::conforms(method, path, status, &body);
+    (status, body)
+}
+
+#[tokio::test]
+async fn an_artifact_that_is_no_apps_code_is_deleted_and_its_storage_returned() {
+    let l = Lab::new().await;
+    let k = key(&l, Some(&l.project), &["read", "apps:write"]).await;
+    let token = s(&k["token"]);
+    let artifacts = format!(
+        "/v1/workspaces/{}/projects/{}/artifacts",
+        l.tenant, l.project
+    );
+    let component = b"\0asm\x0d\0\x01\0 one that is never deployed".to_vec();
+    let unused = l
+        .store
+        .upload(&l.operator, &l.tenant, &l.project, &component)
+        .await
+        .unwrap();
+    let unused_id = s(&unused["id"]).to_owned();
+    let stored = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(sum(bytes),0)::bigint FROM storage_reservations WHERE tenant_id=$1",
+        )
+        .bind(&l.tenant)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap()
+    };
+    let before = stored().await;
+    // The lab's own component becomes an app's code.
+    l.command_app().await;
+    let used = bare(
+        &l,
+        token,
+        "DELETE",
+        &format!("{artifacts}/{}", l.artifact),
+        "used",
+    )
+    .await;
+    assert_eq!(used.0, StatusCode::CONFLICT, "{}", used.1);
+    assert_eq!(used.1["code"], "in_use");
+
+    let route = format!("{artifacts}/{unused_id}");
+    let gone = bare(&l, token, "DELETE", &route, "unused").await;
+    assert_eq!(gone.0, StatusCode::OK, "{}", gone.1);
+    assert_eq!(gone.1, json!({"id":unused_id}));
+    // Its storage is the workspace's again at once.
+    assert_eq!(stored().await, before - component.len() as i64);
+    assert_eq!(
+        call(&l, token, "GET", &route, json!({}), "").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, listed) = call(&l, token, "GET", &artifacts, json!({}), "").await;
+    let ids: Vec<&str> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| s(&a["id"]))
+        .collect();
+    assert_eq!(ids, [l.artifact.as_str()]);
+    // Its bytes go when the control plane next clears what nothing has.
+    let blob = l.root.path().join("blobs").join(s(&unused["digest"]));
+    assert!(blob.exists());
+    l.store.schedule().await.unwrap();
+    assert!(!blob.exists());
+    // A retry is the first answer; asked anew, there is nothing to delete.
+    assert_eq!(bare(&l, token, "DELETE", &route, "unused").await, gone);
+    assert_eq!(
+        bare(&l, token, "DELETE", &route, "anew").await.0,
+        StatusCode::NOT_FOUND
+    );
+    // The same bytes uploaded again are the same artifact, back.
+    let back = l
+        .store
+        .upload(&l.operator, &l.tenant, &l.project, &component)
+        .await
+        .unwrap();
+    assert_eq!(back["id"], unused["id"]);
+    assert!(blob.exists());
+    assert_eq!(stored().await, before);
+    // A key that may only read deletes nothing.
+    let reader = key(&l, Some(&l.project), &["read"]).await;
+    assert_eq!(
+        bare(&l, s(&reader["token"]), "DELETE", &route, "no")
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit WHERE action='artifact.delete' AND resource_id=$1",
+    )
+    .bind(&unused_id)
+    .fetch_one(&l.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(recorded, 1);
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_project_is_renamed_and_one_that_holds_nothing_is_deleted() {
+    let l = Lab::new().await;
+    let k = key(&l, None, &["read", "projects:write", "secrets:write"]).await;
+    let token = s(&k["token"]);
+    let projects = format!("/v1/workspaces/{}/projects", l.tenant);
+    let (status, made) = call(
+        &l,
+        token,
+        "POST",
+        &projects,
+        json!({"name":"Staging EU"}),
+        "make",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    let id = s(&made["id"]).to_owned();
+    let route = format!("{projects}/{id}");
+
+    // Another name, and the slug made of it.
+    let (status, renamed) = call(
+        &l,
+        token,
+        "PATCH",
+        &route,
+        json!({"name":"  Staging US  "}),
+        "rename",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(
+        (s(&renamed["name"]), s(&renamed["slug"])),
+        ("Staging US", "staging-us")
+    );
+    assert_eq!(renamed["id"], made["id"]);
+    assert_eq!(
+        call(
+            &l,
+            token,
+            "PATCH",
+            &route,
+            json!({"name":"  Staging US  "}),
+            "rename"
+        )
+        .await
+        .1,
+        renamed
+    );
+    // A name another project has, in any spelling of it, is that project's.
+    let taken = call(&l, token, "PATCH", &route, json!({"name":"APP"}), "taken").await;
+    assert_eq!(taken.0, StatusCode::CONFLICT, "{}", taken.1);
+    assert_eq!(taken.1["code"], "already_exists");
+    for (path, body, expected) in [
+        (route.clone(), json!({"name":"x"}), StatusCode::BAD_REQUEST),
+        (
+            route.clone(),
+            json!({"slug":"mine"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!("{projects}/{}", uid()),
+            json!({"name":"Nothing"}),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            call(&l, token, "PATCH", &path, body, &uid()).await.0,
+            expected,
+            "{path}"
+        );
+    }
+
+    // A project that holds something is not deleted, nor is the default.
+    let (_, secret) = call(
+        &l,
+        token,
+        "POST",
+        &format!("{route}/secrets"),
+        json!({"name":"held","value":"held-value"}),
+        "held",
+    )
+    .await;
+    let holding = bare(&l, token, "DELETE", &route, "holding").await;
+    assert_eq!(holding.0, StatusCode::CONFLICT, "{}", holding.1);
+    assert_eq!(holding.1["code"], "in_use");
+    let (_, listed) = call(&l, token, "GET", &projects, json!({}), "").await;
+    let default = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["is_default"] == true)
+        .unwrap()["id"]
+        .clone();
+    let refused = bare(
+        &l,
+        token,
+        "DELETE",
+        &format!("{projects}/{}", s(&default)),
+        "default",
+    )
+    .await;
+    assert_eq!(refused.0, StatusCode::CONFLICT, "{}", refused.1);
+
+    // Emptied, it goes. A key that was the project's opens nothing after.
+    let scoped = key(&l, Some(&id), &["read"]).await;
+    assert_eq!(
+        bare(
+            &l,
+            token,
+            "DELETE",
+            &format!("{route}/secrets/{}", s(&secret["id"])),
+            "empty"
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let gone = bare(&l, token, "DELETE", &route, "gone").await;
+    assert_eq!(gone.0, StatusCode::OK, "{}", gone.1);
+    assert_eq!(gone.1, json!({"id":id}));
+    assert_eq!(bare(&l, token, "DELETE", &route, "gone").await, gone);
+    assert_eq!(
+        bare(&l, token, "DELETE", &route, "again").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, listed) = call(&l, token, "GET", &projects, json!({}), "").await;
+    assert!(
+        !listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| project["id"] == id)
+    );
+    for (method, path) in [
+        ("GET", format!("{route}/apps")),
+        ("GET", format!("{route}/secrets")),
+        ("PATCH", route.clone()),
+    ] {
+        let status = call(
+            &l,
+            token,
+            method,
+            &path,
+            json!({"name":"Back again"}),
+            &uid(),
+        )
+        .await
+        .0;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+    assert_eq!(
+        call(&l, s(&scoped["token"]), "GET", "/v1/me", json!({}), "")
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    // Its name is free for another, and it no longer counts as one of the
+    // workspace's projects.
+    let (status, another) = call(
+        &l,
+        token,
+        "POST",
+        &projects,
+        json!({"name":"Staging US"}),
+        "another",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{another}");
+    assert_ne!(another["id"], made["id"]);
+    // What was done in it is still in the trail, under its id.
+    let (_, trail) = call(
+        &l,
+        &l.token,
+        "GET",
+        &format!("/v1/workspaces/{}/audit?action=project.delete", l.tenant),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(trail["items"][0]["resource_id"], id);
+    // A key of one project renames and deletes none: it cannot hold the permission.
+    let reader = key(&l, None, &["read"]).await;
+    assert_eq!(
+        call(
+            &l,
+            s(&reader["token"]),
+            "PATCH",
+            &format!("{projects}/{}", s(&another["id"])),
+            json!({"name":"No"}),
+            "no"
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_node_that_is_drained_and_runs_nothing_is_deleted() {
+    let l = Lab::new().await;
+    let pin = "b".repeat(64);
+    let registration = json!({"name":"node-b","cert_sha256":pin,"endpoint":"https://node-b.internal:9443","backend":"wasm","architecture":"x86_64","runtime":"wasmtime-50.0.0-fenders-v1","cpu_percent":200,"memory_mib":1024,"instances":4});
+    let (status, node) = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/nodes",
+        registration.clone(),
+        "register",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{node}");
+    let id = s(&node["id"]).to_owned();
+    let route = format!("/v1/nodes/{id}");
+    // A node that may still be given work is not deleted.
+    let serving = bare(&l, &l.token, "DELETE", &route, "serving").await;
+    assert_eq!(serving.0, StatusCode::CONFLICT, "{}", serving.1);
+    assert_eq!(serving.1["code"], "in_use");
+    // Nor one that still has an execution of its own.
+    assert_eq!(
+        call(&l, &l.token, "PATCH", &route, json!({"draining":true}), "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let app = l.command_app().await;
+    let op = l.start_app(&app, "run").await.unwrap();
+    sqlx::query("UPDATE executions SET node_id=$1 WHERE id=$2")
+        .bind(&id)
+        .bind(s(&op["resource_id"]))
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let running = bare(&l, &l.token, "DELETE", &route, "running").await;
+    assert_eq!(running.0, StatusCode::CONFLICT, "{}", running.1);
+    assert_eq!(running.1["code"], "in_use");
+    sqlx::query(
+        "UPDATE executions SET reserved=false,state='stopped',finished_at=now() WHERE id=$1",
+    )
+    .bind(s(&op["resource_id"]))
+    .execute(&l.store.pool)
+    .await
+    .unwrap();
+
+    // Drained and idle, it goes; and is told so again when asked again.
+    let gone = bare(&l, &l.token, "DELETE", &route, "gone").await;
+    assert_eq!(gone.0, StatusCode::OK, "{}", gone.1);
+    assert_eq!(gone.1, json!({"id":id}));
+    assert_eq!(bare(&l, &l.token, "DELETE", &route, "gone").await, gone);
+    assert_eq!(
+        bare(&l, &l.token, "DELETE", &route, "anew").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, listed) = call(&l, &l.token, "GET", "/v1/nodes", json!({}), "").await;
+    assert!(listed["items"].as_array().unwrap().is_empty(), "{listed}");
+    // It cannot be brought back by changing its mode, and its certificate
+    // enrols nothing.
+    assert_eq!(
+        call(
+            &l,
+            &l.token,
+            "PATCH",
+            &route,
+            json!({"disabled":false,"draining":false}),
+            ""
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        l.store.node_identity(&pin).await.unwrap_err().status,
+        StatusCode::FORBIDDEN
+    );
+    // The execution it ran still names it.
+    let ran: Option<String> = sqlx::query_scalar("SELECT node_id FROM executions WHERE id=$1")
+        .bind(s(&op["resource_id"]))
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(ran.as_deref(), Some(id.as_str()));
+    // The same name and certificate register again, as another node.
+    let (status, again) = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/nodes",
+        registration,
+        "register-again",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    assert_ne!(again["id"], node["id"]);
+    assert_eq!(
+        s(&l.store.node_identity(&pin).await.unwrap()["id"]),
+        s(&again["id"])
+    );
+    // A key deletes no node.
+    let k = key(&l, None, &["read"]).await;
+    assert_eq!(
+        bare(
+            &l,
+            s(&k["token"]),
+            "DELETE",
+            &format!("/v1/nodes/{}", s(&again["id"])),
+            "no"
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    l.finish().await;
+}
+
+#[tokio::test]
+async fn a_suspended_workspace_is_deleted_and_is_then_no_workspace() {
+    let l = Lab::new().await;
+    // A workspace with something of everything in it.
+    let allowance = json!({"cpu_percent":100,"memory_mib":512,"storage_bytes":1048576,"instances":1,"transfer_bytes":1048576});
+    let (_, made) = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/workspaces",
+        json!({"name":"leaving","allowance":allowance}),
+        "make",
+    )
+    .await;
+    let id = s(&made["id"]).to_owned();
+    let workspace = format!("/v1/workspaces/{id}");
+    let (_, k) = call(
+        &l,
+        &l.token,
+        "POST",
+        &format!("{workspace}/api-keys"),
+        json!({"name":"theirs","permissions":["read","apps:write","secrets:write","connections:write"],"ttl_seconds":3600}),
+        "key",
+    )
+    .await;
+    let token = s(&k["token"]).to_owned();
+    let (_, projects) = call(
+        &l,
+        &token,
+        "GET",
+        &format!("{workspace}/projects"),
+        json!({}),
+        "",
+    )
+    .await;
+    let project = format!("{workspace}/projects/{}", s(&projects["items"][0]["id"]));
+    let (status, _) = call(
+        &l,
+        &token,
+        "POST",
+        &format!("{project}/secrets"),
+        json!({"name":"theirs","value":"their-secret"}),
+        "secret",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = call(
+        &l,
+        &token,
+        "POST",
+        &format!("{project}/connections"),
+        json!({"type":"https","name":"theirs","origin":"https://example.com"}),
+        "connection",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let component = b"\0asm\x0d\0\x01\0 theirs alone".to_vec();
+    let artifact = l
+        .store
+        .upload(&l.operator, &id, s(&projects["items"][0]["id"]), &component)
+        .await
+        .unwrap();
+    let blob = l.root.path().join("blobs").join(s(&artifact["digest"]));
+    assert!(blob.exists());
+
+    // While it may still run things it is not deleted.
+    let active = bare(&l, &l.token, "DELETE", &workspace, "too-soon").await;
+    assert_eq!(active.0, StatusCode::CONFLICT, "{}", active.1);
+    assert_eq!(active.1["code"], "in_use");
+    let suspended = call(
+        &l,
+        &l.token,
+        "POST",
+        &format!("{workspace}/lifecycle"),
+        json!({"action":"suspend","reason":"Leaving","expected_revision":1}),
+        "suspend",
+    )
+    .await;
+    assert_eq!(suspended.1["status"], "suspended", "{}", suspended.1);
+    // Nor by a key, its own or another's.
+    assert_eq!(
+        bare(&l, &token, "DELETE", &workspace, "mine").await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    let gone = bare(&l, &l.token, "DELETE", &workspace, "gone").await;
+    assert_eq!(gone.0, StatusCode::OK, "{}", gone.1);
+    assert_eq!(gone.1, json!({"id":id}));
+    // A retry is told the same; asked anew, there is nothing to delete.
+    assert_eq!(bare(&l, &l.token, "DELETE", &workspace, "gone").await, gone);
+    assert_eq!(
+        bare(&l, &l.token, "DELETE", &workspace, "anew").await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Its key opens nothing.
+    assert_eq!(
+        call(&l, &token, "GET", "/v1/me", json!({}), "").await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    // To the operator it is no workspace: in no list, and nothing under it.
+    let (_, listed) = call(&l, &l.token, "GET", "/v1/workspaces", json!({}), "").await;
+    let ids: Vec<&str> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| s(&w["id"]))
+        .collect();
+    assert_eq!(ids, [l.tenant.as_str()]);
+    for (method, path, body) in [
+        ("GET", workspace.clone(), json!({})),
+        ("GET", format!("{workspace}/projects"), json!({})),
+        ("GET", format!("{workspace}/usage"), json!({})),
+        ("GET", format!("{workspace}/audit"), json!({})),
+        ("GET", format!("{workspace}/api-keys"), json!({})),
+        ("GET", format!("{project}/apps"), json!({})),
+        (
+            "PATCH",
+            workspace.clone(),
+            json!({"default_app_size":"large"}),
+        ),
+        (
+            "POST",
+            format!("{workspace}/api-keys"),
+            json!({"name":"back","permissions":["read"],"ttl_seconds":60}),
+        ),
+        (
+            "POST",
+            format!("{workspace}/lifecycle"),
+            json!({"action":"resume","reason":"Back","expected_revision":3}),
+        ),
+    ] {
+        let status = call(&l, &l.token, method, &path, body, &uid()).await.0;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+    // What made it usable is gone: the secret, the keys, the storage, and
+    // the component's bytes once the control plane clears them.
+    let (secrets, live_keys, stored): (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM secrets WHERE tenant_id=$1),(SELECT count(*) FROM credentials WHERE tenant_id=$1 AND NOT revoked),(SELECT COALESCE(sum(bytes),0)::bigint FROM storage_reservations WHERE tenant_id=$1)")
+        .bind(&id)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!((secrets, live_keys, stored), (0, 0, 0));
+    l.store.schedule().await.unwrap();
+    assert!(!blob.exists());
+    // What it did is kept, in the database: its trail, to its last record.
+    let trail: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM audit WHERE tenant_id=$1 ORDER BY sequence")
+            .bind(&id)
+            .fetch_all(&l.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(trail.first().map(String::as_str), Some("tenant.create"));
+    assert_eq!(trail.last().map(String::as_str), Some("tenant.delete"));
+    assert!(trail.iter().any(|action| action == "secret.create"));
+    // The other workspace is as it was.
+    let (status, mine) = call(
+        &l,
+        &l.token,
+        "GET",
+        &format!("/v1/workspaces/{}", l.tenant),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(mine["lifecycle_state"], "active");
     l.finish().await;
 }

@@ -50,8 +50,9 @@ pub fn management(state: ApiState) -> Router {
 }
 
 /// Headers of every answer from the management listener, an error's among
-/// them: the API and a console's pages are served over TLS only, are never
-/// framed by another site, and their content type is not guessed at.
+/// them: the API is served over TLS only, is never framed by a site, and
+/// its content type is not guessed at. A wrapping binary that serves pages
+/// of its own beside the API has the same of them.
 async fn management_headers(mut response: Response) -> Response {
     let headers = response.headers_mut();
     for (name, value) in [
@@ -73,19 +74,131 @@ pub fn gateway(state: ApiState) -> Router {
     Router::new().fallback(gateway_dispatch).with_state(state)
 }
 
+/// A request key as a path names it. A key is whatever its caller chose,
+/// so one with a `/` or a space in it arrives percent-encoded.
+fn path_key(segment: &str) -> Result<String> {
+    percent_encoding::percent_decode_str(segment)
+        .decode_utf8()
+        .map(|key| key.into_owned())
+        .map_err(|_| Error::missing())
+}
+/// What the store answers, as the API says it. Two things are the store's
+/// own and not a caller's:
+///
+/// - Its name for a workspace. A row's `tenant_id` is a `workspace_id`
+///   here, as the paths say.
+/// - What an operation keeps of the request that asked for it: the key and
+///   the hash it was made with, the revision it aimed at, and whose it is,
+///   which its path already says. An operation is what was asked, of what,
+///   and how it stands.
+///
+/// It is done here, for every answer, so that no route can forget to.
+fn present(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("request_hash") {
+                for internal in [
+                    "request_hash",
+                    "request_key",
+                    "target_revision",
+                    "tenant_id",
+                    "project_id",
+                ] {
+                    map.remove(internal);
+                }
+            }
+            if let Some(workspace) = map.remove("tenant_id") {
+                map.insert("workspace_id".to_owned(), workspace);
+            }
+            map.values_mut().for_each(present);
+        }
+        Value::Array(items) => items.iter_mut().for_each(present),
+        _ => {}
+    }
+}
+/// A deletion has no body, and one that is sent is not read as one.
+fn no_body(bytes: &[u8]) -> Result<()> {
+    if bytes.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::invalid("a deletion takes no body"))
+    }
+}
+/// Which revision of an app a deletion is of: the one its caller read.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppDeletion {
+    expected_revision: i64,
+}
+/// The page of a list a request asks for: `limit`, 1 to 100, and `before`,
+/// the cursor a page before gave. Anything else in the query is refused.
+fn list_page(uri: &axum::http::Uri) -> Result<crate::store::ListPage> {
+    axum::extract::Query::<crate::store::ListPage>::try_from_uri(uri)
+        .map_err(|_| Error::invalid("a list takes limit and before"))?
+        .0
+        .at_most(100)
+}
+/// The store's name for a kind of thing a project holds. A connection is
+/// kept as an external endpoint; the rest are kept as they are asked for.
+fn stored(kind: &str) -> &str {
+    match kind {
+        "connections" => "external-endpoints",
+        kind => kind,
+    }
+}
+/// The key of a change that does not require one: none when none was sent.
+fn offered(key: &str) -> Option<&str> {
+    (!key.is_empty()).then_some(key)
+}
 fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|_| Error::invalid("invalid or missing fields"))
 }
 async fn dispatch(State(state): State<ApiState>, req: Request) -> Result<Response> {
     let request_id = crate::model::uid();
+    let head = req.method() == axum::http::Method::HEAD;
     let mut response = match dispatch_inner(State(state), req).await {
         Ok(response) => response,
-        Err(error) => (
-            error.status,
-            Json(json!({"error":error.message,"code":error.code(),"request_id":request_id})),
-        )
-            .into_response(),
+        Err(error) => {
+            // Out of allowance is not too many requests: nothing is cured
+            // by asking again later, so it is not answered as a rate is.
+            let status = if error.code() == crate::db::QUOTA {
+                StatusCode::CONFLICT
+            } else {
+                error.status
+            };
+            let mut response = (
+                status,
+                Json(json!({"error":error.message,"code":error.code(),"request_id":request_id})),
+            )
+                .into_response();
+            if let Some((name, value)) = error.header
+                && let Ok(value) = header::HeaderValue::from_str(&value)
+            {
+                response.headers_mut().insert(name, value);
+            }
+            // What was wanted, as a client that negotiates would ask.
+            if status == StatusCode::UNAUTHORIZED {
+                response.headers_mut().insert(
+                    header::WWW_AUTHENTICATE,
+                    header::HeaderValue::from_static("Bearer"),
+                );
+            }
+            // A rate that does not say when it turns is one of things in
+            // progress (uploads, lookups): there is room in a moment.
+            if status == StatusCode::TOO_MANY_REQUESTS
+                && !response.headers().contains_key(header::RETRY_AFTER)
+            {
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+            }
+            response
+        }
     };
+    // HEAD is GET without what it would have said.
+    if head {
+        *response.body_mut() = axum::body::Body::empty();
+    }
     let headers = response.headers_mut();
     headers.insert(
         "X-Request-Id",
@@ -101,7 +214,11 @@ async fn dispatch(State(state): State<ApiState>, req: Request) -> Result<Respons
 async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<Response> {
     let store = &state.store;
     let (parts, body) = req.into_parts();
-    let method = parts.method.as_str();
+    // Wherever GET is answered, so is HEAD, as GET.
+    let method = match parts.method.as_str() {
+        "HEAD" => "GET",
+        method => method,
+    };
     let path = parts.uri.path();
     // The contract, and nothing else that is not the API: the control plane
     // hosts no pages.
@@ -112,16 +229,34 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         )
             .into_response());
     }
-    let mut segments: Vec<_> = path.trim_matches('/').split('/').collect();
-    let public_api = segments.get(1) == Some(&"workspaces");
-    if public_api {
-        segments[1] = "tenants";
-        if segments.get(3) == Some(&"projects") && segments.get(5) == Some(&"connections") {
-            segments[5] = "external-endpoints";
-        }
-        if crate::customer_api::permission(method, &segments).is_none() {
-            return Err(Error::missing());
-        }
+    // Whether this process answers, and whether it can serve: asked by
+    // whatever watches it, which holds no credential. Nothing is said but
+    // the one word; why it is not ready is in the log and in
+    // `/v1/control-plane/status`, for the operator.
+    if method == "GET" && path == "/healthz" {
+        return Ok(Json(json!({"status":"ok"})).into_response());
+    }
+    if method == "GET" && path == "/readyz" {
+        return Ok(if store.ready().await {
+            Json(json!({"status":"ready"})).into_response()
+        } else {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"status":"unavailable"})),
+            )
+                .into_response()
+        });
+    }
+    let segments: Vec<_> = path.trim_matches('/').split('/').collect();
+    let operators = |method: &str| crate::customer_api::operators(method, &segments);
+    // Whether the path is a route, a key's or the operator's, by `method`.
+    let exists = |method: &str| {
+        crate::customer_api::permission(method, &segments).is_some() || operators(method)
+    };
+    // Before any credential is asked for: under a workspace, a path that is
+    // no route by any method is unknown to everyone.
+    if segments.get(1) == Some(&"workspaces") && !METHODS.iter().any(|method| exists(method)) {
+        return Err(Error::missing());
     }
     // One way in: a bearer credential. Who a person is, and what they may
     // do, is the business of whatever is built on this API; it calls with a
@@ -133,12 +268,44 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(Error::unauthorized)?;
     let p = store.authenticate(token).await?;
+    // A route that is one, asked with a method it does not take, is told
+    // which it takes. A key is told nothing of the operator's routes: its request for one that exists
+    // is refused below as it always was, and here it hears only of the
+    // methods a key may be given.
+    if !exists(method) {
+        let mut allow: Vec<&str> = METHODS
+            .into_iter()
+            .filter(|method| {
+                crate::customer_api::permission(method, &segments).is_some()
+                    || (p.api_permissions.is_none() && operators(method))
+            })
+            .collect();
+        if !allow.is_empty() {
+            if allow.contains(&"GET") {
+                allow.insert(1, "HEAD");
+            }
+            return Err(
+                Error::new(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+                    .with_header(header::ALLOW, allow.join(", ")),
+            );
+        }
+    }
     crate::customer_api::authorize(&p, method, &segments)?;
+    // A workspace that was deleted does not exist, to the operator as to
+    // anyone: its keys open nothing, and nothing under it is a route. Its
+    // own deletion is the one request still answered, with its receipt.
+    if let ["v1", "workspaces", workspace, rest @ ..] = segments.as_slice()
+        && !(method == "DELETE" && rest.is_empty())
+        // Asked only for the operator: a key of one that is gone was
+        // revoked with it, and did not get this far.
+        && p.api_permissions.is_none()
+        && store.workspace_gone(workspace).await?
+    {
+        return Err(Error::missing());
+    }
     // Every route is one a tenant's key may be given, or one of the
     // operator's own. There is no third kind.
-    if crate::customer_api::permission(method, &segments).is_none()
-        && !crate::customer_api::operators(method, &segments)
-    {
+    if !exists(method) {
         return Err(Error::missing());
     }
     // Every mutation leaves an audit record, and most a receipt, for good. A
@@ -151,6 +318,10 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         return Err(Error::new(
             StatusCode::TOO_MANY_REQUESTS,
             "too many changes in a minute",
+        )
+        .with_header(
+            header::RETRY_AFTER,
+            store.api_rates.retry_after(tenant).to_string(),
         ));
     }
     let key = parts
@@ -161,14 +332,14 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
     let is_upload = method == "POST"
         && matches!(
             segments.as_slice(),
-            ["v1", "tenants", _, "projects", _, "artifacts"]
+            ["v1", "workspaces", _, "projects", _, "artifacts"]
         );
     // An upload's body is held whole, up to 16 MiB of it. Before any of it
     // is read: the credential must be one that may upload there, the body
     // must say it fits, and its workspace and the control plane must have a
     // place for one more.
     let limit = if is_upload { MAX_UPLOAD } else { 64 * 1024 };
-    let _uploading = if let ["v1", "tenants", tenant, "projects", project, "artifacts"] =
+    let _uploading = if let ["v1", "workspaces", tenant, "projects", project, "artifacts"] =
         segments.as_slice()
         && is_upload
     {
@@ -194,6 +365,19 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "request body too large",
         ));
     }
+    // What a body is said to be, without its parameters.
+    let media = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(|v| v.trim().to_ascii_lowercase());
+    let unsupported = |message| Err(Error::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, message));
+    // A component is sent as one, and is not read when it is said to be
+    // something else.
+    if is_upload && media.as_deref() != Some("application/wasm") {
+        return unsupported("an upload's Content-Type is application/wasm");
+    }
     let bytes: Bytes = tokio::time::timeout(BODY_WITHIN, to_bytes(body, limit))
         .await
         .map_err(|_| {
@@ -203,18 +387,30 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             )
         })?
         .map_err(|_| Error::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"))?;
-    if (public_api || p.api_permissions.is_some())
-        && matches!(
-            (method, segments.as_slice()),
-            (
-                "POST",
-                ["v1", "tenants", _, "projects", _, "apps", "deploy"]
-            ) | (
-                "PUT",
-                ["v1", "tenants", _, "projects", _, "apps", _, "connections"]
-            )
+    // Every other body is JSON, and says so: one sent as a form, or as
+    // nothing in particular, is not guessed at.
+    if !is_upload && !bytes.is_empty() && media.as_deref() != Some("application/json") {
+        return unsupported("a request body's Content-Type is application/json");
+    }
+    if matches!(
+        (method, segments.as_slice()),
+        (
+            "POST",
+            ["v1", "workspaces", _, "projects", _, "apps", "deploy"]
+        ) | (
+            "PUT",
+            [
+                "v1",
+                "workspaces",
+                _,
+                "projects",
+                _,
+                "apps",
+                _,
+                "connections"
+            ]
         )
-    {
+    ) {
         let value: Value = parse(&bytes)?;
         if value.get("endpoints").is_some() || value.get("https_origins").is_some() {
             return Err(Error::invalid(
@@ -228,7 +424,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -245,58 +441,105 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         }
         ("GET", ["v1", "me"]) => serde_json::to_value(&p).map_err(|_| Error::internal())?,
         ("GET", ["v1", "control-plane", "status"]) => store.background_status(&p)?,
-        ("GET", ["v1", "tenants"]) => store.tenants(&p).await?,
-        ("GET", ["v1", "nodes"]) => store.nodes(&p).await?,
+        ("GET", ["v1", "workspaces"]) => store.workspaces(&p, list_page(&parts.uri)?).await?,
+        ("GET", ["v1", "workspaces", tenant]) => store.workspace(&p, tenant).await?,
+        ("DELETE", ["v1", "workspaces", tenant]) => {
+            no_body(&bytes)?;
+            store.delete_workspace(&p, tenant, key).await?
+        }
+        ("GET", ["v1", "workspaces", tenant, "audit"]) => {
+            let page =
+                axum::extract::Query::<crate::audit_trail::AuditPage>::try_from_uri(&parts.uri)
+                    .map_err(|_| Error::invalid("invalid audit query"))?
+                    .0;
+            store.audit_trail(&p, tenant, page).await?
+        }
+        ("GET", ["v1", "nodes"]) => store.node_page(&p, list_page(&parts.uri)?).await?,
         ("GET", ["v1", "public-egress-policy"]) => store.public_egress_policy(&p).await?,
         ("PUT", ["v1", "public-egress-policy"]) => {
-            store.activate_public_egress(&p, parse(&bytes)?).await?
+            store
+                .activate_public_egress_keyed(&p, parse(&bytes)?, offered(key))
+                .await?
         }
         ("POST", ["v1", "nodes"]) => {
             status = StatusCode::CREATED;
-            store.register_node(&p, parse(&bytes)?).await?
+            store
+                .register_node_keyed(&p, parse(&bytes)?, Some(key))
+                .await?
         }
-        ("PATCH", ["v1", "nodes", node]) => store.node_mode(&p, node, parse(&bytes)?).await?,
-        ("POST", ["v1", "tenants"]) => {
+        ("DELETE", ["v1", "nodes", node]) => {
+            no_body(&bytes)?;
+            store.delete_node(&p, node, key).await?
+        }
+        ("PATCH", ["v1", "nodes", node]) => {
+            store
+                .node_mode_keyed(&p, node, parse(&bytes)?, offered(key))
+                .await?
+        }
+        ("POST", ["v1", "workspaces"]) => {
             status = StatusCode::CREATED;
-            store.create_tenant(&p, parse(&bytes)?).await?
+            store
+                .create_tenant_keyed(&p, parse(&bytes)?, Some(key))
+                .await?
         }
         // A tenant's allowance, and the size its apps take when they name none.
-        ("PATCH", ["v1", "tenants", tenant]) => {
-            store.update_allowance(&p, tenant, parse(&bytes)?).await?
+        ("PATCH", ["v1", "workspaces", tenant]) => {
+            store
+                .update_allowance_keyed(&p, tenant, parse(&bytes)?, offered(key))
+                .await?
         }
         // Suspend a workspace, or resume it: the operator's, with a reason.
-        ("POST", ["v1", "tenants", tenant, "lifecycle"]) => {
+        ("POST", ["v1", "workspaces", tenant, "lifecycle"]) => {
             p.operator()?;
-            let mut action: crate::workspace_lifecycle::WorkspaceAction = parse(&bytes)?;
+            let mut action =
+                parse::<crate::workspace_lifecycle::WorkspaceAction>(&bytes)?.keyed(key);
             action.id = (*tenant).to_owned();
             store.operator_workspace_action(&p.id, action).await?
         }
-        ("PATCH", ["v1", "tenants", tenant, "http-limits"]) => {
-            store.update_http_limits(&p, tenant, parse(&bytes)?).await?
-        }
-        ("GET", ["v1", "tenants", tenant, "projects"]) => store.projects(&p, tenant).await?,
-        ("POST", ["v1", "tenants", tenant, "projects"]) => {
-            status = StatusCode::CREATED;
+        ("PATCH", ["v1", "workspaces", tenant, "http-limits"]) => {
             store
-                .create_project_keyed(
-                    &p,
-                    tenant,
-                    parse(&bytes)?,
-                    (public_api || p.api_permissions.is_some() || !key.is_empty()).then_some(key),
-                )
+                .update_http_limits_keyed(&p, tenant, parse(&bytes)?, offered(key))
                 .await?
         }
-        ("GET", ["v1", "tenants", tenant, "api-keys"]) => store.api_keys(&p, tenant).await?,
-        ("POST", ["v1", "tenants", tenant, "api-keys"]) => {
+        ("GET", ["v1", "workspaces", tenant, "projects"]) => {
+            store
+                .project_page(&p, tenant, list_page(&parts.uri)?)
+                .await?
+        }
+        ("POST", ["v1", "workspaces", tenant, "projects"]) => {
             status = StatusCode::CREATED;
             store
+                .create_project_keyed(&p, tenant, parse(&bytes)?, Some(key))
+                .await?
+        }
+        ("PATCH", ["v1", "workspaces", tenant, "projects", project]) => {
+            store
+                .rename_project(&p, tenant, project, parse(&bytes)?, key)
+                .await?
+        }
+        ("DELETE", ["v1", "workspaces", tenant, "projects", project]) => {
+            no_body(&bytes)?;
+            store.delete_project(&p, tenant, project, key).await?
+        }
+        ("GET", ["v1", "workspaces", tenant, "api-keys"]) => {
+            store
+                .api_key_page(&p, tenant, list_page(&parts.uri)?)
+                .await?
+        }
+        ("POST", ["v1", "workspaces", tenant, "api-keys"]) => {
+            let issued = store
                 .create_api_key(&p, tenant, parse(&bytes)?, key)
-                .await?
+                .await?;
+            // A retry made nothing, and has no token to show for it.
+            if issued["replayed"] != true {
+                status = StatusCode::CREATED;
+            }
+            issued
         }
-        ("DELETE", ["v1", "tenants", tenant, "api-keys", id]) => {
+        ("DELETE", ["v1", "workspaces", tenant, "api-keys", id]) => {
             store.revoke_credential(&p, tenant, id).await?
         }
-        ("GET", ["v1", "tenants", tenant, "usage", "history"]) => {
+        ("GET", ["v1", "workspaces", tenant, "usage", "history"]) => {
             let page = axum::extract::Query::<crate::usage::HistoryPage>::try_from_uri(&parts.uri)
                 .map_err(|_| Error::invalid("invalid history query"))?
                 .0;
@@ -306,7 +549,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -319,18 +562,26 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .0;
             store.usage_history(&p, tenant, Some(project), page).await?
         }
-        ("GET", ["v1", "tenants", tenant, "usage"]) => store.usage(&p, tenant, None).await?,
-        ("GET", ["v1", "tenants", tenant, "projects", project, "usage"]) => {
+        ("GET", ["v1", "workspaces", tenant, "usage"]) => store.usage(&p, tenant, None).await?,
+        ("GET", ["v1", "workspaces", tenant, "projects", project, "usage"]) => {
             store.usage(&p, tenant, Some(project)).await?
         }
-        ("GET", ["v1", "tenants", tenant, "projects", project, "https-access"]) => {
-            store.https_access(&p, tenant, project).await?
-        }
+        (
+            "GET",
+            [
+                "v1",
+                "workspaces",
+                tenant,
+                "projects",
+                project,
+                "https-access",
+            ],
+        ) => store.https_access(&p, tenant, project).await?,
         (
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -342,14 +593,14 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .validate_https_access(&p, tenant, project, parse(&bytes)?)
                 .await?
         }
-        ("GET", ["v1", "tenants", tenant, "projects", project, "app-sizes"]) => {
+        ("GET", ["v1", "workspaces", tenant, "projects", project, "app-sizes"]) => {
             store.app_sizes(&p, tenant, project).await?
         }
         (
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -362,7 +613,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "PUT",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -371,7 +622,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "connections",
             ],
         ) => {
-            status = StatusCode::ACCEPTED;
             store
                 .update_app_connections(&p, tenant, project, app, parse(&bytes)?, key)
                 .await?
@@ -380,19 +630,23 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
                 "app-submissions",
                 key,
             ],
-        ) => store.app_submission(&p, tenant, project, key).await?,
+        ) => {
+            store
+                .app_submission(&p, tenant, project, &path_key(key)?)
+                .await?
+        }
         (
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -403,14 +657,14 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             ],
         ) => {
             store
-                .app_action_submission(&p, tenant, project, app, key)
+                .app_action_submission(&p, tenant, project, app, &path_key(key)?)
                 .await?
         }
         (
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -431,7 +685,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -444,7 +698,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "PUT",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -471,7 +725,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -484,7 +738,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -493,22 +747,38 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "websocket",
             ],
         ) => store.app_websocket(&p, tenant, project, app).await?,
-        ("PATCH", ["v1", "tenants", tenant, "projects", project, "apps", app]) => {
+        ("PATCH", ["v1", "workspaces", tenant, "projects", project, "apps", app]) => {
             store
                 .app_lifecycle(&p, tenant, project, app, parse(&bytes)?, key)
                 .await?
         }
-        ("DELETE", ["v1", "tenants", tenant, "projects", project, "apps", app]) => {
-            status = StatusCode::ACCEPTED;
+        ("DELETE", ["v1", "workspaces", tenant, "projects", project, "apps", app]) => {
+            // A deletion says which revision it deletes in its query: a
+            // DELETE has no body, and one that is sent is not read as one.
+            if !bytes.is_empty() {
+                return Err(Error::invalid(
+                    "a deletion takes no body: send ?expected_revision=",
+                ));
+            }
+            let expected = axum::extract::Query::<AppDeletion>::try_from_uri(&parts.uri)
+                .map_err(|_| Error::invalid("a deletion takes expected_revision"))?
+                .0;
             store
-                .delete_app(&p, tenant, project, app, parse(&bytes)?, key)
+                .delete_app(
+                    &p,
+                    tenant,
+                    project,
+                    app,
+                    json!({"expected_revision":expected.expected_revision}),
+                    key,
+                )
                 .await?
         }
         (
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -526,7 +796,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -540,7 +810,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -549,7 +819,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "runs",
             ],
         ) => {
-            status = StatusCode::ACCEPTED;
             let invocation = if bytes.is_empty() {
                 crate::app_runtime::RunInvocation::default()
             } else {
@@ -573,7 +842,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -588,7 +857,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -599,7 +868,6 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 "cancel",
             ],
         ) => {
-            status = StatusCode::ACCEPTED;
             store
                 .cancel_app_run(&p, tenant, project, app, run, key)
                 .await?
@@ -608,7 +876,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -630,13 +898,13 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 )
                 .await?
         }
-        ("POST", ["v1", "tenants", tenant, "projects", project, "apps"]) => {
+        ("POST", ["v1", "workspaces", tenant, "projects", project, "apps"]) => {
             status = StatusCode::CREATED;
             store
                 .create_app(&p, tenant, project, parse(&bytes)?, key)
                 .await?
         }
-        ("GET", ["v1", "tenants", tenant, "projects", project, "apps"]) => {
+        ("GET", ["v1", "workspaces", tenant, "projects", project, "apps"]) => {
             let page = axum::extract::Query::<crate::apps::AppPage>::try_from_uri(&parts.uri)
                 .map_err(|_| Error::invalid("invalid app page query"))?
                 .0;
@@ -646,7 +914,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -661,14 +929,14 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                     .0;
             store.app_events(&p, tenant, project, app, page).await?
         }
-        ("GET", ["v1", "tenants", tenant, "projects", project, "apps", app]) => {
+        ("GET", ["v1", "workspaces", tenant, "projects", project, "apps", app]) => {
             store.app(&p, tenant, project, app).await?
         }
         (
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -686,7 +954,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -704,7 +972,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -724,7 +992,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -734,7 +1002,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 version,
             ],
         ) => store.app_version(&p, tenant, project, app, version).await?,
-        ("POST", ["v1", "tenants", tenant, "projects", project, "artifacts"]) => {
+        ("POST", ["v1", "workspaces", tenant, "projects", project, "artifacts"]) => {
             status = StatusCode::CREATED;
             store.upload(&p, tenant, project, &bytes).await?
         }
@@ -742,7 +1010,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -759,7 +1027,7 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
@@ -771,30 +1039,24 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .preview_schedule(&p, tenant, project, parse(&bytes)?)
                 .await?
         }
-        ("POST", ["v1", "tenants", tenant, "projects", project, "secrets"]) => {
+        ("POST", ["v1", "workspaces", tenant, "projects", project, "secrets"]) => {
             status = StatusCode::CREATED;
             store
-                .create_secret_keyed(
-                    &p,
-                    tenant,
-                    project,
-                    parse(&bytes)?,
-                    (public_api || p.api_permissions.is_some() || !key.is_empty()).then_some(key),
-                )
+                .create_secret_keyed(&p, tenant, project, parse(&bytes)?, Some(key))
                 .await?
         }
         (
             "POST",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
-                "external-endpoints",
+                "connections",
             ],
         ) => {
-            status = StatusCode::ACCEPTED;
+            status = StatusCode::CREATED;
             store
                 .create_endpoint(&p, tenant, project, parse(&bytes)?, key)
                 .await?
@@ -803,23 +1065,27 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
                 "endpoint-submissions",
                 key,
             ],
-        ) => store.endpoint_submission(&p, tenant, project, key).await?,
+        ) => {
+            store
+                .endpoint_submission(&p, tenant, project, &path_key(key)?)
+                .await?
+        }
         (
             "DELETE",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
-                "external-endpoints",
+                "connections",
                 endpoint,
             ],
         ) => {
@@ -830,39 +1096,109 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .remove_endpoint(&p, tenant, project, endpoint, key)
                 .await?
         }
+        (
+            "PUT",
+            [
+                "v1",
+                "workspaces",
+                tenant,
+                "projects",
+                project,
+                "secrets",
+                secret,
+            ],
+        ) => {
+            store
+                .rotate_secret(&p, tenant, project, secret, parse(&bytes)?, key)
+                .await?
+        }
+        (
+            "DELETE",
+            [
+                "v1",
+                "workspaces",
+                tenant,
+                "projects",
+                project,
+                "secrets",
+                secret,
+            ],
+        ) => {
+            no_body(&bytes)?;
+            store
+                .delete_secret(&p, tenant, project, secret, key)
+                .await?
+        }
+        (
+            "DELETE",
+            [
+                "v1",
+                "workspaces",
+                tenant,
+                "projects",
+                project,
+                "artifacts",
+                artifact,
+            ],
+        ) => {
+            no_body(&bytes)?;
+            store
+                .delete_artifact(&p, tenant, project, artifact, key)
+                .await?
+        }
         // What a project holds beside its apps, by kind.
         (
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
-                kind @ ("artifacts" | "external-endpoints" | "secrets" | "operations"),
+                kind @ ("artifacts" | "connections" | "secrets" | "operations"),
             ],
-        ) => store.resources(&p, tenant, project, kind, None).await?,
+        ) => {
+            store
+                .resource_page(
+                    &p,
+                    tenant,
+                    project,
+                    stored(kind),
+                    None,
+                    list_page(&parts.uri)?,
+                )
+                .await?
+        }
         (
             "GET",
             [
                 "v1",
-                "tenants",
+                "workspaces",
                 tenant,
                 "projects",
                 project,
-                kind @ ("artifacts" | "external-endpoints" | "secrets" | "operations"),
+                kind @ ("artifacts" | "connections" | "secrets" | "operations"),
                 id,
             ],
-        ) => store.resources(&p, tenant, project, kind, Some(id)).await?,
+        ) => {
+            store
+                .resources(&p, tenant, project, stored(kind), Some(id))
+                .await?
+        }
         _ => return Err(Error::missing()),
     };
+    // 202 says one thing: the change was taken and is not yet made. It is
+    // decided here and nowhere else, for every route that answers with an
+    // operation, from the operation itself.
     if method != "GET"
-        && segments.get(5) == Some(&"apps")
         && value["state"] == "pending"
         && value.get("kind").is_some()
+        && value.get("resource_id").is_some()
     {
         status = StatusCode::ACCEPTED;
     }
+    let mut value = value;
+    present(&mut value);
     Ok((
         status,
         [
@@ -990,8 +1326,9 @@ async fn internal_dispatch(State(store): State<Store>, req: Request) -> Result<R
     }
     Err(Error::missing())
 }
-/// One console test request. An empty object sends `GET /`; the gateway still
-/// applies its method, size, admission and header rules.
+/// One request to make of an HTTP app, as a client of its URL would. An
+/// empty object sends `GET /`; the gateway still applies its method, size,
+/// admission and header rules.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HttpSample {
@@ -1392,6 +1729,8 @@ async fn gateway_dispatch_tracked(
 
 /// Mutating management requests a workspace's credentials may make in a
 /// minute, counted in memory as the gateway's are.
+/// The methods a route may take, in the order `Allow` names them.
+const METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 const MUTATIONS_A_MINUTE: i64 = 600;
 
 /// How long a management request's body may take to arrive.
