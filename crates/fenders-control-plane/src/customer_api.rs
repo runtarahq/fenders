@@ -203,6 +203,7 @@ pub const OPERATOR_ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/nodes"),
     ("POST", "/v1/nodes"),
     ("PATCH", "/v1/nodes/*"),
+    ("DELETE", "/v1/nodes/*"),
     ("GET", "/v1/public-egress-policy"),
     ("PUT", "/v1/public-egress-policy"),
     ("GET", "/v1/control-plane/status"),

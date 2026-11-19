@@ -976,6 +976,15 @@ async fn every_operation_answers_as_the_contract_says() {
         .await;
     t.ok(&key, "DELETE", &toured, None).await;
 
+    // The node was set draining above and ran nothing: it may go.
+    t.ok(
+        &operator,
+        "DELETE",
+        &format!("/v1/nodes/{}", s(&node["id"])),
+        None,
+    )
+    .await;
+
     // Whether it is up and can serve, asked with no credential.
     for probe in ["/healthz", "/readyz"] {
         let response = api::router(l.store.clone())

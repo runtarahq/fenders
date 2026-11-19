@@ -451,6 +451,10 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
                 .register_node_keyed(&p, parse(&bytes)?, Some(key))
                 .await?
         }
+        ("DELETE", ["v1", "nodes", node]) => {
+            no_body(&bytes)?;
+            store.delete_node(&p, node, key).await?
+        }
         ("PATCH", ["v1", "nodes", node]) => {
             store
                 .node_mode_keyed(&p, node, parse(&bytes)?, offered(key))

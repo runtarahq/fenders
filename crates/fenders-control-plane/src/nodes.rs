@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 /// A node as the API shows it: what it was registered with, what the
 /// operator set, and what it was last seen to be. Columns the control
 /// plane keeps for itself, or once did, are not among them.
+/// A node that is gone is kept as a row, for the executions that name it.
+pub(crate) const DELETION_MIGRATION: &str =
+    "ALTER TABLE nodes ADD COLUMN IF NOT EXISTS deleted boolean NOT NULL DEFAULT false";
 pub(crate) const NODE: &str = "id,name,cert_sha256,endpoint,backend,architecture,runtime,cpu_percent,memory_mib,instances,draining,disabled,egress_budget_launcher,egress_budget_required,retained_egress_launchers,boot_id,last_seen,observed_confinement,observed_egress_budget,observed_launcher_digest,observed_runtime_digest,created";
 
 impl Store {
@@ -127,7 +130,7 @@ impl Store {
         let mut tx = self.transaction(false, false).await?;
         let found = rows(
             &mut tx,
-            &format!("SELECT {NODE} FROM nodes r WHERE ($1::text IS NULL OR (r.created,r.id)<(SELECT c.created,c.id FROM nodes c WHERE c.id=$1)) ORDER BY r.created DESC,r.id DESC LIMIT $2"),
+            &format!("SELECT {NODE} FROM nodes r WHERE NOT r.deleted AND ($1::text IS NULL OR (r.created,r.id)<(SELECT c.created,c.id FROM nodes c WHERE c.id=$1)) ORDER BY r.created DESC,r.id DESC LIMIT $2"),
             args![before, limit + 1],
         )
         .await?;
@@ -185,7 +188,7 @@ impl Store {
         }
         let old = one(
             &mut tx,
-            "SELECT * FROM nodes WHERE id=$1 FOR UPDATE",
+            "SELECT * FROM nodes WHERE id=$1 AND NOT deleted FOR UPDATE",
             args![node],
         )
         .await?;
@@ -244,6 +247,54 @@ impl Store {
         }
         tx.commit().await?;
         Ok(result)
+    }
+    /// Removes a node that runs nothing and is to be given nothing: one
+    /// that is draining or disabled, with no execution of its own left.
+    ///
+    /// Its row is kept, because the executions it ran name it; it is
+    /// disabled for good, so its certificate opens nothing, and its name
+    /// and its certificate's pin are free to register again.
+    pub async fn delete_node(&self, p: &Principal, node: &str, key: &str) -> Result<Value> {
+        p.operator()?;
+        identity(node)?;
+        let request = json!({"kind":"node.delete","node":node});
+        let mut tx = self.transaction(true, false).await?;
+        if let Some(row) =
+            crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
+        let found = one(
+            &mut tx,
+            "SELECT n.draining OR n.disabled AS idle,
+                EXISTS(SELECT 1 FROM executions e WHERE e.node_id=n.id AND e.reserved) AS running
+             FROM nodes n WHERE n.id=$1 AND NOT n.deleted FOR UPDATE OF n",
+            args![node],
+        )
+        .await?;
+        if !b(&found["idle"]) {
+            return Err(conflict("drain or disable the node before deleting it").coded("in_use"));
+        }
+        if b(&found["running"]) {
+            return Err(conflict("node still has executions that have not ended").coded("in_use"));
+        }
+        exec(&mut tx,"UPDATE nodes SET deleted=true,disabled=true,draining=true,name='deleted-'||id,cert_sha256='deleted-'||id WHERE id=$1",args![node]).await?;
+        // An inspection it had in hand is another node's to take.
+        exec(&mut tx,"UPDATE artifact_validations SET state='pending',node_id=NULL,node_boot=NULL,lease_until=NULL,generation=generation+1,updated=now() WHERE node_id=$1 AND state='validating'",args![node]).await?;
+        let row = json!({"id":node});
+        Self::audit_system(
+            &mut tx,
+            &p.id,
+            "node.delete",
+            &json!(node),
+            &Value::Null,
+            json!({}),
+        )
+        .await?;
+        crate::customer_api::save_operator_receipt(&mut tx, &p.id, key, None, &request, &row)
+            .await?;
+        tx.commit().await?;
+        Ok(row)
     }
     pub async fn node_identity(&self, pin: &str) -> Result<Value> {
         let mut tx = self.transaction(false, false).await?;

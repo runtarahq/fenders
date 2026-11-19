@@ -3776,6 +3776,53 @@
             "operator": []
           }
         ]
+      },
+      "delete": {
+        "operationId": "delete__nodes_node",
+        "summary": "Delete a node",
+        "description": "Only one that is draining or disabled and has no execution left: otherwise 409 in_use. Its certificate opens nothing after, and its name and its certificate's pin may be registered again. Operator only.",
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Node"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deleted"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        }
       }
     },
     "/public-egress-policy": {

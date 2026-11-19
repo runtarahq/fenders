@@ -3534,3 +3534,120 @@ async fn a_project_is_renamed_and_one_that_holds_nothing_is_deleted() {
     );
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_node_that_is_drained_and_runs_nothing_is_deleted() {
+    let l = Lab::new().await;
+    let pin = "b".repeat(64);
+    let registration = json!({"name":"node-b","cert_sha256":pin,"endpoint":"https://node-b.internal:9443","backend":"wasm","architecture":"x86_64","runtime":"wasmtime-50.0.0-fenders-v1","cpu_percent":200,"memory_mib":1024,"instances":4});
+    let (status, node) = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/nodes",
+        registration.clone(),
+        "register",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{node}");
+    let id = s(&node["id"]).to_owned();
+    let route = format!("/v1/nodes/{id}");
+    // A node that may still be given work is not deleted.
+    let serving = bare(&l, &l.token, "DELETE", &route, "serving").await;
+    assert_eq!(serving.0, StatusCode::CONFLICT, "{}", serving.1);
+    assert_eq!(serving.1["code"], "in_use");
+    // Nor one that still has an execution of its own.
+    assert_eq!(
+        call(&l, &l.token, "PATCH", &route, json!({"draining":true}), "")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let app = l.command_app().await;
+    let op = l.start_app(&app, "run").await.unwrap();
+    sqlx::query("UPDATE executions SET node_id=$1 WHERE id=$2")
+        .bind(&id)
+        .bind(s(&op["resource_id"]))
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let running = bare(&l, &l.token, "DELETE", &route, "running").await;
+    assert_eq!(running.0, StatusCode::CONFLICT, "{}", running.1);
+    assert_eq!(running.1["code"], "in_use");
+    sqlx::query(
+        "UPDATE executions SET reserved=false,state='stopped',finished_at=now() WHERE id=$1",
+    )
+    .bind(s(&op["resource_id"]))
+    .execute(&l.store.pool)
+    .await
+    .unwrap();
+
+    // Drained and idle, it goes; and is told so again when asked again.
+    let gone = bare(&l, &l.token, "DELETE", &route, "gone").await;
+    assert_eq!(gone.0, StatusCode::OK, "{}", gone.1);
+    assert_eq!(gone.1, json!({"id":id}));
+    assert_eq!(bare(&l, &l.token, "DELETE", &route, "gone").await, gone);
+    assert_eq!(
+        bare(&l, &l.token, "DELETE", &route, "anew").await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, listed) = call(&l, &l.token, "GET", "/v1/nodes", json!({}), "").await;
+    assert!(listed["items"].as_array().unwrap().is_empty(), "{listed}");
+    // It cannot be brought back by changing its mode, and its certificate
+    // enrols nothing.
+    assert_eq!(
+        call(
+            &l,
+            &l.token,
+            "PATCH",
+            &route,
+            json!({"disabled":false,"draining":false}),
+            ""
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        l.store.node_identity(&pin).await.unwrap_err().status,
+        StatusCode::FORBIDDEN
+    );
+    // The execution it ran still names it.
+    let ran: Option<String> = sqlx::query_scalar("SELECT node_id FROM executions WHERE id=$1")
+        .bind(s(&op["resource_id"]))
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(ran.as_deref(), Some(id.as_str()));
+    // The same name and certificate register again, as another node.
+    let (status, again) = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/nodes",
+        registration,
+        "register-again",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    assert_ne!(again["id"], node["id"]);
+    assert_eq!(
+        s(&l.store.node_identity(&pin).await.unwrap()["id"]),
+        s(&again["id"])
+    );
+    // A key deletes no node.
+    let k = key(&l, None, &["read"]).await;
+    assert_eq!(
+        bare(
+            &l,
+            s(&k["token"]),
+            "DELETE",
+            &format!("/v1/nodes/{}", s(&again["id"])),
+            "no"
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    l.finish().await;
+}
