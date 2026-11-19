@@ -51,6 +51,7 @@ fn migrations() -> Vec<(String, Vec<&'static str>)> {
     let edges = [crate::edges::MIGRATION];
     let app_takeovers = [include_str!("../sql/app_takeovers.sql")];
     let edge_seen = [include_str!("../sql/edge_seen.sql")];
+    let release_guard = [include_str!("../sql/release_guard.sql")];
     vec![
         (
             digest(format!("{SCHEMA}\0{}", BASELINE.join("\0"))),
@@ -85,6 +86,7 @@ fn migrations() -> Vec<(String, Vec<&'static str>)> {
         (digest(edges[0]), edges.to_vec()),
         (digest(app_takeovers[0]), app_takeovers.to_vec()),
         (digest(edge_seen[0]), edge_seen.to_vec()),
+        (digest(release_guard[0]), release_guard.to_vec()),
     ]
 }
 
