@@ -282,11 +282,14 @@ async fn a_launch_names_its_run_channel_and_only_its_credential_is_answered() {
         StatusCode::CONFLICT
     );
     // Once the execution has released its reservation the launch is over.
+    // Changed here underneath the store, it is told as a heartbeat that
+    // made the change would tell it.
     sqlx::query("UPDATE executions SET reserved=false WHERE id=$1")
         .bind(id)
         .execute(&l.store.pool)
         .await
         .unwrap();
+    l.store.gateway.gates.changed();
     assert_eq!(
         call(&router, "POST", &outcome, Some(credential)).await,
         StatusCode::CONFLICT
@@ -545,13 +548,21 @@ async fn a_disabled_nodes_launches_are_refused_on_the_run_channel() {
         l.store
             .run_channel_authorize(id, generation, credential)
             .await
+            .map(|_| ())
             .map_err(|error| error.status)
     };
+    // Known, and believed: a second call reads nothing.
     assert_eq!(authorized().await, Ok(()));
+    let reads = || n(&l.store.background_status(&l.operator).unwrap()["run_channel"]["reads"]);
+    let before = reads();
+    assert_eq!(authorized().await, Ok(()));
+    assert_eq!(reads(), before);
     l.store
         .node_mode(&l.operator, s(&node["id"]), json!({"disabled":true}))
         .await
         .unwrap();
+    // Disabling the node is seen at the next call, though what was read
+    // of the launch is not two seconds old.
     assert_eq!(authorized().await, Err(StatusCode::FORBIDDEN));
     assert_eq!(
         call(&router, "POST", &path, Some(credential)).await,
@@ -563,5 +574,150 @@ async fn a_disabled_nodes_launches_are_refused_on_the_run_channel() {
         .await
         .unwrap();
     assert_eq!(authorized().await, Ok(()));
+    l.finish().await;
+}
+
+/// A renewal of an outbound grant, an ask for no more bytes, is answered
+/// from memory: no transaction, a revision higher than the last, ten
+/// seconds more. A control plane that restarted, and has nothing in
+/// memory, takes the shim's revision as it is and goes on above it.
+#[tokio::test]
+async fn an_outbound_grant_is_renewed_from_memory_and_across_a_restart() {
+    use fenders_control_plane::egress_budget::CONTRACT;
+    const LAUNCHER: &str = "abababababababababababababababababababababababababababababababab";
+    let l = Lab::new().await;
+    l.node("worker").await;
+    let op = l.create("limited", json!({"artifact_id":l.artifact})).await;
+    l.store.schedule().await.unwrap();
+    let e = l.run(&op).await;
+    let (id, generation, node) = (s(&e["id"]), n(&e["generation"]), s(&e["node_id"]));
+    l.store
+        .node_mode(
+            &l.operator,
+            node,
+            json!({"egress_budget_launcher":LAUNCHER}),
+        )
+        .await
+        .unwrap();
+    l.store.heartbeat(node, json!({"boot_id":"test-boot","reports":[],"confinement":HOST_CONFINEMENT,"egress_budget_contract":CONTRACT,"launcher_digest":LAUNCHER})).await.unwrap();
+    sqlx::query("UPDATE executions SET egress_budget_launcher=$1 WHERE id=$2")
+        .bind(LAUNCHER)
+        .bind(id)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    l.store.gateway.gates.changed();
+    let channel =
+        || RunChannel::new("https://control.test:9093", "fixture ca".into(), None).unwrap();
+    let store = l.store.clone().with_run_channel(channel());
+    let bearer =
+        s(&store.assignment(node, id, generation).await.unwrap()["spec"]["channel"]["credential"])
+            .to_owned();
+    let path = format!("/run/{id}/{generation}/v1/run/egress");
+    let ask = |store: &Store, revision: i64, request: String, bytes: i64| {
+        let router = run_channel::router(store.clone());
+        let (path, bearer) = (path.clone(), bearer.clone());
+        async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("Authorization", format!("Bearer {bearer}"))
+                        .body(Body::from(
+                            json!({"expected_revision":revision,"request_id":request,"bytes":bytes})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        }
+    };
+    let written = || async {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT revision,revision_reserved FROM execution_egress_budgets WHERE execution_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap()
+    };
+    // Bytes are a transaction, which reserves revisions for renewals.
+    let granted = ask(&store, 0, "g".into(), 4000).await;
+    assert_eq!(granted["revision"], 1);
+    assert!(granted.get("revision_reserved").is_none());
+    assert_eq!(written().await, (1, 1 + (1 << 20)));
+    // Renewals: no transaction, each a revision more, ten seconds more.
+    let locked = store.load.locked_transactions();
+    let mut revision = 1;
+    for k in 0..5 {
+        let renewed = ask(&store, revision, format!("r{k}"), 0).await;
+        assert_eq!(n(&renewed["revision"]), revision + 1);
+        assert_eq!(renewed["ceiling_bytes"], granted["ceiling_bytes"]);
+        assert!(n(&renewed["ttl_ms"]) > 9000 && n(&renewed["ttl_ms"]) <= 10000);
+        revision += 1;
+    }
+    assert_eq!(store.load.locked_transactions(), locked);
+    assert_eq!(
+        written().await.0,
+        1,
+        "written by the flush, not by a renewal"
+    );
+    store.flush_gateway().await.unwrap();
+    assert_eq!(written().await.0, revision);
+
+    // Two more, then the control plane restarts before its flush: the
+    // database is behind the shim. The new process takes the shim's
+    // revision as current, and goes on above it.
+    for k in 5..7 {
+        revision = n(&ask(&store, revision, format!("r{k}"), 0).await["revision"]);
+    }
+    assert_eq!(written().await.0, revision - 2);
+    let restarted = Store::from_pool(l.store.pool.clone(), l.root.path())
+        .unwrap()
+        .with_run_channel(channel());
+    let renewed = ask(&restarted, revision, "after".into(), 0).await;
+    assert_eq!(n(&renewed["revision"]), revision + 1);
+    // And from memory again from there.
+    let locked = restarted.load.locked_transactions();
+    let again = ask(&restarted, revision + 1, "again".into(), 0).await;
+    assert_eq!(n(&again["revision"]), revision + 2);
+    assert_eq!(restarted.load.locked_transactions(), locked);
+
+    // The workspace suspended: no renewal from memory, and the database
+    // gives none.
+    sqlx::query("UPDATE tenants SET lifecycle_state='suspending' WHERE id=$1")
+        .bind(&l.tenant)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE executions SET desired='stopped' WHERE id=$1")
+        .bind(id)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    restarted.gateway.gates.changed();
+    let router = run_channel::router(restarted.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path.clone())
+                .header("Authorization", format!("Bearer {bearer}"))
+                .body(Body::from(
+                    json!({"expected_revision":revision + 2,"request_id":"late","bytes":0})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     l.finish().await;
 }

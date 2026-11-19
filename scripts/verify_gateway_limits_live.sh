@@ -11,12 +11,13 @@
 #  - such requests sent while an app is starting do not end its execution:
 #    the app serves, with no restart counted, and is never blocked;
 #  - requests whose clients go away before they are answered hold none of
-#    the workspace's transfer allowance a few seconds later, and the next
-#    request is answered rather than refused for too many in flight.
+#    the workspace's transfer allowance a few seconds later (what the
+#    gateway leases of it aside), none is in flight, and the next request
+#    is answered rather than refused for too many in flight.
 # Leaves the app and its records in the project; stops its execution.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-state=$repo/run/local
+state=${LOCAL_STATE:-$repo/run/local}
 out=${1:-$repo/run/gateway-limits-live-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$out"
 manage=https://127.0.0.1:19090
@@ -62,9 +63,11 @@ request() { # APP NAME [CURL ARGS…] PATH: writes NAME.body and NAME.json
     "${@:1:$#-1}" "https://$host:$gateway_port${*: -1}" > "$out/$name.json" || true
 }
 
-transfer() { # NAME: the workspace's transfer allowance, what is counted against it and what is held
+transfer() { # NAME: the workspace's transfer allowance, what is counted against it and what is held,
+  # leaving out what gateways hold as leases of it: passed to no one, and
+  # given back when the workspace has had no traffic for 30 seconds
   api GET "/workspaces/$tenant/usage" |
-    jq '{allowance: .allowance.transfer_bytes, counted: .transfer_allowance.bytes, held: .transfer_allowance.reserved_bytes}' > "$out/$1.transfer.json"
+    jq '{allowance: .allowance.transfer_bytes, counted: .transfer_allowance.bytes, held: (.transfer_allowance.reserved_bytes - .transfer_allowance.gateway_leased_bytes)}' > "$out/$1.transfer.json"
 }
 allow() { # BYTES: sets the workspace's transfer allowance, keeping the rest
   api PATCH "/workspaces/$tenant" "$(jq --argjson bytes "$1" \
@@ -112,6 +115,7 @@ wait || true
 rm -f "$out/slow.bin"
 sleep 5
 transfer after-abandoned
+api GET /control-plane/status | jq '{in_flight: .gateway.in_flight}' > "$out/after-abandoned.gateway.json"
 request "$app" after-abandoned /after-abandoned
 
 revision=$(api GET "$scope/apps/$app" | jq -er .revision)
@@ -122,17 +126,17 @@ jq -n --slurpfile long_idle "$out/long-idle.json" --slurpfile long_h2 "$out/long
   --slurpfile l1 "$out/long-1.json" --slurpfile l6 "$out/long-6.json" \
   --slurpfile wake "$out/wake.json" --slurpfile served "$out/served.json" \
   --rawfile served_body "$out/served.body" --slurpfile starting "$out/after-long-starting.json" \
-  --slurpfile held "$out/after-abandoned.transfer.json" --slurpfile next "$out/after-abandoned.json" '
+  --slurpfile held "$out/after-abandoned.transfer.json" --slurpfile next "$out/after-abandoned.json" --slurpfile gateway "$out/after-abandoned.gateway.json" '
   {long_target_at_an_idle_app: {status: $long_idle[0].status, over_http2: $long_h2[0].status,
      state_after: $after_idle[0].state},
    long_targets_while_starting: {first: $l1[0].status, last: $l6[0].status, wake: $wake[0].status,
      served: $served[0].status, body: $served_body, state: $starting[0].state,
      reason: $starting[0].reason},
-   abandoned: {held_bytes_after: $held[0].held, next: $next[0].status}}
+   abandoned: {held_bytes_after: $held[0].held, in_flight_after: $gateway[0].in_flight, next: $next[0].status}}
   | .passed = (.long_target_at_an_idle_app == {status: 414, over_http2: 431, state_after: "idle"}
       and .long_targets_while_starting.first == 414 and .long_targets_while_starting.last == 414
       and .long_targets_while_starting.wake == 200 and .long_targets_while_starting.served == 200
       and .long_targets_while_starting.body == "fenders:/served"
       and .long_targets_while_starting.state == "serving"
-      and .abandoned == {held_bytes_after: 0, next: 200})' | tee "$out/result.json"
+      and .abandoned == {held_bytes_after: 0, in_flight_after: 0, next: 200})' | tee "$out/result.json"
 jq -e .passed "$out/result.json" > /dev/null

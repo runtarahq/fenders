@@ -25,17 +25,9 @@ const BASELINE: &[&str] = &[
     crate::app_delete::MIGRATION,
 ];
 
-pub(crate) async fn apply(tx: &mut Tx) -> Result<()> {
-    sqlx::raw_sql(
-        "CREATE TABLE IF NOT EXISTS control_schema_migrations (
-        version bigint PRIMARY KEY CHECK(version>0),
-        checksum text NOT NULL CHECK(checksum ~ '^[a-f0-9]{64}$'),
-        applied_at timestamptz NOT NULL DEFAULT clock_timestamp())",
-    )
-    .execute(&mut **tx)
-    .await?;
-    // Keep the qualified baseline immutable. Main's HTTP-run schema is a new
-    // additive migration, including when upgrading an existing version-1 ledger.
+/// The migrations this binary knows, in order: each a checksum and its
+/// statements.
+fn migrations() -> Vec<(String, Vec<&'static str>)> {
     let http_runs = [include_str!("http_runs.sql")];
     let pickup = [crate::pickup::MIGRATION];
     let static_connections = [include_str!("../sql/static_connections.sql")];
@@ -48,27 +40,86 @@ pub(crate) async fn apply(tx: &mut Tx) -> Result<()> {
     let project_deletion = [crate::store::Store::PROJECT_MIGRATION];
     let node_deletion = [crate::nodes::DELETION_MIGRATION];
     let workspace_deletion = [crate::workspace_lifecycle::DELETION_MIGRATION];
-    let migrations = [
+    let gateway_sessions = [crate::gateway::MIGRATION];
+    let gateway_leases = [crate::gateway::LEASES_MIGRATION];
+    let gate_changes = [include_str!("../sql/gate_changes.sql")];
+    let egress_renewals = [include_str!("../sql/egress_renewals.sql")];
+    let gateway_observations = [crate::observed::MIGRATION];
+    let lease_recalls = [include_str!("../sql/lease_recalls.sql")];
+    let websocket_sessions = [include_str!("../sql/websocket_sessions.sql")];
+    let limit_shares = [crate::shares::MIGRATION];
+    let edges = [crate::edges::MIGRATION];
+    let app_takeovers = [include_str!("../sql/app_takeovers.sql")];
+    vec![
         (
             digest(format!("{SCHEMA}\0{}", BASELINE.join("\0"))),
-            BASELINE,
+            BASELINE.to_vec(),
         ),
-        (digest(http_runs[0]), http_runs.as_slice()),
-        (digest(pickup[0]), pickup.as_slice()),
-        (digest(static_connections[0]), static_connections.as_slice()),
-        (digest(http_scale[0]), http_scale.as_slice()),
-        (digest(http_limits[0]), http_limits.as_slice()),
+        (digest(http_runs[0]), http_runs.to_vec()),
+        (digest(pickup[0]), pickup.to_vec()),
+        (digest(static_connections[0]), static_connections.to_vec()),
+        (digest(http_scale[0]), http_scale.to_vec()),
+        (digest(http_limits[0]), http_limits.to_vec()),
         (
             digest(websocket_connections[0]),
-            websocket_connections.as_slice(),
+            websocket_connections.to_vec(),
         ),
-        (digest(secret_binding[0]), secret_binding.as_slice()),
-        (digest(operator_receipts[0]), operator_receipts.as_slice()),
-        (digest(audit_trail[0]), audit_trail.as_slice()),
-        (digest(project_deletion[0]), project_deletion.as_slice()),
-        (digest(node_deletion[0]), node_deletion.as_slice()),
-        (digest(workspace_deletion[0]), workspace_deletion.as_slice()),
-    ];
+        (digest(secret_binding[0]), secret_binding.to_vec()),
+        (digest(operator_receipts[0]), operator_receipts.to_vec()),
+        (digest(audit_trail[0]), audit_trail.to_vec()),
+        (digest(project_deletion[0]), project_deletion.to_vec()),
+        (digest(node_deletion[0]), node_deletion.to_vec()),
+        (digest(workspace_deletion[0]), workspace_deletion.to_vec()),
+        (digest(gateway_sessions[0]), gateway_sessions.to_vec()),
+        (digest(gateway_leases[0]), gateway_leases.to_vec()),
+        (digest(gate_changes[0]), gate_changes.to_vec()),
+        (digest(egress_renewals[0]), egress_renewals.to_vec()),
+        (
+            digest(gateway_observations[0]),
+            gateway_observations.to_vec(),
+        ),
+        (digest(lease_recalls[0]), lease_recalls.to_vec()),
+        (digest(websocket_sessions[0]), websocket_sessions.to_vec()),
+        (digest(limit_shares[0]), limit_shares.to_vec()),
+        (digest(edges[0]), edges.to_vec()),
+        (digest(app_takeovers[0]), app_takeovers.to_vec()),
+    ]
+}
+
+/// Whether the database has exactly the migrations this binary knows, for a
+/// process that does not apply them.
+pub(crate) async fn verify(tx: &mut Tx) -> Result<()> {
+    let applied: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT version,checksum FROM control_schema_migrations ORDER BY version LIMIT 64",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    let known = migrations();
+    if applied.len() != known.len()
+        || applied
+            .iter()
+            .zip(known.iter())
+            .any(|((version, checksum), (expected, _))| checksum != expected || *version < 1)
+    {
+        return Err(Error::invalid(
+            "the database's schema is not this binary's: migrate it with the control plane first",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn apply(tx: &mut Tx) -> Result<()> {
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS control_schema_migrations (
+        version bigint PRIMARY KEY CHECK(version>0),
+        checksum text NOT NULL CHECK(checksum ~ '^[a-f0-9]{64}$'),
+        applied_at timestamptz NOT NULL DEFAULT clock_timestamp())",
+    )
+    .execute(&mut **tx)
+    .await?;
+    // Keep the qualified baseline immutable. Main's HTTP-run schema is a new
+    // additive migration, including when upgrading an existing version-1 ledger.
+    let migrations = migrations();
     let applied: Vec<(i64, String)> = sqlx::query_as(
         "SELECT version,checksum FROM control_schema_migrations ORDER BY version LIMIT 64",
     )
@@ -87,7 +138,7 @@ pub(crate) async fn apply(tx: &mut Tx) -> Result<()> {
         ));
     }
     for (index, (checksum, statements)) in migrations.iter().enumerate().skip(applied.len()) {
-        for statement in *statements {
+        for statement in statements.iter() {
             sqlx::raw_sql(statement).execute(&mut **tx).await?;
         }
         sqlx::query("INSERT INTO control_schema_migrations(version,checksum) VALUES($1,$2)")

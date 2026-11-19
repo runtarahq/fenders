@@ -120,7 +120,7 @@ impl Store {
         }
         Self::metadata_limit(&mut tx, tenant, "secrets", crate::store::MAX_SECRETS).await?;
         let resource = uid();
-        let row=one(&mut tx,"INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext,bound) VALUES($1,$2,$3,$4,convert_to($5,'UTF8'),true) RETURNING id,name,created",args![resource,tenant,project,value["name"],crate::secret_binding::seal(&self.cipher,tenant,project,&resource,plain.as_bytes())]).await?;
+        let row=one(&mut tx,"INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext,bound) VALUES($1,$2,$3,$4,convert_to($5,'UTF8'),true) RETURNING id,name,created",args![resource,tenant,project,value["name"],crate::secret_binding::seal(self.cipher()?,tenant,project,&resource,plain.as_bytes())]).await?;
         Self::audit(&mut tx, p, "secret.create", &resource, tenant, json!({})).await?;
         if let Some(key) = key {
             crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
@@ -158,7 +158,7 @@ impl Store {
         if let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await? {
             return Ok(row);
         }
-        let row = optional(&mut tx,"UPDATE secrets SET ciphertext=convert_to($4,'UTF8'),bound=true WHERE tenant_id=$1 AND project_id=$2 AND id=$3 RETURNING id,name,created",args![tenant,project,secret,crate::secret_binding::seal(&self.cipher,tenant,project,secret,plain.as_bytes())]).await?.ok_or_else(Error::missing)?;
+        let row = optional(&mut tx,"UPDATE secrets SET ciphertext=convert_to($4,'UTF8'),bound=true WHERE tenant_id=$1 AND project_id=$2 AND id=$3 RETURNING id,name,created",args![tenant,project,secret,crate::secret_binding::seal(self.cipher()?,tenant,project,secret,plain.as_bytes())]).await?.ok_or_else(Error::missing)?;
         Self::audit(&mut tx, p, "secret.rotate", secret, tenant, json!({})).await?;
         crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
         tx.commit().await?;
@@ -234,7 +234,7 @@ impl Store {
         for (key, secret) in spec["secret_env"].as_object().unwrap() {
             let row=one(tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3 AND bound",args![tenant,project,secret]).await?;
             size += crate::secret_binding::open(
-                &self.cipher,
+                self.cipher()?,
                 tenant,
                 project,
                 s(secret),
@@ -385,13 +385,42 @@ impl Store {
         Ok(op)
     }
     pub async fn schedule(&self) -> Result<()> {
+        // After a pass that failed (the database could not be reached), no
+        // edge could touch its session either: they are not taken for dead
+        // until this has passed for as long as one may go untouched.
+        let expire_sessions = {
+            let mut recovering = self.recovering.lock().unwrap_or_else(|e| e.into_inner());
+            match *recovering {
+                None => true,
+                Some(None) => {
+                    *recovering = Some(Some(std::time::Instant::now()));
+                    false
+                }
+                Some(Some(since)) if since.elapsed() >= crate::gateway::SESSION_GRACE => {
+                    *recovering = None;
+                    true
+                }
+                Some(Some(_)) => false,
+            }
+        };
+        let passed = self.schedule_pass(expire_sessions).await;
+        if passed.is_err() {
+            *self.recovering.lock().unwrap_or_else(|e| e.into_inner()) = Some(None);
+        }
+        passed
+    }
+    async fn schedule_pass(&self, expire_sessions: bool) -> Result<()> {
         self.claim_schedule_occurrences().await?;
         self.dispatch_schedule_runs().await?;
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         Self::expire_schedule_queue(&mut tx).await?;
         Self::retire_schedule_dispatch(&mut tx).await?;
         crate::placement::expire(&mut tx).await?;
-        Self::expire_ingress(&mut tx).await?;
+        let expired = Self::expire_ingress(&mut tx).await?;
+        if expire_sessions {
+            Self::expire_gateway_sessions(&mut tx).await?;
+        }
+        Self::place_apps(&mut tx).await?;
         Self::expire_execution_logs(&mut tx).await?;
         Self::expire_app_events(&mut tx).await?;
         Self::compact_usage_backlog(&mut tx).await?;
@@ -427,10 +456,15 @@ impl Store {
         exec(&mut tx,"UPDATE operations o SET state='succeeded',updated=now() WHERE kind='stop-deployment' AND state='pending' AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.deployment_id=o.resource_id AND e.reserved)",args![]).await?;
         Self::reconcile_app_runs(&mut tx).await?;
         Self::reconcile_workspace_suspensions(&mut tx).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
+        self.ingress_expired(&expired);
         self.reclaim_artifact_blobs().await?;
         self.reclaim_orphan_uploads().await?;
-        self.websocket_sweep().await?;
+        // WebSocket connections are held where the gateway is: a control
+        // process holds none, and the edges sweep their own.
+        if self.serves != crate::store::Serves::Control {
+            self.websocket_sweep().await?;
+        }
         Ok(())
     }
 }

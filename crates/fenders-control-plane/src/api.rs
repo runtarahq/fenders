@@ -67,6 +67,53 @@ async fn management_headers(mut response: Response) -> Response {
     }
     response
 }
+/// What an edge answers on its management port: whether it is up and can
+/// serve, for whatever watches it, and this process's status, for the
+/// operator. Nothing else: the management API is the control process's.
+pub fn edge(store: Store) -> Router {
+    Router::new()
+        .fallback(edge_dispatch)
+        .with_state(store)
+        .layer(axum::middleware::map_response(management_headers))
+}
+
+async fn edge_dispatch(State(store): State<Store>, req: Request) -> Result<Response> {
+    let (parts, _) = req.into_parts();
+    let method = match parts.method.as_str() {
+        "HEAD" => "GET",
+        method => method,
+    };
+    match (method, parts.uri.path()) {
+        ("GET", "/healthz") => Ok(Json(json!({"status":"ok"})).into_response()),
+        // An edge is ready while it serves, from memory if it must: what
+        // watches it is to take it out only when it serves nothing.
+        ("GET", "/readyz") => Ok(if !store.gateway.outage.past_bound() {
+            Json(json!({"status":"ready"})).into_response()
+        } else {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"status":"unavailable"})),
+            )
+                .into_response()
+        }),
+        ("GET", "/v1/control-plane/status") => {
+            let token = parts
+                .headers
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .ok_or_else(Error::unauthorized)?;
+            let p = store.authenticate(token).await?;
+            Ok((
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(store.background_status(&p)?),
+            )
+                .into_response())
+        }
+        _ => Err(Error::missing()),
+    }
+}
+
 pub fn internal(store: Store) -> Router {
     Router::new().fallback(internal_dispatch).with_state(store)
 }
@@ -455,6 +502,23 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
             store.audit_trail(&p, tenant, page).await?
         }
         ("GET", ["v1", "nodes"]) => store.node_page(&p, list_page(&parts.uri)?).await?,
+        ("GET", ["v1", "edges"]) => store.edge_page(&p, list_page(&parts.uri)?).await?,
+        ("GET", ["v1", "edge-routes"]) => store.edge_routes(&p, list_page(&parts.uri)?).await?,
+        ("POST", ["v1", "edges"]) => {
+            status = StatusCode::CREATED;
+            store
+                .register_edge_keyed(&p, parse(&bytes)?, Some(key))
+                .await?
+        }
+        ("DELETE", ["v1", "edges", edge]) => {
+            no_body(&bytes)?;
+            store.delete_edge(&p, edge, key).await?
+        }
+        ("PATCH", ["v1", "edges", edge]) => {
+            store
+                .edge_mode_keyed(&p, edge, parse(&bytes)?, offered(key))
+                .await?
+        }
         ("GET", ["v1", "public-egress-policy"]) => store.public_egress_policy(&p).await?,
         ("PUT", ["v1", "public-egress-policy"]) => {
             store
@@ -1391,6 +1455,60 @@ async fn http_sample(state: &ApiState, hostname: &str, sample: HttpSample) -> Re
         .body(axum::body::Body::from(body))
         .map_err(|_| Error::internal())?;
     let started = std::time::Instant::now();
+    // A control process serves no gateway: the request goes to the edges',
+    // as a client's does, and what they answer is the answer.
+    if let Some(edge) = &state.store.edge_gateway {
+        let (parts, body) = request.into_parts();
+        let body = http_body_util::BodyExt::collect(body)
+            .await
+            .map_err(|_| Error::internal())?
+            .to_bytes();
+        let mut asked = edge
+            .client
+            .request(
+                parts.method,
+                format!("{}{}", edge.base, sent["path"].as_str().unwrap_or("/")),
+            )
+            .body(body);
+        for (name, value) in &parts.headers {
+            asked = asked.header(name, value);
+        }
+        return Ok(match asked.send().await {
+            Ok(mut response) => {
+                let status = response.status().as_u16();
+                let headers: serde_json::Map<String, Value> = response
+                    .headers()
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value.to_str().ok().map(|v| (key.to_string(), json!(v)))
+                    })
+                    .collect();
+                let (mut preview, mut bytes, mut whole) = (Vec::new(), 0usize, true);
+                loop {
+                    match response.chunk().await {
+                        Ok(Some(data)) => {
+                            bytes += data.len();
+                            let room = (16 * 1024usize).saturating_sub(preview.len());
+                            preview.extend_from_slice(&data[..data.len().min(room)]);
+                            if bytes > 1024 * 1024 {
+                                whole = false;
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            whole = false;
+                            break;
+                        }
+                    }
+                }
+                json!({"outcome":"response","request_id":request_id,"method":sent["method"],"path":sent["path"],"duration_ms":started.elapsed().as_millis() as u64,"status":status,"headers":headers,"body":STANDARD.encode(&preview),"body_bytes":bytes,"truncated":!whole || preview.len()<bytes})
+            }
+            Err(_) => {
+                json!({"outcome":"refused","request_id":request_id,"method":sent["method"],"path":sent["path"],"duration_ms":started.elapsed().as_millis() as u64,"gateway_status":503,"error":"the edges' gateway could not be reached"})
+            }
+        });
+    }
     let mut dispatched = false;
     // Reuse admission, wake, readiness, transfer accounting and pinned node
     // transport. Never copy management headers or follow application redirects.
@@ -1432,7 +1550,10 @@ async fn http_sample(state: &ApiState, hostname: &str, sample: HttpSample) -> Re
     }
 }
 
-async fn gateway_dispatch(State(state): State<ApiState>, req: Request) -> Result<Response> {
+pub(crate) async fn gateway_dispatch(
+    State(state): State<ApiState>,
+    req: Request,
+) -> Result<Response> {
     // Paths under `/_fenders/` are the platform's: the gateway asks an app
     // for them itself (a WebSocket's events), a client cannot.
     if req.uri().path().starts_with(crate::websocket::RESERVED) {
@@ -1451,6 +1572,28 @@ async fn gateway_dispatch(State(state): State<ApiState>, req: Request) -> Result
             "request target too long",
         ));
     }
+    // A request of an app another edge owns is passed to it, once.
+    if req
+        .extensions()
+        .get::<crate::forward::Forwarded>()
+        .is_none()
+        && state.store.gateway.edge.is_some()
+    {
+        let (parts, body) = req.into_parts();
+        let host = gateway_host(&parts, &state.domain)?;
+        let req = Request::from_parts(parts, body);
+        if let Some(owner) = state.store.foreign_owner(&host).await? {
+            return state
+                .store
+                .forward(&owner, crate::forward::Listener::Gateway, req)
+                .await;
+        }
+        return gateway_dispatch_owned(state, req).await;
+    }
+    gateway_dispatch_owned(state, req).await
+}
+
+async fn gateway_dispatch_owned(state: ApiState, req: Request) -> Result<Response> {
     if crate::websocket::wanted(req.headers()) {
         let (parts, body) = req.into_parts();
         let host = gateway_host(&parts, &state.domain)?;
@@ -1605,7 +1748,7 @@ async fn gateway_dispatch_tracked(
         );
         // Once the request is offered, only its not being taken proves that
         // the app did not run. Admission failures occur before this point.
-        state.store.ingress_dispatched(&lease).await?;
+        state.store.ingress_dispatched(&lease);
         *dispatched = true;
         let (tx, request_body) = pipe();
         let admit = meter.clone();

@@ -19,7 +19,7 @@
 # Leaves the apps, the registered connection and the runs in the project.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-state=$repo/run/local
+state=${LOCAL_STATE:-$repo/run/local}
 out=${1:-$repo/run/egress-limit-live-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$out"
 manage=https://127.0.0.1:19090
@@ -69,9 +69,11 @@ run() { # APP NAME: starts a run, waits for its end, keeps the run and its outpu
   done
   jq -r '[.items[] | .bytes | @base64d] | join("")' "$out/$2.logs.json" > "$out/$2.txt"
 }
-transfer() { # NAME: the workspace's transfer allowance, what is counted against it and what is held
+transfer() { # NAME: the workspace's transfer allowance, what is counted against it and what is held,
+  # leaving out what gateways hold as leases of it: passed to no one, and
+  # given back when the workspace has had no traffic for 30 seconds
   api GET "/workspaces/$tenant/usage" |
-    jq '{allowance: .allowance.transfer_bytes, counted: .transfer_allowance.bytes, held: .transfer_allowance.reserved_bytes}' > "$out/$1.transfer.json"
+    jq '{allowance: .allowance.transfer_bytes, counted: .transfer_allowance.bytes, held: (.transfer_allowance.reserved_bytes - .transfer_allowance.gateway_leased_bytes)}' > "$out/$1.transfer.json"
 }
 allow() { # BYTES: sets the workspace's transfer allowance, keeping the rest
   api PATCH "/workspaces/$tenant" "$(jq --argjson bytes "$1" \

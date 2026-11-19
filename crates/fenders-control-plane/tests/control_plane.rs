@@ -53,18 +53,24 @@ mod egress_budget;
 mod execution_input_retention;
 #[path = "cases/execution_logs.rs"]
 mod execution_logs;
+#[path = "cases/gateway_leases.rs"]
+mod gateway_leases;
 #[path = "cases/http_runs.rs"]
 mod http_runs;
 #[path = "cases/ingress_admission.rs"]
 mod ingress_admission;
 #[path = "cases/key_rotation.rs"]
 mod key_rotation;
+#[path = "cases/outage.rs"]
+mod outage;
 #[path = "cases/placement.rs"]
 mod placement;
 #[path = "cases/placement_retention.rs"]
 mod placement_retention;
 #[path = "cases/release_input_retention.rs"]
 mod release_input_retention;
+#[path = "cases/roles.rs"]
+mod roles;
 #[path = "cases/run_channel.rs"]
 mod run_channel;
 #[path = "cases/schema_migrations.rs"]
@@ -569,6 +575,8 @@ async fn ingress_budget_and_recovery_barrier() {
         .unwrap();
     l.store.ingress_finish(&lease, Some(100)).await.unwrap();
     l.store.ingress_finish(&lease, Some(100)).await.unwrap();
+    // Settled once, and written by the gateway's flush.
+    l.store.flush_gateway().await.unwrap();
     assert_eq!(
         l.store.usage(&l.operator, &l.tenant, None).await.unwrap()["ingress_month"]["bytes"],
         100

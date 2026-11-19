@@ -22,12 +22,18 @@ use tokio::{
 pub enum Component {
     Scheduler,
     PickupListener,
+    GatewayFlusher,
+    WebSocketSweep,
+    GateListener,
 }
 impl Component {
     fn name(self) -> &'static str {
         match self {
             Self::Scheduler => "scheduler",
             Self::PickupListener => "pickup_listener",
+            Self::GatewayFlusher => "gateway_flusher",
+            Self::WebSocketSweep => "websocket_sweep",
+            Self::GateListener => "gate_listener",
         }
     }
 }

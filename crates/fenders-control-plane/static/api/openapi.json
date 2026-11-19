@@ -4212,6 +4212,266 @@
           }
         }
       }
+    },
+    "/edges": {
+      "get": {
+        "operationId": "get__edges",
+        "summary": "List edges",
+        "description": "Operator only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EdgePage"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "post__edges",
+        "summary": "Register an edge",
+        "description": "With the pin of the certificate it serves its internal port with, before it is started with --edge-name. Operator only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The edge; a retry is answered with it again.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Edge"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EdgeRegistration"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
+    },
+    "/edges/{edge}": {
+      "patch": {
+        "operationId": "patch__edges_edge",
+        "summary": "Drain an edge, or stop draining it",
+        "description": "Operator only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Edge"
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Not required: the change says what is to be. Given, a retry is answered as the first call was."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Edge"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EdgeMode"
+              }
+            }
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "delete__edges_edge",
+        "summary": "Delete an edge",
+        "description": "Only one that is draining and owns no app any more: otherwise 409 in_use. Operator only.",
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Edge"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deleted"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        }
+      }
+    },
+    "/edge-routes": {
+      "get": {
+        "operationId": "get__edge_routes",
+        "summary": "Which edge owns each app's host name",
+        "description": "For a balancer that sends an app's requests to the edge that owns it, sparing the forwarding. By app. Operator only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageBefore"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted result. Follow operation/app/run state where applicable.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EdgeRoutePage"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        },
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -4375,6 +4635,15 @@
         "description": "The next of the page before, to continue after it. Pass back what was given: a cursor is not made up.",
         "schema": {
           "type": "string"
+        }
+      },
+      "Edge": {
+        "name": "edge",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
         }
       }
     },
@@ -5977,7 +6246,7 @@
       },
       "ControlPlaneStatus": {
         "type": "object",
-        "description": "How this control plane's own loops are doing. A loop that runs is not proof that work is placed.",
+        "description": "How this control plane's own loops are doing, and what this process has done since it started. A loop that runs is not proof that work is placed.",
         "properties": {
           "process_id": {
             "type": "string",
@@ -6065,12 +6334,91 @@
                 "consecutive_failures"
               ]
             }
+          },
+          "database": {
+            "type": "object",
+            "description": "Transactions made under the lock all changes share, and the time they waited for it. reachable is whether this process's gateway last reached the database, and unreachable_ms for how long it has not.",
+            "properties": {
+              "locked_transactions": {
+                "type": "integer"
+              },
+              "lock_wait_ms": {
+                "type": "integer"
+              },
+              "reachable": {
+                "type": "boolean"
+              },
+              "unreachable_ms": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "locked_transactions",
+              "lock_wait_ms"
+            ]
+          },
+          "gateway": {
+            "type": "object",
+            "description": "Requests for HTTP apps the gateway admitted and refused; of those, the ones that took the cold path, admission in a transaction under the lock all changes share, as a request to an app that is not serving does; and the request records it dropped because the database did not take them in time. in_flight is the requests it has in flight now. serving_from_memory is whether, the database not being reached, it serves what it knew.",
+            "properties": {
+              "admitted": {
+                "type": "integer"
+              },
+              "refused": {
+                "type": "integer"
+              },
+              "records_dropped": {
+                "type": "integer"
+              },
+              "cold": {
+                "type": "integer"
+              },
+              "in_flight": {
+                "type": "integer"
+              },
+              "serving_from_memory": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "admitted",
+              "refused",
+              "records_dropped",
+              "cold",
+              "in_flight"
+            ]
+          },
+          "run_channel": {
+            "type": "object",
+            "description": "Calls the run channel was made by runs' shims, and of those the ones that read the database to learn what their launch is: the rest were answered from what was read of it in the last two seconds.",
+            "properties": {
+              "calls": {
+                "type": "integer"
+              },
+              "reads": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "calls",
+              "reads"
+            ]
           }
         },
         "required": [
           "process_id",
           "uptime_ms",
-          "components"
+          "components",
+          "database",
+          "gateway",
+          "run_channel"
         ]
       },
       "Me": {
@@ -6722,6 +7070,14 @@
               },
               "reserved_bytes": {
                 "type": "integer"
+              },
+              "gateway_conservative_bytes": {
+                "type": "integer",
+                "description": "Of bytes, what was charged for the lease of a gateway that stopped without saying what it had passed."
+              },
+              "gateway_leased_bytes": {
+                "type": "integer",
+                "description": "Of reserved_bytes, what gateways hold as leases of the allowance: passed to no one yet, and given back when the workspace has had no traffic for 30 seconds or its allowance is changed."
               }
             }
           }
@@ -9785,6 +10141,180 @@
         },
         "required": [
           "id"
+        ]
+      },
+      "EdgeRegistration": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "cert_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "The pin of the certificate the edge serves its internal port with."
+          },
+          "endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "An HTTPS origin: the edge's internal port, where other edges pass it requests of the apps it owns."
+          }
+        },
+        "required": [
+          "name",
+          "cert_sha256",
+          "endpoint"
+        ]
+      },
+      "Edge": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "A process that serves the gateway and the run channel, as the operator registered it.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "cert_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "endpoint": {
+            "type": "string",
+            "format": "uri"
+          },
+          "draining": {
+            "type": "boolean"
+          },
+          "live": {
+            "type": "boolean",
+            "description": "Whether a process serves as this edge now."
+          },
+          "apps": {
+            "type": "integer",
+            "description": "The apps it owns."
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "cert_sha256",
+          "endpoint",
+          "draining",
+          "live",
+          "apps",
+          "created"
+        ]
+      },
+      "EdgeMode": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "draining": {
+            "type": "boolean",
+            "description": "Draining, it is given no app, and the apps it owns are moved to other edges."
+          }
+        },
+        "required": [
+          "draining"
+        ]
+      },
+      "EdgePage": {
+        "type": "object",
+        "description": "A page of Edge records, newest first.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Edge"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "EdgeRoute": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Which edge owns an app's host name, and where it is.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "app_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "edge_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "endpoint": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "id",
+          "app_id",
+          "hostname",
+          "edge_id",
+          "endpoint"
+        ]
+      },
+      "EdgeRoutePage": {
+        "type": "object",
+        "description": "A page of EdgeRoute records, by app.",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EdgeRoute"
+            }
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cursor to the page after this one: pass it as before. null when this is the last."
+          }
+        },
+        "required": [
+          "items",
+          "next"
         ]
       }
     }

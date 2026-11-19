@@ -65,7 +65,9 @@ async fn a_workspaces_request_limits_are_its_plans_and_admission_is_audited_once
         "finishing does not reset the rate window"
     );
     // Admission was audited once for the minute, not once a request; each
-    // request has its own usage.
+    // request has its own usage. The audit row is written by a flush.
+    assert_eq!(audited().await, 0);
+    l.store.flush_gateway().await.unwrap();
     assert_eq!(audited().await, 1);
     assert_eq!(
         l.store.usage(&l.operator, &l.tenant, None).await.unwrap()["ingress_month"]["requests"],
@@ -74,6 +76,7 @@ async fn a_workspaces_request_limits_are_its_plans_and_admission_is_audited_once
     // A minute on, the window has passed: admitted again, and audited again.
     l.store.http_rates.advance(61);
     let lease = l.store.ingress_start(hostname, 0).await.unwrap().1;
+    l.store.flush_gateway().await.unwrap();
     assert_eq!(audited().await, 2);
 
     // Two at once: a third is refused while two are in flight, whatever the
@@ -156,5 +159,132 @@ async fn requests_that_cannot_be_admitted_are_refused_without_the_mutation_lock(
         .await
         .unwrap();
     drop(holder);
+    l.finish().await;
+}
+
+/// What a request costs is read by the operator: the transactions this
+/// process made under the mutation lock, and what its gateway admitted and
+/// refused.
+#[tokio::test]
+async fn the_status_counts_locked_transactions_and_admissions() {
+    let l = Lab::new().await;
+    let node = l.node("count-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    let hostname = s(&route["hostname"]);
+    let status = || l.store.background_status(&l.operator).unwrap();
+    // The first request after the app was brought up opens its gate, which
+    // bringing it up closed, and takes the project's lease.
+    let lease = l.store.ingress_start(hostname, 0).await.unwrap().1;
+    l.store.ingress_finish(&lease, Some(0)).await.unwrap();
+    let before = status();
+    for _ in 0..3 {
+        let lease = l.store.ingress_start(hostname, 0).await.unwrap().1;
+        l.store.ingress_finish(&lease, Some(0)).await.unwrap();
+    }
+    assert!(l.store.ingress_start("nobody.apps.test", 0).await.is_err());
+    let after = status();
+    let grew = |part: &str, name: &str| n(&after[part][name]) - n(&before[part][name]);
+    assert_eq!(grew("gateway", "admitted"), 3);
+    assert_eq!(grew("gateway", "refused"), 1);
+    // The app serves: its requests are admitted and settled in memory,
+    // with no transaction under the lock, and so is the refusal of a host
+    // name that is nobody's.
+    assert_eq!(grew("gateway", "cold"), 0);
+    assert_eq!(grew("database", "locked_transactions"), 0);
+    assert!(after["database"]["lock_wait_ms"].is_u64());
+    // A key is told nothing of it.
+    let (key, _) = l.credential("viewer", None).await;
+    assert!(l.store.background_status(&key).is_err());
+    l.finish().await;
+}
+
+/// A request to an app that serves is admitted from what the gateway knows
+/// in memory, and a change this process makes is seen by the next one:
+/// what was known before it is not believed after it.
+#[tokio::test]
+async fn warm_admission_sees_a_change_at_the_next_request() {
+    let l = Lab::new().await;
+    let node = l.node("warm-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    let hostname = s(&route["hostname"]);
+    let held = l.store.ingress_start(hostname, 0).await.unwrap().1;
+    // Warm: a second request at once is admitted in memory.
+    let cold = || n(&l.store.background_status(&l.operator).unwrap()["gateway"]["cold"]);
+    let before = cold();
+    let second = l.store.ingress_start(hostname, 0).await.unwrap().1;
+    assert_eq!(cold(), before);
+    l.store.ingress_finish(&second, Some(0)).await.unwrap();
+    // One at a time from now: with one in flight, the next is refused.
+    l.store
+        .update_http_limits(
+            &l.operator,
+            &l.tenant,
+            json!({"concurrent_requests":1,"requests_per_minute":1000}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        l.store.ingress_start(hostname, 0).await.unwrap_err().status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    l.store.ingress_finish(&held, Some(0)).await.unwrap();
+    let third = l.store.ingress_start(hostname, 0).await.unwrap().1;
+    l.store.ingress_finish(&third, Some(0)).await.unwrap();
+    // Its node is not heard from: the scheduler marks the execution
+    // unreachable, and the next request finds nothing serving.
+    sqlx::query("UPDATE nodes SET last_seen=now()-interval '1 minute'")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    l.store.schedule().await.unwrap();
+    assert_eq!(
+        l.store.ingress_start(hostname, 0).await.unwrap_err().status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    l.finish().await;
+}
+
+/// A heartbeat or a scheduler pass that changes nothing of what decides
+/// whether an app serves leaves what the gateway knows be; one that does
+/// makes it be read again.
+#[tokio::test]
+async fn only_a_change_to_what_serves_makes_the_gateway_read_again() {
+    let l = Lab::new().await;
+    let node = l.node("epoch-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    l.store.schedule().await.unwrap();
+    let epoch = || l.store.gateway.gates.epoch();
+    let before = epoch();
+    // The same report again, and a pass with nothing to do.
+    l.report(&node, &all[0], "running", 2).await;
+    l.store.schedule().await.unwrap();
+    assert_eq!(epoch(), before);
+    let hostname = s(&route["hostname"]);
+    let request = l.store.ingress_start(hostname, 0).await.unwrap().1;
+    l.store.ingress_finish(&request, Some(0)).await.unwrap();
+    // The run stopped: that changes what serves.
+    l.report(&node, &all[0], "exited", 3).await;
+    assert!(epoch() > before);
     l.finish().await;
 }

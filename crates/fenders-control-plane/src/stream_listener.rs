@@ -83,7 +83,6 @@ async fn serve_closing_idle(
             .layer(axum::middleware::from_fn(move |request, next| {
                 track(seen.clone(), request, next)
             }));
-        let service = hyper_util::service::TowerToHyperService::new(router);
         connections.spawn(async move {
             let Ok(Ok(tls)) =
                 tokio::time::timeout(Duration::from_secs(10), acceptor.accept(socket)).await
@@ -93,6 +92,18 @@ async fn serve_closing_idle(
             if !slot.established() {
                 return;
             }
+            // The peer's certificate, where it showed one: an edge passing
+            // a request on to another.
+            let pin = tls
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|chain| chain.first())
+                .map(|leaf| crate::model::digest(leaf.as_ref()));
+            let router = router.layer(axum::Extension(
+                fenders_node_protocol::transport::PeerIdentity(pin),
+            ));
+            let service = hyper_util::service::TowerToHyperService::new(router);
             let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
             builder
                 .http1()

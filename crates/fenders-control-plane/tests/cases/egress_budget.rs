@@ -443,7 +443,9 @@ async fn outbound_grant_usage_counts_are_scoped_and_do_not_claim_fleet_enforceme
 async fn egress_and_gateway_share_one_transactional_allowance() {
     let l = Lab::new().await;
     let (node, e, route) = fixture(&l).await;
-    sqlx::query("UPDATE tenants SET transfer_bytes=1500000 WHERE id=$1")
+    // Room for the grant or for the gateway's lease, which takes what there
+    // is up to its least: not for both.
+    sqlx::query("UPDATE tenants SET transfer_bytes=1000000 WHERE id=$1")
         .bind(&l.tenant)
         .execute(&l.store.pool)
         .await
@@ -463,6 +465,8 @@ async fn egress_and_gateway_share_one_transactional_allowance() {
     );
     if let Ok((_, lease)) = inbound {
         l.store.ingress_finish(&lease, Some(0)).await.unwrap();
+        // The gateway gives its lease back when it stops.
+        l.store.close_gateway().await.unwrap();
     } else {
         let freeze = apply(&l, &node, &e, request("freeze", 1, "freeze-race")).await;
         apply(&l, &node, &e, settlement(&freeze, 0, "settle-race")).await;
@@ -518,6 +522,7 @@ async fn egress_and_gateway_share_one_transactional_allowance() {
     );
     let (_, lease) = l.store.ingress_start(&hostname, 0).await.unwrap();
     l.store.ingress_finish(&lease, Some(77)).await.unwrap();
+    l.store.close_gateway().await.unwrap();
     assert_eq!(totals(&l).await, (200, 0));
     l.finish().await;
 }

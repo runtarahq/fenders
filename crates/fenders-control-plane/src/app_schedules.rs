@@ -112,7 +112,7 @@ impl Store {
     /// Claim at most sixteen schedules. Cursor and run
     /// intent/outbox commit together. No node is contacted in this transaction.
     pub async fn claim_schedule_occurrences(&self) -> Result<()> {
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let now = clock(&mut tx).await?;
         let schedules=rows(&mut tx,"SELECT s.*,c.expression,c.timezone,c.timezone_database,a.active_release_id,a.target_release_id,l.state AS release_state,v.inspection FROM app_schedules s JOIN app_schedule_revisions c ON c.app_id=s.app_id AND c.revision=s.revision JOIN apps a ON a.id=s.app_id JOIN app_releases l ON l.id=a.active_release_id JOIN app_versions v ON v.id=l.version_id WHERE EXISTS(SELECT 1 FROM tenants tenant WHERE tenant.id=s.tenant_id AND tenant.lifecycle_state='active') AND c.enabled AND c.timezone_database=$1 AND a.desired='enabled' AND s.next_at<=now() ORDER BY s.updated,s.app_id LIMIT 16 FOR UPDATE OF s",args![chrono_tz::IANA_TZDB_VERSION]).await?;
         for row in schedules {
@@ -160,7 +160,7 @@ impl Store {
             .await?;
         }
         Self::materialize_missed_ticks(&mut tx).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(())
     }
     async fn materialize_missed_ticks(tx: &mut Tx) -> Result<()> {
@@ -181,7 +181,7 @@ impl Store {
         Ok(())
     }
     pub async fn dispatch_schedule_runs(&self) -> Result<()> {
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let runs=rows(&mut tx,"SELECT r.*,d.deadline,(d.deadline<now()) AS expired,a.desired,a.active_release_id,a.target_release_id,s.revision AS current_revision,c.enabled,c.expression,c.timezone,c.timezone_database,l.spec,l.state AS release_state,v.inspection FROM app_run_dispatch d JOIN app_runs r ON r.id=d.run_id JOIN apps a ON a.id=r.app_id JOIN app_schedules s ON s.app_id=r.app_id JOIN app_schedule_revisions c ON c.app_id=s.app_id AND c.revision=s.revision JOIN app_releases l ON l.id=r.release_id JOIN app_versions v ON v.id=l.version_id WHERE d.state='pending' ORDER BY d.updated,d.run_id LIMIT 64 FOR UPDATE OF d",args![]).await?;
         for run in runs {
             let reason = if !Self::workspace_active(&mut tx, s(&run["tenant_id"])).await? {
@@ -260,7 +260,7 @@ impl Store {
             exec(&mut tx,"UPDATE app_run_dispatch SET state='dispatched',last_error=NULL,updated=now() WHERE run_id=$1",args![run["id"]]).await?;
             Self::audit_system(&mut tx,"scheduler","app.scheduled-run",&run["app_id"],&run["tenant_id"],json!({"run_id":run["id"],"execution_id":execution["id"],"scheduled_at":run["scheduled_at"],"trigger_revision":run["trigger_revision"]})).await?;
         }
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(())
     }
     async fn skip_scheduled_run(tx: &mut Tx, run: &Value, reason: &str) -> Result<()> {

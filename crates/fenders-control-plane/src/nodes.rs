@@ -345,7 +345,7 @@ impl Store {
             .as_array()
             .filter(|v| v.len() <= 1024)
             .ok_or_else(|| Error::invalid("invalid heartbeat reports"))?;
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         optional(
             &mut tx,
             "SELECT id FROM nodes WHERE id=$1 AND NOT disabled FOR UPDATE",
@@ -508,13 +508,13 @@ impl Store {
         self.reconcile_app_http(&mut tx).await?;
         Self::reconcile_workspace_suspensions(&mut tx).await?;
         let assignments=rows(&mut tx,"SELECT id,generation,desired,spec,tenant_id,project_id FROM executions WHERE node_id=$1 AND reserved ORDER BY created",args![node]).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(json!(assignments))
     }
     pub async fn assignment(&self, node: &str, execution: &str, generation: i64) -> Result<Value> {
         identity(execution)?;
         let prepared = self.prepare_https(node, execution, generation).await?;
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let e = optional(
             &mut tx,
             "SELECT * FROM executions WHERE id=$1 AND node_id=$2 AND generation=$3 AND reserved",
@@ -564,7 +564,7 @@ impl Store {
             // and project that it names: a ciphertext moved here from
             // another row does not open.
             let plain = crate::secret_binding::open(
-                &self.cipher,
+                self.cipher()?,
                 s(&e["tenant_id"]),
                 s(&e["project_id"]),
                 s(&secret),
@@ -613,7 +613,7 @@ impl Store {
         for (field, value) in run_channel.iter().flat_map(|v| v.as_object()).flatten() {
             spec[field] = value.clone();
         }
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(
             json!({"id":e["id"],"generation":e["generation"],"desired":e["desired"],"spec":spec,"artifact":artifact,"egress":egress,"compile_scope":e["tenant_id"]}),
         )

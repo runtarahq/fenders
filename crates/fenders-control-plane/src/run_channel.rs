@@ -120,24 +120,19 @@ impl Store {
         &self,
         execution: &str,
         generation: i64,
+        launch: &crate::launch::Launch,
         mut batch: Value,
     ) -> Result<Value> {
         if !batch.is_object() || batch.get("boot_id").is_some() {
             return Err(Error::invalid("invalid log batch fields"));
         }
-        let mut tx = self.transaction(false, false).await?;
-        let placed = optional(
-            &mut tx,
-            "SELECT e.node_id,n.boot_id FROM executions e JOIN nodes n ON n.id=e.node_id WHERE e.id=$1 AND e.generation=$2 AND e.reserved",
-            args![execution, generation],
-        )
-        .await?
-        .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
-        drop(tx);
-        batch["boot_id"] = placed["boot_id"].clone();
-        let node = placed["node_id"]
-            .as_str()
-            .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
+        let (Some(node), Some(boot)) = (&launch.node, &launch.boot) else {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "launch is no longer current",
+            ));
+        };
+        batch["boot_id"] = json!(boot);
         self.ingest_execution_logs(node, execution, generation, batch)
             .await
     }
@@ -152,6 +147,7 @@ impl Store {
         &self,
         execution: &str,
         generation: i64,
+        launch: &crate::launch::Launch,
         ask: Value,
     ) -> Result<Value> {
         // `sent`, which a shim may give, is what the launcher's meter says
@@ -161,20 +157,29 @@ impl Store {
             &["expected_revision", "request_id", "bytes", "sent"],
             &["expected_revision", "request_id", "bytes"],
         )?;
-        let mut tx = self.transaction(false, false).await?;
-        let placed = optional(
-            &mut tx,
-            "SELECT e.node_id,n.boot_id FROM executions e JOIN nodes n ON n.id=e.node_id WHERE e.id=$1 AND e.generation=$2 AND e.reserved AND e.egress_budget_launcher IS NOT NULL",
-            args![execution, generation],
-        )
-        .await?
-        .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is not under the outbound byte limit"))?;
-        drop(tx);
-        let node = placed["node_id"]
-            .as_str()
-            .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
+        let (true, Some(node), Some(boot)) = (launch.egress, &launch.node, &launch.boot) else {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "launch is not under the outbound byte limit",
+            ));
+        };
+        // A renewal, asking for no more bytes, is answered from memory
+        // when this process has the run's grant ([`crate::renewal`]).
+        if launch.renewable
+            && ask["bytes"].as_i64() == Some(0)
+            && let (Some(expected), Some(request)) = (
+                ask["expected_revision"].as_i64(),
+                ask["request_id"].as_str(),
+            )
+            && let Some(answer) = self
+                .gateway
+                .renewals
+                .renew(execution, generation, boot, expected, request, &ask)
+        {
+            return Ok(answer);
+        }
         let mut request = json!({
-            "boot_id": placed["boot_id"],
+            "boot_id": boot,
             "action": "grant",
             "expected_revision": ask["expected_revision"],
             "request_id": ask["request_id"],
@@ -198,33 +203,6 @@ impl Store {
         }
     }
 
-    /// What this execution's current launch takes requests from, when it is
-    /// an HTTP run: the key of its queue in the exchange. An app's
-    /// executions share the app's queue: the one its binding names and the
-    /// extras of that binding's generation. An execution of a release still
-    /// being brought up has a queue of its own, which nothing is offered to,
-    /// so its asking shows it is ready and takes nothing. An execution that
-    /// belongs to no app takes its own requests.
-    async fn run_channel_http(&self, execution: &str, generation: i64) -> Result<String> {
-        let mut tx = self.transaction(false, false).await?;
-        let found = optional(
-            &mut tx,
-            "SELECT m.app_id AS managed,m.execution_id=e.id AS serves,m.candidate_execution_id=e.id AS candidate,EXISTS(SELECT 1 FROM app_http_extras x WHERE x.execution_id=e.id AND x.app_id=m.app_id AND x.generation=m.generation-CASE WHEN m.candidate_until IS NOT NULL THEN 1 ELSE 0 END) AS extra FROM executions e LEFT JOIN app_http m ON m.deployment_id=e.deployment_id WHERE e.id=$1 AND e.generation=$2 AND e.reserved AND e.desired='running' AND e.spec->>'mode'='http'",
-            args![execution, generation],
-        )
-        .await?
-        .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch takes no requests"))?;
-        if found["managed"].is_null() {
-            Ok(execution.to_owned())
-        } else if found["serves"] == true || found["extra"] == true {
-            Ok(crate::db::s(&found["managed"]).to_owned())
-        } else if found["candidate"] == true {
-            Ok(candidate_key(execution))
-        } else {
-            Err(Error::new(StatusCode::CONFLICT, "launch takes no requests"))
-        }
-    }
-
     /// The run protocol fields of a launch spec, or `None` when no run channel
     /// is configured (no shim node will then start the run).
     pub(crate) fn run_channel_fields(&self, execution: &str, generation: i64) -> Option<Value> {
@@ -244,14 +222,15 @@ impl Store {
         }))
     }
 
-    /// Whether `credential` is the one issued for this execution and
-    /// generation, and that launch is still the execution's current one.
+    /// What the launch `credential` was issued for is, when it is the
+    /// execution's current one. Read from the database at most once in
+    /// [`crate::launch::FRESH`], and at once after a change to it.
     pub async fn run_channel_authorize(
         &self,
         execution: &str,
         generation: i64,
         credential: &str,
-    ) -> Result<()> {
+    ) -> Result<crate::launch::Launch> {
         identity(execution)?;
         let issued = self
             .channel_cipher
@@ -260,24 +239,73 @@ impl Store {
         if issued != claim(execution, generation).as_bytes() {
             return Err(Error::unauthorized());
         }
-        let mut tx = self.transaction(false, false).await?;
-        let launch = optional(
-            &mut tx,
-            "SELECT n.disabled FROM executions e LEFT JOIN nodes n ON n.id=e.node_id WHERE e.id=$1 AND e.generation=$2 AND e.reserved",
-            args![execution, generation],
-        )
-        .await?
-        .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
+        let launch = self.launch(execution, generation).await?;
         // A disabled node is told nothing more and heard from no more, so
         // nothing moves its runs on: their credentials, which it holds, are
         // refused for as long as it is disabled.
-        if launch["disabled"] != false {
+        if launch.disabled {
             return Err(Error::new(
                 StatusCode::FORBIDDEN,
                 "the launch's node is disabled",
             ));
         }
-        Ok(())
+        Ok(launch)
+    }
+
+    /// What the launch is, as last read, or read now.
+    async fn launch(&self, execution: &str, generation: i64) -> Result<crate::launch::Launch> {
+        let epoch = self.gateway.gates.epoch();
+        if let Some(launch) = self.gateway.launches.look(execution, generation, epoch) {
+            self.load.run_channel(false);
+            return Ok(launch);
+        }
+        // While the database cannot be reached, what was last read of the
+        // launch is believed, within the outage's bound.
+        let outage = &self.gateway.outage;
+        let stale = || match self.gateway.launches.stale(execution, generation) {
+            Some(launch) if outage.serving_stale() => Ok(launch),
+            _ => Err(Error::database_unavailable()),
+        };
+        if outage.down_for().is_some() {
+            self.load.run_channel(false);
+            return stale();
+        }
+        match crate::outage::within(
+            crate::outage::READ_WITHIN,
+            self.launch_fetch(execution, generation, epoch),
+        )
+        .await
+        {
+            Err(error) if outage.failed(&error) => stale(),
+            read => read,
+        }
+    }
+    async fn launch_fetch(
+        &self,
+        execution: &str,
+        generation: i64,
+        epoch: u64,
+    ) -> Result<crate::launch::Launch> {
+        self.load.run_channel(true);
+        let mut tx = self.transaction(false, false).await?;
+        let row = optional(
+            &mut tx,
+            crate::launch::QUERY,
+            args![
+                execution,
+                generation,
+                crate::model::HOST_CONFINEMENT,
+                crate::egress_budget::CONTRACT
+            ],
+        )
+        .await?
+        .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch is no longer current"))?;
+        drop(tx);
+        let launch = crate::launch::Launch::of(execution, &row);
+        self.gateway
+            .launches
+            .keep(execution, generation, launch.clone(), epoch);
+        Ok(launch)
     }
 }
 
@@ -292,7 +320,7 @@ pub fn router(store: Store) -> Router {
     Router::new().fallback(dispatch).with_state(store)
 }
 
-async fn dispatch(State(store): State<Store>, request: Request) -> Result<Response> {
+pub(crate) async fn dispatch(State(store): State<Store>, request: Request) -> Result<Response> {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().trim_matches('/').to_owned();
     let mut segments = path.splitn(4, '/');
@@ -314,7 +342,7 @@ async fn dispatch(State(store): State<Store>, request: Request) -> Result<Respon
         .and_then(|v| v.strip_prefix("Bearer "))
         .filter(|v| !v.is_empty() && v.len() <= 4096)
         .ok_or_else(Error::unauthorized)?;
-    store
+    let launch = store
         .run_channel_authorize(execution, generation, credential)
         .await?;
     if parts.method == "POST" && rest == OUTCOME {
@@ -331,7 +359,7 @@ async fn dispatch(State(store): State<Store>, request: Request) -> Result<Respon
             .map_err(|_| Error::invalid("invalid log batch fields"))?;
         return Ok(Json(
             store
-                .run_channel_output(execution, generation, batch)
+                .run_channel_output(execution, generation, &launch, batch)
                 .await?,
         )
         .into_response());
@@ -342,7 +370,9 @@ async fn dispatch(State(store): State<Store>, request: Request) -> Result<Respon
             .map_err(|_| Error::new(StatusCode::PAYLOAD_TOO_LARGE, "grant request too large"))?;
         let ask =
             serde_json::from_slice(&bytes).map_err(|_| Error::invalid("invalid grant request"))?;
-        let answer = store.run_channel_egress(execution, generation, ask).await?;
+        let answer = store
+            .run_channel_egress(execution, generation, &launch, ask)
+            .await?;
         let status = if answer.get("available_bytes").is_some() {
             StatusCode::TOO_MANY_REQUESTS
         } else {
@@ -350,8 +380,36 @@ async fn dispatch(State(store): State<Store>, request: Request) -> Result<Respon
         };
         return Ok((status, Json(answer)).into_response());
     }
+    // An HTTP run's requests, and its WebSocket messages, meet the gateway
+    // in the memory of the edge that owns its app.
+    if (rest == HTTP_NEXT
+        || rest.starts_with(HTTP_RESPONSE)
+        || rest == WS
+        || rest.starts_with(WS_ONE))
+        && !store.owns(launch.owner.as_deref())
+    {
+        // Passed to the edge that owns the app, once.
+        let Some(owner) = launch.owner.clone().filter(|_| {
+            parts
+                .extensions
+                .get::<crate::forward::Forwarded>()
+                .is_none()
+        }) else {
+            return Err(crate::ingress::misdirected());
+        };
+        return store
+            .forward(
+                &owner,
+                crate::forward::Listener::RunChannel,
+                axum::http::Request::from_parts(parts, body),
+            )
+            .await;
+    }
     if parts.method == "POST" && rest == HTTP_NEXT {
-        let key = store.run_channel_http(execution, generation).await?;
+        let key = launch
+            .queue
+            .clone()
+            .ok_or_else(|| Error::new(StatusCode::CONFLICT, "launch takes no requests"))?;
         use crate::http_exchange::{Prefixed, head_frame};
         // A candidate's queue is never offered to: its asks only show that
         // it is ready, and are kept short so that it learns soon after it
@@ -409,7 +467,7 @@ async fn dispatch(State(store): State<Store>, request: Request) -> Result<Respon
     // message (text or binary by content type), `DELETE` closes it.
     if rest == WS || rest.starts_with(WS_ONE) {
         use crate::websocket::{MAX_MESSAGE, Push};
-        let app = store.websocket_sender(execution).await?.ok_or_else(|| {
+        let app = launch.websocket_app.clone().ok_or_else(|| {
             Error::new(
                 StatusCode::FORBIDDEN,
                 "this app accepts no WebSocket connections",

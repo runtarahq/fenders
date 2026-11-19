@@ -17,6 +17,15 @@ the script is right.
 | `fenders-control-plane` | Any machine that reaches PostgreSQL 17 | The management API; an mTLS listener for nodes; the gateway for HTTP apps; the run channel for shims |
 | `fenders-node` | Each Linux x86-64 KVM machine that runs code | One mTLS port for its control plane |
 
+The control plane is one process (`--role all`, the default), or a control
+process (`--role control`) and any number of edges (`--role edge`) sharing
+its PostgreSQL. An edge serves the gateway and the run channel; the apps of
+HTTP are each one edge's, and any edge passes a request to its app's edge.
+Edges are registered with `POST /v1/edges`; `GET /v1/edge-routes` says
+which edge owns each app's host name, for a balancer that sends requests
+straight there. See [deploy/systemd](../deploy/systemd/README.md#a-control-process-and-edges)
+and [edge-plan.md](edge-plan.md).
+
 ```sh
 make build-node      # build/node: fenders-node, fenders-shim, launch, runtime.elf, compile
                      # target/release: fenders-control-plane, fenders-pki
@@ -252,6 +261,7 @@ What no tenant's key is ever given, whatever it holds:
 | Deleting one | `DELETE /v1/workspaces/T`, once it is suspended. It cannot be undone |
 | Its keys | `GET`, `POST /v1/workspaces/T/api-keys`, `DELETE /v1/workspaces/T/api-keys/KEY` |
 | Nodes | `GET`, `POST /v1/nodes`, `PATCH /v1/nodes/NODE`, `DELETE /v1/nodes/NODE` once it is drained |
+| Edges | `GET`, `POST /v1/edges`, `PATCH /v1/edges/EDGE` (draining), `DELETE /v1/edges/EDGE` once it drains and owns no app; `GET /v1/edge-routes` |
 | Public egress policy | `GET`, `PUT /v1/public-egress-policy` |
 | This control plane's loops | `GET /v1/control-plane/status` |
 
@@ -340,4 +350,4 @@ The whole list is the enum of `Error.code` in the contract. Beside it:
 
 [STATUS.md](STATUS.md) lists them all. The ones that shape an integration:
 the operator credential is a single unscoped token; keys live 30 days at
-most; HTTP apps' traffic passes through one control-plane process.
+most; an HTTP app's traffic passes through one edge, its owner's.

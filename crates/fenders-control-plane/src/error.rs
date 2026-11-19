@@ -18,6 +18,9 @@ pub struct Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// What [`Error::database_unavailable`] says.
+pub const DATABASE_UNAVAILABLE: &str = "database unavailable";
+
 /// Every reason an error may be given, beside the names of the statuses.
 /// The contract lists them: one given here and not there fails a test.
 pub const REASONS: &[&str] = &[
@@ -70,6 +73,14 @@ impl Error {
     pub fn internal() -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
     }
+    /// The database could not be reached: no connection, or none in time.
+    pub fn database_unavailable() -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, DATABASE_UNAVAILABLE)
+    }
+    /// Whether this is [`Error::database_unavailable`].
+    pub fn is_database_unavailable(&self) -> bool {
+        self.status == StatusCode::SERVICE_UNAVAILABLE && self.message == DATABASE_UNAVAILABLE
+    }
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -87,9 +98,12 @@ impl From<sqlx::Error> for Error {
             sqlx::Error::Database(ref e) if e.code().is_some_and(|c| c == "23503") => {
                 Self::missing()
             }
-            sqlx::Error::PoolTimedOut => {
-                Self::new(StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
-            }
+            sqlx::Error::PoolTimedOut
+            | sqlx::Error::PoolClosed
+            | sqlx::Error::Io(_)
+            | sqlx::Error::Tls(_)
+            | sqlx::Error::Protocol(_)
+            | sqlx::Error::WorkerCrashed => Self::database_unavailable(),
             _ => Self::internal(),
         }
     }

@@ -17,6 +17,26 @@ use std::{
 pub const SCHEMA: &str = include_str!("../schema.sql");
 pub type Tx = Transaction<'static, Postgres>;
 
+/// The edges' gateway, as a control process reaches it.
+pub struct EdgeGateway {
+    pub(crate) base: String,
+    pub(crate) client: reqwest::Client,
+}
+
+/// What a control-plane process serves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Serves {
+    /// Everything: the management API, the scheduler, the nodes' peer, the
+    /// gateway and the run channel. One process, as before.
+    #[default]
+    All,
+    /// The management API, the scheduler and the nodes' peer. Edges serve
+    /// the gateway and the run channel.
+    Control,
+    /// The gateway and the run channel, and the flush of what they hold.
+    Edge,
+}
+
 /// Keep the admission transaction alive even if the awaiting request is cancelled.
 /// Dropping a spawn_blocking handle does not stop its filesystem worker.
 pub(crate) async fn guarded_blocking<G, T, F>(guard: G, work: F) -> Result<(G, T)>
@@ -37,7 +57,9 @@ where
 pub struct Store {
     pub pool: PgPool,
     pub(crate) state: PathBuf,
-    pub(crate) cipher: fernet::Fernet,
+    /// The master encryption key's cipher: tenants' secrets. An edge has
+    /// none ([`Store::edge_from_pool`]).
+    cipher: Option<fernet::Fernet>,
     /// For run-channel credentials alone, under a key of its own: nothing
     /// encrypted with `cipher`, a tenant's secret among it, is one.
     pub(crate) channel_cipher: fernet::Fernet,
@@ -49,6 +71,11 @@ pub struct Store {
     pub(crate) background: std::sync::Arc<crate::supervision::Monitor>,
     pub(crate) pickup: std::sync::Arc<crate::pickup::Pickup>,
     pub(crate) run_channel: Option<std::sync::Arc<crate::run_channel::RunChannel>>,
+    /// Where a control process reaches the edges' gateway, for a sample
+    /// request an operator or a key asks of an app.
+    pub(crate) edge_gateway: Option<std::sync::Arc<EdgeGateway>>,
+    /// How an edge passes requests of another's apps to it.
+    pub(crate) forwarder: Option<std::sync::Arc<crate::forward::Forwarder>>,
     /// Requests for HTTP apps, between the gateway and the run channel.
     pub exchange: std::sync::Arc<crate::http_exchange::Exchange>,
     /// The WebSocket connections the gateway holds for apps.
@@ -61,6 +88,17 @@ pub struct Store {
     pub api_rates: std::sync::Arc<crate::ingress::Rates>,
     /// Whose each gateway host name is, for refusing without a transaction.
     pub ingress_hosts: std::sync::Arc<crate::ingress::Hosts>,
+    /// What the gateway holds in memory until its next flush.
+    pub gateway: std::sync::Arc<crate::gateway::Gateway>,
+    /// What this process serves.
+    pub serves: Serves,
+    /// Whether the scheduler failed a pass, and since when it has passed
+    /// again: sessions are not taken for dead until it has for as long as
+    /// one may go unflushed ([`crate::gateway::SESSION_DEAD`]). `None` when
+    /// nothing failed.
+    pub(crate) recovering: std::sync::Arc<std::sync::Mutex<Option<Option<std::time::Instant>>>>,
+    /// What this process has done, counted.
+    pub load: std::sync::Arc<crate::load::Load>,
 }
 
 fn private_directory(path: &Path) -> Result<()> {
@@ -187,6 +225,12 @@ pub(crate) const MAX_CREDENTIALS: i64 = 1024;
 /// `key`: what it encrypts is nothing to the encryption key's own cipher or
 /// to another purpose's, and the reverse.
 pub(crate) fn purpose_cipher(key: &str, purpose: &str) -> Result<fernet::Fernet> {
+    fernet::Fernet::new(&purpose_key(key, purpose)?)
+        .ok_or_else(|| Error::invalid("invalid encryption key"))
+}
+
+/// The key derived from the encryption key `key` for one `purpose`.
+fn purpose_key(key: &str, purpose: &str) -> Result<String> {
     use base64::Engine;
     let invalid = || Error::invalid("invalid encryption key");
     let engine = base64::engine::general_purpose::URL_SAFE;
@@ -195,9 +239,23 @@ pub(crate) fn purpose_cipher(key: &str, purpose: &str) -> Result<fernet::Fernet>
     hkdf::Hkdf::<sha2::Sha256>::new(Some(b"fenders-purpose-key-v1"), &secret)
         .expand(purpose.as_bytes(), &mut derived)
         .map_err(|_| invalid())?;
-    let cipher = fernet::Fernet::new(&engine.encode(derived)).ok_or_else(invalid);
+    let key = engine.encode(derived);
     derived.fill(0);
-    cipher
+    Ok(key)
+}
+
+/// What an edge is given of the control plane's encryption key: the key
+/// of the run channel's credentials, derived from it, and which key that
+/// is, for the database to be known as the one it is for. Not the key: an
+/// edge serves no tenant's secret.
+pub fn write_edge_key(control_state: &Path, output: &Path) -> Result<Value> {
+    let key = crate::key_rotation::read_key(&control_state.join("encryption.key"))?;
+    let edge = json!({
+        "key_id": digest(&key),
+        "run_channel_key": purpose_key(&key, crate::run_channel::PURPOSE)?,
+    });
+    private_file(output, edge.to_string().as_bytes())?;
+    Ok(json!({"edge_key_file": output, "key_id": edge["key_id"]}))
 }
 
 impl Store {
@@ -224,21 +282,74 @@ impl Store {
         let key = crate::key_rotation::read_key(&key)?;
         let cipher =
             fernet::Fernet::new(&key).ok_or_else(|| Error::invalid("invalid encryption key"))?;
+        Self::assemble(
+            pool,
+            state,
+            Some(cipher),
+            purpose_cipher(&key, crate::run_channel::PURPOSE)?,
+            digest(&key),
+        )
+    }
+    /// A store for an edge: no master key, only what `fenders-keys edge`
+    /// derived of it (`STATE/edge.key`). It serves the gateway and the run
+    /// channel, and refuses what needs a tenant's secret.
+    pub fn edge_from_pool(pool: PgPool, state: &Path) -> Result<Self> {
+        private_directory(state)?;
+        let file = state.join("edge.key");
+        if fs::symlink_metadata(&file)?.permissions().mode() & 0o077 != 0 {
+            return Err(Error::invalid(
+                "edge key file must not be readable by others",
+            ));
+        }
+        let edge: Value = serde_json::from_slice(&fs::read(&file)?)
+            .map_err(|_| Error::invalid("invalid edge key file"))?;
+        let (Some(key_id), Some(channel)) =
+            (edge["key_id"].as_str(), edge["run_channel_key"].as_str())
+        else {
+            return Err(Error::invalid("invalid edge key file"));
+        };
+        let channel =
+            fernet::Fernet::new(channel).ok_or_else(|| Error::invalid("invalid edge key file"))?;
+        Self::assemble(pool, state, None, channel, key_id.to_owned())
+            .map(|store| store.serving(Serves::Edge))
+    }
+    pub async fn connect_edge(dsn: &str, state: &Path) -> Result<Self> {
+        crate::db::database_url(dsn)?;
+        let pool = PgPoolOptions::new()
+            .max_connections(16)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(dsn)
+            .await?;
+        Self::edge_from_pool(pool, state)
+    }
+    fn assemble(
+        pool: PgPool,
+        state: &Path,
+        cipher: Option<fernet::Fernet>,
+        channel_cipher: fernet::Fernet,
+        encryption_key_id: String,
+    ) -> Result<Self> {
         Ok(Self {
             pool,
             state: state.canonicalize()?,
             cipher,
-            channel_cipher: purpose_cipher(&key, crate::run_channel::PURPOSE)?,
-            encryption_key_id: digest(&key),
+            channel_cipher,
+            encryption_key_id,
             public_egress: None,
             external_network: None,
             orphan_upload_scan: Default::default(),
             background: Default::default(),
             pickup: Default::default(),
             run_channel: None,
+            edge_gateway: None,
+            forwarder: None,
             exchange: Default::default(),
             http_rates: Default::default(),
             ingress_hosts: Default::default(),
+            gateway: Default::default(),
+            serves: Serves::All,
+            recovering: Default::default(),
+            load: Default::default(),
             api_rates: Default::default(),
             node_turns: Default::default(),
             sockets: Default::default(),
@@ -246,7 +357,37 @@ impl Store {
     }
 
     pub async fn transaction(&self, mutate: bool, recovery: bool) -> Result<Tx> {
-        self.begin_transaction(mutate, recovery, false).await
+        self.begin_transaction(mutate, recovery, false, true).await
+    }
+    /// A transaction under the mutation lock that changes nothing the
+    /// gateway's gates hold ([`crate::gate`]): the gateway's own, which
+    /// admits, settles and flushes. Every other one that takes the lock may
+    /// have changed whether an app serves, and makes what the gates hold
+    /// be read again.
+    pub(crate) async fn gateway_transaction(&self) -> Result<Tx> {
+        self.begin_transaction(true, false, false, false).await
+    }
+    /// A transaction under the mutation lock that changes what the gates
+    /// hold only now and then, and often: a heartbeat, a scheduler pass. It
+    /// does not move the epoch when it begins; [`Self::commit_watched`]
+    /// moves it after it commits, if a trigger said it changed any of it
+    /// (`sql/gate_changes.sql`).
+    pub(crate) async fn watched_transaction(&self) -> Result<Tx> {
+        self.begin_transaction(true, false, false, false).await
+    }
+    /// Commits a [`Self::watched_transaction`], and moves the epoch if it
+    /// changed what the gates hold.
+    pub(crate) async fn commit_watched(&self, mut tx: Tx) -> Result<()> {
+        let changed: bool = sqlx::query_scalar(
+            "SELECT COALESCE(current_setting('fenders.gates_changed',true),'')='1'",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        if changed {
+            self.gateway.gates.changed();
+        }
+        Ok(())
     }
     /// Whether this control plane can serve: it reaches its database, the
     /// database is the one its encryption key is for, and it is not held
@@ -260,17 +401,142 @@ impl Store {
             .await
             .unwrap_or(false)
     }
+    /// The master key's cipher, which an edge does not have.
+    pub(crate) fn cipher(&self) -> Result<&fernet::Fernet> {
+        self.cipher.as_ref().ok_or_else(|| {
+            Error::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this process holds no encryption key: ask the control plane",
+            )
+        })
+    }
+    /// Whether the database's schema is the one this binary was built for,
+    /// for a process that does not migrate it: an edge.
+    pub async fn check_schema(&self) -> Result<()> {
+        let mut tx = self.transaction(false, false).await?;
+        crate::schema_migrations::verify(&mut tx).await
+    }
+    /// The edges' gateway, `https://host[:port]`, verified against
+    /// `ca_pem`: where a control process sends a sample request.
+    pub fn with_edge_gateway(mut self, endpoint: &str, ca_pem: &[u8]) -> Result<Self> {
+        url::Url::parse(endpoint)
+            .ok()
+            .filter(|url| {
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && matches!(url.path(), "" | "/")
+            })
+            .ok_or_else(|| Error::invalid("gateway endpoint must be https://host[:port]"))?;
+        let ca = reqwest::Certificate::from_pem(ca_pem)
+            .map_err(|_| Error::invalid("invalid gateway CA"))?;
+        let client = reqwest::Client::builder()
+            .add_root_certificate(ca)
+            .http1_only()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|_| Error::internal())?;
+        self.edge_gateway = Some(std::sync::Arc::new(EdgeGateway {
+            base: endpoint.trim_end_matches('/').to_owned(),
+            client,
+        }));
+        Ok(self)
+    }
+    /// How long an edge serves from what it knows while the database
+    /// cannot be reached (E11). Set before the store is shared.
+    pub fn with_outage_bound(mut self, bound: Duration) -> Self {
+        if let Some(gateway) = std::sync::Arc::get_mut(&mut self.gateway) {
+            gateway.outage = crate::outage::Outage::new(bound);
+        }
+        self
+    }
+    /// Requests of apps other edges own are passed to them with `forwarder`.
+    pub fn with_forwarder(mut self, forwarder: crate::forward::Forwarder) -> Self {
+        self.forwarder = Some(std::sync::Arc::new(forwarder));
+        self
+    }
+    /// The edge that owns the app of `hostname`, when it is not this one:
+    /// what is known of the host name, or, for an app that does not serve,
+    /// what the database says.
+    pub(crate) async fn foreign_owner(&self, hostname: &str) -> Result<Option<String>> {
+        if self.gateway.edge.is_none() {
+            return Ok(None);
+        }
+        let epoch = self.gateway.gates.epoch();
+        let owner = match self.gateway.gates.look(hostname) {
+            crate::gate::Look::Warm(gate) => gate.owner,
+            _ if self.gateway.outage.serving_stale() => self
+                .gateway
+                .gates
+                .stale(hostname)
+                .and_then(|gate| gate.owner),
+            _ => {
+                let _ = epoch;
+                let mut tx = self.transaction(false, false).await?;
+                crate::db::optional(&mut tx,"SELECT x.edge_id FROM app_http h JOIN app_edges x ON x.app_id=h.app_id WHERE h.hostname=$1",crate::args![hostname]).await?
+                    .and_then(|row| row["edge_id"].as_str().map(str::to_owned))
+            }
+        };
+        Ok(owner.filter(|owner| !self.owns(Some(owner))))
+    }
+    /// This process serves as the registered edge `edge`. Set before the
+    /// store is shared.
+    pub fn as_edge(mut self, edge: String) -> Self {
+        if let Some(gateway) = std::sync::Arc::get_mut(&mut self.gateway) {
+            gateway.edge = Some(edge);
+        }
+        self
+    }
+    /// Whether this process serves the app that `owner` owns: an edge with
+    /// no name owns every app, and an app no edge owns yet is served by any.
+    pub(crate) fn owns(&self, owner: Option<&str>) -> bool {
+        match (&self.gateway.edge, owner) {
+            (Some(mine), Some(owner)) => mine == owner,
+            _ => true,
+        }
+    }
+    pub fn serving(mut self, serves: Serves) -> Self {
+        self.serves = serves;
+        self
+    }
+    /// What the request exchange shows of HTTP runs, for the reconciler:
+    /// this process's own, or, in a control process, what the edges last
+    /// wrote of theirs.
+    pub(crate) async fn observed(&self, tx: &mut Tx) -> Result<crate::observed::Observed> {
+        if self.serves != Serves::Control {
+            return Ok(self.exchange.observe());
+        }
+        let rows = crate::db::rows(tx,&format!("SELECT o.key,o.kind,o.ready,o.busy,o.idle_ms,o.waiting_ms,o.saturated_ms,GREATEST(0,extract(epoch FROM clock_timestamp()-o.observed_at)*1000)::bigint AS age_ms FROM gateway_observations o JOIN gateway_sessions s ON s.id=o.session_id WHERE s.seen>clock_timestamp()-interval '{}'",crate::gateway::SESSION_DEAD),crate::args![]).await?;
+        Ok(crate::observed::Observed::from_rows(&rows))
+    }
     pub fn background_monitor(&self) -> std::sync::Arc<crate::supervision::Monitor> {
         self.background.clone()
     }
     pub fn background_status(&self, p: &Principal) -> Result<Value> {
         p.operator()?;
-        self.background.snapshot()
+        let mut status = self.background.snapshot()?;
+        if let (Some(status), Value::Object(load)) = (status.as_object_mut(), self.load.snapshot())
+        {
+            status.extend(load);
+            status["gateway"]["records_dropped"] = json!(self.gateway.dropped());
+            status["gateway"]["in_flight"] = json!(self.gateway.gates.in_flight_total());
+            let down = self.gateway.outage.down_for();
+            status["database"]["reachable"] = json!(down.is_none());
+            status["database"]["unreachable_ms"] = json!(down.map(|d| d.as_millis() as u64));
+            status["gateway"]["serving_from_memory"] = json!(self.gateway.outage.serving_stale());
+        }
+        Ok(status)
     }
     pub(crate) async fn snapshot(&self) -> Result<Tx> {
-        self.begin_transaction(false, false, true).await
+        self.begin_transaction(false, false, true, false).await
     }
-    async fn begin_transaction(&self, mutate: bool, recovery: bool, snapshot: bool) -> Result<Tx> {
+    async fn begin_transaction(
+        &self,
+        mutate: bool,
+        recovery: bool,
+        snapshot: bool,
+        changes_gates: bool,
+    ) -> Result<Tx> {
         let mut tx = self.pool.begin().await?;
         if snapshot {
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -284,9 +550,14 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         if mutate {
+            let asked = std::time::Instant::now();
             sqlx::query("SELECT pg_advisory_xact_lock(184923781), set_config('fenders.mutation','true',true)")
                 .execute(&mut *tx)
                 .await?;
+            self.load.locked(asked.elapsed());
+            if changes_gates {
+                self.gateway.gates.changed();
+            }
         }
         if !recovery {
             let barrier: Value =
@@ -331,14 +602,14 @@ impl Store {
         }
         crate::schema_migrations::apply(&mut tx).await?;
         // Secrets stored before their ciphertexts named their rows.
-        crate::secret_binding::bind_stored(&mut tx, &self.cipher).await?;
+        crate::secret_binding::bind_stored(&mut tx, self.cipher()?).await?;
         let unbound: bool = sqlx::query_scalar(
             "SELECT encryption_key_id IS NULL FROM recovery_barrier WHERE singleton",
         )
         .fetch_one(&mut *tx)
         .await?;
         if unbound {
-            crate::key_rotation::validate_or_reencrypt(&mut tx, &self.cipher, None).await?;
+            crate::key_rotation::validate_or_reencrypt(&mut tx, self.cipher()?, None).await?;
         }
         sqlx::query("UPDATE recovery_barrier SET encryption_key_id=$1 WHERE singleton AND encryption_key_id IS NULL")
             .bind(&self.encryption_key_id).execute(&mut *tx).await?;
@@ -594,6 +865,11 @@ impl Store {
         {
             return Err(Error::invalid("default app size is small, medium or large"));
         }
+        // What another process leases of the allowance is recalled first:
+        // a lease must not keep it from being lowered.
+        if value.allowance.is_some() {
+            self.recall_leases(tenant).await?;
+        }
         let mut request = json!({"kind":"tenant.update","tenant":tenant,"allowance":value.allowance,"default_app_size":value.default_app_size});
         // Named only when given, so that a retry made before this could be
         // given is still the request it was.
@@ -641,31 +917,27 @@ impl Store {
             )
             .await?;
         }
-        let row = match &value.allowance {
-            Some(allowance) => {
-                let row = Self::set_allowance(&mut tx, tenant, allowance).await?;
-                Self::audit(
-                    &mut tx,
-                    p,
-                    "tenant.allowance",
-                    tenant,
-                    tenant,
-                    json!(allowance),
-                )
-                .await?;
-                row
-            }
-            None => {
-                sqlx::query_scalar::<_, Value>(&format!(
-                    "SELECT {WORKSPACE} FROM tenants t WHERE id=$1"
-                ))
-                .bind(tenant)
-                .fetch_one(&mut *tx)
-                .await?
+        // What this gateway leased of the allowance and nobody uses is given
+        // back first: a lease must not keep it from being lowered, and none
+        // may outlive a lowering it would exceed. A request in flight keeps
+        // what it reserved. Put back if the change is not made.
+        let withheld = if value.allowance.is_some() {
+            self.gateway.budgets.withhold(tenant)
+        } else {
+            Vec::new()
+        };
+        let changed = self
+            .change_allowance(&mut tx, p, tenant, &value, &withheld)
+            .await;
+        let row = match changed {
+            Ok(row) => row,
+            Err(error) => {
+                self.gateway.budgets.give_back(withheld);
+                return Err(error);
             }
         };
-        if let Some(key) = key {
-            crate::customer_api::save_operator_receipt(
+        if let Some(key) = key
+            && let Err(error) = crate::customer_api::save_operator_receipt(
                 &mut tx,
                 &p.id,
                 key,
@@ -673,9 +945,50 @@ impl Store {
                 &request,
                 &row,
             )
-            .await?;
+            .await
+        {
+            self.gateway.budgets.give_back(withheld);
+            return Err(error);
         }
-        tx.commit().await?;
+        if let Err(error) = tx.commit().await {
+            self.gateway.budgets.give_back(withheld);
+            return Err(error.into());
+        }
+        Ok(row)
+    }
+    async fn change_allowance(
+        &self,
+        tx: &mut Tx,
+        p: &Principal,
+        tenant: &str,
+        value: &UpdateAllowance,
+        withheld: &[(crate::lease::Key, String, i64)],
+    ) -> Result<Value> {
+        for (key, period, bytes) in withheld {
+            sqlx::query("UPDATE gateway_transfer_leases SET held_bytes=GREATEST(0,held_bytes-$5),updated=clock_timestamp() WHERE session_id=$1 AND tenant_id=$2 AND project_id=$3 AND period=$4::date")
+                .bind(self.gateway.session())
+                .bind(&key.0)
+                .bind(&key.1)
+                .bind(period)
+                .bind(bytes)
+                .execute(&mut **tx)
+                .await?;
+        }
+        let row = match &value.allowance {
+            Some(allowance) => {
+                let row = Self::set_allowance(tx, tenant, allowance).await?;
+                Self::audit(tx, p, "tenant.allowance", tenant, tenant, json!(allowance)).await?;
+                row
+            }
+            None => {
+                sqlx::query_scalar::<_, Value>(&format!(
+                    "SELECT {WORKSPACE} FROM tenants t WHERE id=$1"
+                ))
+                .bind(tenant)
+                .fetch_one(&mut **tx)
+                .await?
+            }
+        };
         Ok(row)
     }
     /// The caller authorizes the operation and records its audit in this transaction.

@@ -152,6 +152,43 @@ Semantics are based on the systemd 257 upstream documentation for
 and [start limits](https://github.com/systemd/systemd/blob/v257/man/systemd.unit.xml).
 Qualify the target distribution; do not suppress unknown directives.
 
+## A control process and edges
+
+[`fenders-edge.service`](fenders-edge.service) runs an edge: the gateway, the
+run channel and their flush, on its own host, beside a control process
+(`--role control`: the management API, the scheduler and the nodes' peer) on
+another ([docs/edge-plan.md](../../docs/edge-plan.md)). Run as many edges as
+traffic needs, behind one name and a plain TCP balancer (TLS passed through)
+on each of the gateway's and the run channel's ports.
+
+The control process, in its unit's `ExecStart`, adds `--role control`, names
+the edges' run channel (`--run-channel-endpoint https://run.internal:9093`)
+and gateway (`--gateway-endpoint https://apps-lb.internal:9092`), and drops
+`--gateway-port` and `--run-channel-port`, which it no longer serves.
+
+For each edge:
+
+1. Make it a certificate from the platform CA (`fenders-pki --identity
+   edge-1=edge-1.internal`, kept with the others) and register it, as the
+   operator, with that certificate's pin and its forward port's address:
+   `POST /v1/edges {"name":"edge-1","cert_sha256":"…","endpoint":"https://edge-1.internal:9096"}`.
+2. Write what it is given of the encryption key, on the control host:
+   `fenders-keys edge --state /var/lib/fenders/control --output edge.key`, and
+   install it as `/var/lib/fenders/edge/edge.key`, `fenders-control:fenders-control`,
+   `0600`. The edge holds no encryption key: it can open no tenant's secret.
+3. `/etc/fenders/edge/`: `environment` (`FENDERS_EDGE_NAME=edge-1`,
+   `FENDERS_APP_DOMAIN=…`), `database-url`, `ca.pem`, `edge.pem`,
+   `edge-tls.key`, `gateway.pem`, `gateway.key`, owned and moded as the
+   control plane's files are.
+4. Open 9092 and 9093 to its balancers, 9096 to the other edges, and 9095
+   (`/healthz`, `/readyz`, the operator's status) to whatever watches it.
+
+An edge does not migrate the schema: start or upgrade the control process
+first. Its `/readyz` answers ready while it serves, from memory if the
+database cannot be reached (for `--serve-stale-seconds`, 600 unless said),
+so that a balancer checking it does not take every edge out when the
+database goes.
+
 ## Rolling control-plane updates
 
 The mixed-version check of 20 October 2026, made before the shim model,

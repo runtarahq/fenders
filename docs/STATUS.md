@@ -52,7 +52,9 @@ as both control plane and node.
 | Connections | An app reaches the TCP endpoints and public HTTPS origins it was given and nothing else; removing one stops the runs that hold it | `scripts/verify_connections_live.sh` |
 | Outbound byte limit | A run with a connection sends only what the tenant's monthly transfer allowance grants, and is ended when it would send more | `scripts/verify_egress_limit_live.sh` |
 | HTTP apps | An app with the HTTP trigger has a URL; bodies stream both ways; it scales between `scale.min` and `scale.max` executions; a new release takes over without failed requests | `scripts/verify_http_live.sh` |
-| Gateway limits | A request target too long for a shim is refused and wakes nothing; such requests do not end a starting app's execution; requests their clients abandon hold none of the transfer allowance | `scripts/verify_gateway_limits_live.sh` |
+| Gateway limits | A request target too long for a shim is refused and wakes nothing; such requests do not end a starting app's execution; requests their clients abandon hold none of the transfer allowance and none is left in flight | `scripts/verify_gateway_limits_live.sh` |
+| Edges | A control process and two registered edges on one database: the live checks above pass with clients and shims reaching one edge and the other's apps passed to it; through the two, 1,530 requests a second to one app and 2,168 across four workspaces; the database paused for 60 seconds under load, 124,921 requests answered 200; an edge killed under load, its app served by the other 15 seconds after. One machine for all of it ([the measurement](edge-plan.md#evidence)) | `LOCAL_SPLIT=1 LOCAL_EDGES=2 scripts/local_env.sh up`, then the live scripts and `scripts/measure_gateway.sh` |
+| Gateway throughput | 1,325 requests a second to one app and 1,563 across four workspaces, from 32 clients, with no transaction under the mutation lock for a request to an app that serves (78 and 88 before, at about 2.8 such transactions a request); one machine as control plane, PostgreSQL and node ([the measurement](gateway-accounting.md#4-evidence-and-documents)) | `scripts/measure_gateway.sh` |
 | WebSocket | The gateway holds connections for an app and gives it their events as requests | Shown with a headless browser as the client; that check is not in this repository yet |
 | A shim asked to stop | Once its run is over, a shim holding the run's end for its launcher ends at once on SIGTERM | `scripts/verify_shim_stop_live.sh` |
 | The launcher from inside its VM | A test guest booted in place of the runtime: what a guest learns of a host file, threads and their exits, a pointer outside the guest, the socket rate; and from outside, that everything the launcher holds closes on exec and its own filter is on every thread | `scripts/verify_launcher_guest_live.sh` |
@@ -222,11 +224,18 @@ a workspace.
 ### HTTP apps and WebSocket
 
 - Every byte of every request, response and WebSocket message passes through
-  the control plane, whose gateway and run channel must be one process. Its
-  throughput is not measured.
-- WebSocket connections and the request exchange live in that process's
-  memory: a restart closes every connection, and a second control-plane
-  process is not supported.
+  the edge that owns the app: the process whose memory its request exchange
+  and WebSocket connections are in. One process (`--role all`) is every
+  app's. An app is as large as one edge can serve, and a restart of its edge,
+  or the edge's loss, closes its WebSocket connections and loses its requests
+  in flight; a lost edge's apps are given to another 15 seconds after it was
+  last heard from.
+- A request that reaches an edge that does not own its app is passed to the
+  owner over mutual TLS, once, which adds a hop: with N edges behind a plain
+  TCP balancer, (N-1)/N of requests take it. `GET /v1/edge-routes` is the
+  map a balancer that routes by host name sends them by instead.
+- Throughput was measured on one machine only (see Works); 16 MiB responses
+  went at 3 to 4 a second from 4 clients.
 - A request is handed out once and never replayed: 503 if no execution took
   it in 10 seconds, 504 if taken and not answered, 502 if the app failed.
 - A request body is at most 64 MiB and a response 1 GiB; a response may last
@@ -234,7 +243,41 @@ a workspace.
   connection limits (1000 an app, 4000 a tenant), are constants.
 - Scale-out reacts in seconds and by one execution at a time; a burst beyond
   the queue (64 requests an app) is answered 503.
-- The rate limit is counted in memory: a restart forgets the last minute.
+- The rate limit, and a workspace's requests in flight and WebSocket
+  connections, are counted in memory, each process against its share of the
+  workspace's limits (`edge_limit_shares`): a restart forgets the last minute,
+  and the requests it had. Shares never add up to more than a limit, so
+  requests in flight and connections are held to it exactly; the rate may
+  pass it by what moves between processes within a minute. An edge new to a
+  workspace's traffic while another holds its whole limit waits up to two
+  seconds for its share; a workspace at its limit is refused at once.
+- A request to an app that serves is admitted from what the gateway holds
+  in memory of its host name, which it reads again when it is two seconds
+  old, and after any change to what decides whether an app serves: a
+  database trigger marks one, and every process listening hears it
+  (`fenders_gates`). One a process did not hear (its listener was
+  reconnecting) is seen within the two seconds; a request admitted meanwhile
+  to an app that stopped serving is not taken, and is answered 503 never
+  having run. A request to an app that does not serve takes the path under the lock,
+  which starts an app that is idle and holds the request while it starts.
+- A request's record (`app_http_runs`, the app's events) is written up to a
+  second after it ends, or after a second in flight, by the gateway's flush.
+  A process that dies takes the records of what it had in flight with it.
+  Records the database does not take in time are dropped, oldest first, past
+  16384 waiting, and counted in `GET /v1/control-plane/status` as
+  `gateway.records_dropped`; what was used is never dropped.
+- A request's bytes come out of the gateway's lease of its workspace's
+  transfer allowance, for each project with traffic: between 1 and 64 MiB,
+  sized by what was drawn in the last five seconds, and given back after 30
+  seconds with no request. A lease is held, and so not available to the
+  workspace's outbound grants, while it lasts; the usage report says how much
+  is leased as `transfer_allowance.gateway_leased_bytes`. Changing the
+  allowance takes back what this process's leases hold unused. A request is
+  admitted while a block of the allowance (16 KiB) is left.
+- A control plane that stops gives its leases back. The lease of one that
+  dies, or does not flush for 15 seconds, is charged whole as used, and
+  recorded as `transfer_allowance.gateway_conservative_bytes`: what it passed
+  is not known.
 - Connections are limited per listener and per peer address, with unfinished
   handshakes budgeted apart from served connections: 512 served (128 an
   address) on the management and node-control listeners, 8192 (2048 an
@@ -250,6 +293,15 @@ a workspace.
 
 ### The run channel
 
+- What a run's launch is (current, its node, whether it is under the
+  outbound limit, the queue it takes requests from) is read once and believed
+  for two seconds, or until a change to it is heard. A disabled node's runs
+  are refused at their next call to the process the operator spoke to.
+- An outbound grant's renewal is answered from memory, from revisions the
+  grant reserved in the database (2^20 of them); only a grant of more bytes
+  is a transaction. A suspended workspace's runs stop being renewed within
+  two seconds of the suspension, and their grants lapse ten after.
+
 - Its listener takes no client certificate: a launch's credential is the only
   thing that authenticates a call. The credential is a token under a key
   derived from the control plane's encryption key for this purpose alone
@@ -263,6 +315,24 @@ a workspace.
   and against moving a secret, not against every write.
 - The launcher's control socket also accepts pause and resume; a shim sends
   it only grants and status, over a socket pair nothing else holds.
+
+### Edges and the database
+
+- An edge (`--role edge`) holds the database credential and the run
+  channel's derived key, not the encryption key: it opens no tenant's
+  secret. It does not migrate the schema, and starts only against the one it
+  was built for. The database credential is the control process's; a role
+  limited to the tables an edge uses is not yet made.
+- While the database cannot be reached, an edge serves what it knows, for
+  up to `--serve-stale-seconds` (600): requests to apps that serve, out of
+  the leases it holds, and shims' requests and grant renewals. What needs the
+  database (an app not known or not serving, a lease run dry, more outbound
+  bytes, run output) is answered 503 at once. A database that hangs is taken
+  for gone after two seconds (five for the flush). Past the bound nothing is
+  served from memory, and `/readyz` says not ready.
+- A control process that could not reach the database does not take
+  sessions for dead until it has reached it for 15 seconds again.
+- The scheduler's placement of apps on edges counts apps, not their traffic.
 
 ### Nodes
 

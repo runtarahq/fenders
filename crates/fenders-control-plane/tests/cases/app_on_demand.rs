@@ -103,6 +103,9 @@ impl Lab {
         app
     }
     async fn idle_clock(&self, app: &str) {
+        // What the gateway knows of the app's requests is written first, as
+        // its flusher would have by now; then its last activity is made old.
+        self.store.flush_gateway().await.unwrap();
         sqlx::query(
             "UPDATE app_http SET last_activity=now()-interval '61 seconds' WHERE app_id=$1",
         )

@@ -233,7 +233,7 @@ impl Store {
             return Err(Error::invalid("observation only applies to settlement"));
         }
         let hash = digest(serde_json::to_vec(&value).map_err(|_| Error::internal())?);
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let e=optional(&mut tx,"SELECT e.* FROM executions e WHERE e.id=$1 AND e.node_id=$2 AND e.generation=$3 FOR UPDATE",args![execution,node,generation]).await?
             .ok_or_else(||conflict("stale or foreign execution grant"))?;
         let host = one(
@@ -291,7 +291,11 @@ impl Store {
                 return Err(conflict("grant request ID reused with different content"));
             }
         } else {
-            if n(&g["revision"]) != expected {
+            // The revision written, or one a renewal answered from memory
+            // may have issued since, of those reserved for it.
+            if expected < n(&g["revision"])
+                || expected > n(&g["revision"]).max(n(&g["revision_reserved"]))
+            {
                 return Err(conflict("stale grant revision"));
             }
             let revision = if action == "settle" || action == "freeze" && g["state"] == "frozen" {
@@ -330,6 +334,8 @@ impl Store {
                         .ok_or_else(|| quota("cumulative byte ceiling exhausted"))?;
                     let held = ceiling - base;
                     exec(&mut tx,"UPDATE execution_egress_budgets SET state='active',revision=$2,generation=$3,period=date_trunc('month',now() AT TIME ZONE 'UTC')::date,ceiling_bytes=$4::numeric,held_bytes=$5::bigint,expires=LEAST(clock_timestamp()+interval '10 seconds',(date_trunc('month',now() AT TIME ZONE 'UTC')+interval '1 month') AT TIME ZONE 'UTC') WHERE execution_id=$1",args![execution,revision,generation,ceiling.to_string(),held.to_string()]).await?;
+                    // Revisions above it, for renewals from memory.
+                    exec(&mut tx,"UPDATE execution_egress_budgets SET revision_reserved=GREATEST(revision_reserved,revision+$2) WHERE execution_id=$1",args![execution,crate::renewal::RESERVED]).await?;
                 }
                 "freeze" => {
                     if g["state"] != "frozen" {
@@ -364,8 +370,18 @@ impl Store {
             }
             exec(&mut tx,"UPDATE execution_egress_budgets SET request_id=$2,request_hash=$3,updated=now() WHERE execution_id=$1",args![execution,request,hash]).await?;
         }
-        let result=one(&mut tx,"SELECT revision,state,period,base_bytes,ceiling_bytes,held_bytes,boot_id,CASE WHEN state='active' THEN GREATEST(0,LEAST(10000,floor(extract(epoch FROM (expires-clock_timestamp()))*1000)))::bigint ELSE 0 END ttl_ms FROM execution_egress_budgets WHERE execution_id=$1",args![execution]).await?;
-        tx.commit().await?;
+        let mut result=one(&mut tx,"SELECT revision,revision_reserved,(extract(epoch FROM ((period+interval '1 month')::timestamp AT TIME ZONE 'UTC'))*1000)::bigint AS period_end_ms,state,period,base_bytes,ceiling_bytes,held_bytes,boot_id,CASE WHEN state='active' THEN GREATEST(0,LEAST(10000,floor(extract(epoch FROM (expires-clock_timestamp()))*1000)))::bigint ELSE 0 END ttl_ms FROM execution_egress_budgets WHERE execution_id=$1",args![execution]).await?;
+        self.commit_watched(tx).await?;
+        // What renewals from memory start from; not the shim's to see.
+        let reserved = n(&result["revision_reserved"]);
+        let period_end = result["period_end_ms"].as_u64().unwrap_or(0);
+        if let Some(fields) = result.as_object_mut() {
+            fields.remove("revision_reserved");
+            fields.remove("period_end_ms");
+        }
+        self.gateway
+            .renewals
+            .granted(execution, generation, &result, reserved, period_end);
         Ok(result)
     }
 }

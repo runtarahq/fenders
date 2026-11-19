@@ -48,7 +48,16 @@ async fn http_runs_share_history_filters_and_scoped_logs_without_affecting_comma
         .ingress_wait_request(&host, 0, Some(("GET", "/hello?token=never-retain")))
         .await
         .unwrap();
-    l.store.ingress_dispatched(&request).await.unwrap();
+    l.store.ingress_dispatched(&request);
+    // Nothing of it is written until a flush; one that comes while it is
+    // in flight writes it as it stands.
+    assert!(
+        history(&l, app, None, None, 20).await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    l.store.flush_gateway().await.unwrap();
     assert_eq!(
         history(&l, app, None, None, 20).await["items"][0]["state"],
         "running"
@@ -62,6 +71,7 @@ async fn http_runs_share_history_filters_and_scoped_logs_without_affecting_comma
         .ingress_complete(&request, Some(5), Some(500))
         .await
         .unwrap();
+    l.store.flush_gateway().await.unwrap();
     let manual = l
         .store
         .run_app(&l.operator, &l.tenant, &l.project, app, "explicit")
@@ -208,7 +218,7 @@ async fn http_response_failure_expiry_and_lost_completion_never_invent_success_o
             .await
             .unwrap();
         if dispatched {
-            l.store.ingress_dispatched(&id).await.unwrap();
+            l.store.ingress_dispatched(&id);
         }
         ids.push(id);
     }
@@ -216,12 +226,14 @@ async fn http_response_failure_expiry_and_lost_completion_never_invent_success_o
         .ingress_complete(&ids[0], Some(0), Some(503))
         .await
         .unwrap();
-    l.store.ingress_finish(&ids[3], None).await.unwrap();
-    sqlx::query("UPDATE ingress_reservations SET expires=now()-interval '1 second'")
-        .execute(&l.store.pool)
-        .await
-        .unwrap();
+    // The rest end with no outcome known, as a request does whose handling
+    // was dropped: never given to the app, it did not run; given to it, it
+    // may have.
+    for id in &ids[1..] {
+        l.store.ingress_finish(id, None).await.unwrap();
+    }
     l.store.schedule().await.unwrap();
+    l.store.flush_gateway().await.unwrap();
     let lab = &l;
     let get = |id: String| async move {
         lab.store
@@ -237,6 +249,7 @@ async fn http_response_failure_expiry_and_lost_completion_never_invent_success_o
         .ingress_complete(&ids[2], Some(0), Some(200))
         .await
         .unwrap();
+    l.store.flush_gateway().await.unwrap();
     assert_eq!(
         get(ids[2].clone()).await["state"],
         "unknown",
@@ -310,11 +323,12 @@ async fn events_interleave_one_entry_per_invocation_with_lifecycle_and_filter_by
         .ingress_wait_request(&host, 0, Some(("POST", "/orders")))
         .await
         .unwrap();
-    l.store.ingress_dispatched(&request).await.unwrap();
+    l.store.ingress_dispatched(&request);
     l.store
         .ingress_complete(&request, Some(3), Some(202))
         .await
         .unwrap();
+    l.store.flush_gateway().await.unwrap();
     let manual = l
         .store
         .run_app(&l.operator, &l.tenant, &l.project, app, "explicit")
@@ -416,4 +430,147 @@ async fn events_interleave_one_entry_per_invocation_with_lifecycle_and_filter_by
         StatusCode::NOT_FOUND,
         "a cursor outside the filtered timeline is rejected"
     );
+}
+
+/// What the gateway holds is written by its flusher: a session row that
+/// each flush touches, and the records of the requests that ended. A flush
+/// that fails loses nothing; a session that stops flushing is forgotten.
+#[tokio::test]
+async fn the_flusher_writes_a_session_and_keeps_what_it_could_not_write() {
+    let l = Lab::new().await;
+    let node = l.node("worker").await;
+    approve_component(&l, &node, true, true).await;
+    let op=l.store.deploy_app(&l.operator,&l.tenant,&l.project,fenders_control_plane::apps::AppSubmission {
+        value:json!({"name":"flushed","artifact_id":l.artifact,"triggers":{"http":true,"manual":true}}),key:"deploy",domain:"apps.test"
+    }).await.unwrap();
+    let app = s(&op["resource_id"]);
+    l.http_running(app, &node).await;
+    let sessions = || async {
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT COALESCE(array_agg(id),'{}') FROM gateway_sessions",
+        )
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap()
+    };
+    assert!(sessions().await.is_empty());
+    l.store.flush_gateway().await.unwrap();
+    assert_eq!(sessions().await, vec![l.store.gateway.session().to_owned()]);
+
+    // The first request of the app takes the project's lease of the
+    // transfer allowance, one locked transaction; the next takes none.
+    // Being admitted to an app that serves, given to it, recorded and
+    // settled is all in memory.
+    let host = format!("app-{app}.apps.test");
+    let mut request = String::new();
+    for cost in [1, 0] {
+        let before = l.store.load.locked_transactions();
+        request = l
+            .store
+            .ingress_wait_request(&host, 0, Some(("GET", "/")))
+            .await
+            .unwrap()
+            .1;
+        l.store.ingress_dispatched(&request);
+        l.store
+            .ingress_complete(&request, Some(0), Some(200))
+            .await
+            .unwrap();
+        assert_eq!(l.store.load.locked_transactions() - before, cost);
+    }
+
+    // While no change is admitted the flush fails, and keeps the record.
+    sqlx::query("UPDATE recovery_barrier SET active=true")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    assert!(l.store.flush_gateway().await.is_err());
+    sqlx::query("UPDATE recovery_barrier SET active=false")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    assert!(
+        history(&l, app, Some("http"), None, 20).await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    l.store.flush_gateway().await.unwrap();
+    let written = history(&l, app, Some("http"), None, 20).await;
+    let written: Vec<&Value> = written["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["id"] == request)
+        .collect();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0]["state"], "succeeded");
+
+    // A session nothing has touched for a while is a process that is gone.
+    sqlx::query("UPDATE gateway_sessions SET seen=seen-interval '1 minute'")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    l.store.schedule().await.unwrap();
+    assert!(sessions().await.is_empty());
+    l.finish().await;
+}
+
+/// The record of a request whose app is gone by the time of the flush is
+/// not written, and does not keep the others from being.
+#[tokio::test]
+async fn a_record_of_an_app_that_is_gone_is_left_out_of_the_flush() {
+    let l = Lab::new().await;
+    let node = l.node("worker").await;
+    approve_component(&l, &node, true, true).await;
+    let op=l.store.deploy_app(&l.operator,&l.tenant,&l.project,fenders_control_plane::apps::AppSubmission {
+        value:json!({"name":"kept","artifact_id":l.artifact,"triggers":{"http":true,"manual":true}}),key:"deploy",domain:"apps.test"
+    }).await.unwrap();
+    let app = s(&op["resource_id"]);
+    l.http_running(app, &node).await;
+    let (_, request) = l
+        .store
+        .ingress_wait_request(&format!("app-{app}.apps.test"), 0, Some(("GET", "/")))
+        .await
+        .unwrap();
+    l.store.ingress_dispatched(&request);
+    l.store
+        .ingress_complete(&request, Some(0), Some(200))
+        .await
+        .unwrap();
+    // One of an app and release that no longer exist, and one of this app
+    // on an execution that no longer does.
+    let record =
+        |app: &str, release: &str, execution: &str| fenders_control_plane::gateway::Opened {
+            tenant: l.tenant.clone(),
+            project: l.project.clone(),
+            app: app.to_owned(),
+            release: release.to_owned(),
+            execution: Some(execution.to_owned()),
+            method: "GET".into(),
+            path: "/".into(),
+        };
+    let release: String = sqlx::query_scalar("SELECT target_release_id FROM apps WHERE id=$1")
+        .bind(app)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    let (gone, without) = (uid(), uid());
+    l.store
+        .gateway
+        .opened(&gone, record(&uid(), &uid(), &uid()));
+    l.store
+        .gateway
+        .opened(&without, record(app, &release, &uid()));
+    l.store.flush_gateway().await.unwrap();
+    let written: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id,execution_id FROM app_http_runs ORDER BY created")
+            .fetch_all(&l.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(written.len(), 2);
+    assert_eq!(written[0].0, request);
+    assert!(written[0].1.is_some());
+    assert_eq!(written[1], (without, None));
+    l.finish().await;
 }

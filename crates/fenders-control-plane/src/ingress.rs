@@ -8,9 +8,6 @@ use crate::{
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
-/// What admission reserves of the transfer allowance for a request before
-/// any of it has moved, and what is reserved again each time that is used up.
-pub const TRANSFER_BLOCK: i64 = 1024 * 1024;
 /// The largest request body and the largest response body passed on.
 pub const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -128,6 +125,23 @@ impl Rates {
             .map_or(1, |(second, _)| (second + 60).saturating_sub(now).max(1))
     }
 
+    /// How many requests of `tenant` were admitted in the last minute.
+    pub fn count(&self, tenant: &str) -> i64 {
+        let inner = self.lock_inner();
+        let now = Self::now(&inner);
+        inner.admitted.get(tenant).map_or(0, |seconds| {
+            seconds
+                .iter()
+                .filter(|(second, _)| second + 60 > now)
+                .map(|(_, count)| *count as i64)
+                .sum()
+        })
+    }
+
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, RatesInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Whether `limit` requests of `tenant` were admitted in the last minute:
     /// what [`admit`](Self::admit) would answer, without admitting one.
     pub fn exhausted(&self, tenant: &str, limit: i64) -> bool {
@@ -165,96 +179,91 @@ impl Rates {
     }
 }
 
-/// Which way a body's bytes go.
-#[derive(Clone, Copy)]
-pub enum Way {
-    /// The request, to the app.
-    In,
-    /// The response, from it.
-    Out,
+pub use crate::lease::Way;
+
+/// A request of an app another edge owns ([`crate::edges`]).
+pub(crate) fn misdirected() -> Error {
+    Error::new(
+        StatusCode::MISDIRECTED_REQUEST,
+        "another edge serves this app",
+    )
 }
 
-/// The bytes of one request in flight, both ways, counted against what it
-/// has reserved of the workspace's transfer allowance. Bytes are admitted
-/// only when reserved: a body is cut where the allowance, or its size limit,
-/// would be passed.
+/// The app a host name is for, when it is one that may be served: enabled,
+/// with the HTTP trigger, not blocked, and of a release that did not fail.
+const APP_OF_HOST: &str = "SELECT a.*,h.hostname,h.state AS http_state,h.blocked,h.idle_draining,t.http FROM app_http h JOIN apps a ON a.id=h.app_id JOIN app_triggers t ON t.app_id=a.id JOIN app_releases l ON l.id=a.target_release_id WHERE h.hostname=$1 AND a.desired='enabled' AND t.http AND NOT h.blocked AND l.state<>'failed'";
+
+/// What a request's record keeps of its target: the path, never the query,
+/// which may hold a secret.
+fn record_path(target: &str) -> String {
+    target
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .chars()
+        .take(2048)
+        .collect()
+}
+
+/// The bytes of one request in flight, both ways, counted against its
+/// workspace's transfer allowance. Bytes pass only when the gateway's lease
+/// of that allowance has room for them ([`crate::lease`]): a body is cut
+/// where the allowance, or its size limit, would be passed.
 pub struct Meter {
     store: Store,
     reservation: String,
-    state: tokio::sync::Mutex<Metered>,
-}
-
-#[derive(Default)]
-struct Metered {
-    reserved: i64,
-    passed: [u64; 2],
-    /// Set when the reservation could not be extended or renewed.
-    refused: bool,
 }
 
 impl Meter {
-    /// For a request admitted with one [`TRANSFER_BLOCK`] reserved.
     pub fn new(store: Store, reservation: &str) -> Self {
         Self {
             store,
             reservation: reservation.to_owned(),
-            state: tokio::sync::Mutex::new(Metered {
-                reserved: TRANSFER_BLOCK,
-                ..Default::default()
-            }),
         }
     }
 
-    /// Whether `bytes` more may pass `way`. Reserves the next block first
-    /// when they would pass what is reserved.
+    /// Whether `bytes` more may pass `way`. In memory, unless the lease is
+    /// short: it is then asked to be extended, once, before they pass.
     pub async fn admit(&self, way: Way, bytes: usize) -> bool {
-        let mut state = self.state.lock().await;
-        let (index, limit) = match way {
-            Way::In => (0, MAX_REQUEST_BYTES),
-            Way::Out => (1, MAX_RESPONSE_BYTES),
+        use crate::lease::Pass;
+        let limit = match way {
+            Way::In => MAX_REQUEST_BYTES,
+            Way::Out => MAX_RESPONSE_BYTES,
         };
-        if state.refused || state.passed[index] + bytes as u64 > limit {
-            return false;
-        }
-        let total = (state.passed[0] + state.passed[1] + bytes as u64) as i64;
-        while total > state.reserved {
-            let more = TRANSFER_BLOCK.max(total - state.reserved);
-            if self
-                .store
-                .ingress_extend(&self.reservation, more)
-                .await
-                .is_err()
-            {
-                state.refused = true;
-                return false;
+        let budgets = &self.store.gateway.budgets;
+        loop {
+            match budgets.pass(&self.reservation, way, bytes, limit) {
+                Pass::Passed => return true,
+                Pass::Refused => return false,
+                Pass::Short { key, need, want } => {
+                    if !self.store.lease_extend(&key, need, want).await {
+                        budgets.refuse(&self.reservation);
+                        return false;
+                    }
+                }
             }
-            state.reserved += more;
         }
-        state.passed[index] += bytes as u64;
-        true
     }
 
     /// Keeps the reservation from expiring while a body is slow. A
     /// reservation that cannot be kept admits nothing more.
     pub async fn renew(&self) {
-        if self
-            .store
-            .ingress_extend(&self.reservation, 0)
-            .await
-            .is_err()
-        {
-            self.state.lock().await.refused = true;
+        if self.store.ingress_renew(&self.reservation).await.is_err() {
+            self.store.gateway.budgets.refuse(&self.reservation);
         }
     }
 
     /// The bytes passed so far, both ways.
     pub async fn passed(&self) -> i64 {
-        let state = self.state.lock().await;
-        (state.passed[0] + state.passed[1]) as i64
+        self.store.gateway.budgets.passed(&self.reservation)
     }
 }
 impl Store {
-    pub(crate) async fn expire_ingress(tx: &mut Tx) -> Result<()> {
+    /// Settles the reservations that lapsed, and says which they were: a
+    /// record of one this process still holds is then ended
+    /// ([`Store::ingress_expired`]), once the transaction has committed.
+    pub(crate) async fn expire_ingress(tx: &mut Tx) -> Result<Vec<String>> {
+        let mut expired = Vec::new();
         exec(tx,"DELETE FROM app_http_runs WHERE id IN (SELECT id FROM app_http_runs WHERE finished_at IS NOT NULL AND created<now()-interval '30 days' ORDER BY created,id LIMIT 512)",args![]).await?;
         for row in rows(
             tx,
@@ -263,6 +272,9 @@ impl Store {
         )
         .await?
         {
+            expired.push(s(&row["id"]).to_owned());
+            // The row of a request another process had in flight, written
+            // while it was: that process is not there to finish it.
             exec(tx,"UPDATE app_http_runs SET state=CASE WHEN started_at IS NULL THEN 'failed' ELSE 'unknown' END,finished_at=clock_timestamp() WHERE id=$1 AND finished_at IS NULL",args![row["id"]]).await?;
             let bytes = if !row["app_id"].is_null() && row["execution_id"].is_null() {
                 json!(0)
@@ -271,7 +283,18 @@ impl Store {
             };
             exec(tx,"INSERT INTO traffic_usage(tenant_id,project_id,period,bytes,requests) VALUES($1,$2,$3::date,$4,1) ON CONFLICT(tenant_id,project_id,period) DO UPDATE SET bytes=traffic_usage.bytes+excluded.bytes,requests=traffic_usage.requests+1",args![row["tenant_id"],row["project_id"],row["period"],bytes]).await?;
         }
-        Ok(())
+        Ok(expired)
+    }
+    /// Ends the records of requests whose reservations lapsed: never given
+    /// to an app, they did not run; given to one, they may have, and are
+    /// charged all they had reserved of their lease. The request itself
+    /// was counted when its reservation was settled.
+    pub(crate) fn ingress_expired(&self, expired: &[String]) {
+        for request in expired {
+            self.gateway.gates.leave(request);
+            self.gateway.ended(request, None);
+            self.gateway.budgets.land(request, None, false);
+        }
     }
     pub async fn ingress_start(
         &self,
@@ -302,6 +325,19 @@ impl Store {
         allow_wait: bool,
         request: Option<(&str, &str)>,
     ) -> Result<(Option<Value>, String)> {
+        let admitted = self
+            .ingress_admit(hostname, request_bytes, allow_wait, request)
+            .await;
+        self.load.admission(admitted.is_ok());
+        admitted
+    }
+    async fn ingress_admit(
+        &self,
+        hostname: &str,
+        request_bytes: usize,
+        allow_wait: bool,
+        request: Option<(&str, &str)>,
+    ) -> Result<(Option<Value>, String)> {
         if request_bytes as u64 > MAX_REQUEST_BYTES {
             return Err(Error::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -309,17 +345,26 @@ impl Store {
             ));
         }
         // Refused without the mutation lock: a host name that is nobody's,
-        // and a workspace past its requests for this minute.
+        // and a workspace past its requests for this minute. Not asked
+        // while the database cannot be reached: what is known of the host
+        // name, below, decides.
         let whose = match self.ingress_hosts.get(hostname) {
+            _ if self.gateway.outage.down_for().is_some() => Some((String::new(), i64::MAX)),
             Some(whose) => whose,
-            None => {
-                let mut tx = self.transaction(false, false).await?;
-                let whose = optional(&mut tx,"SELECT t.id,t.http_requests_per_minute FROM tenants t WHERE t.id=COALESCE((SELECT tenant_id FROM routes WHERE hostname=$1 LIMIT 1),(SELECT tenant_id FROM app_http WHERE hostname=$1 LIMIT 1))",args![hostname]).await?
-                    .map(|row| (s(&row["id"]).to_owned(), n(&row["http_requests_per_minute"])));
-                drop(tx);
-                self.ingress_hosts.remember(hostname, whose.clone());
-                whose
-            }
+            None => match crate::outage::within(
+                crate::outage::READ_WITHIN,
+                self.ingress_whose(hostname),
+            )
+            .await
+            {
+                Ok(whose) => {
+                    self.ingress_hosts.remember(hostname, whose.clone());
+                    whose
+                }
+                // The database went away: what the gates know decides.
+                Err(error) if self.gateway.outage.failed(&error) => Some((String::new(), i64::MAX)),
+                Err(error) => return Err(error),
+            },
         };
         match whose {
             None => {
@@ -333,9 +378,222 @@ impl Store {
             }
             Some(_) => {}
         }
-        let mut tx = self.transaction(true, false).await?;
+        // An app that is serving admits its requests from what the gateway
+        // knows of it in memory ([`crate::gate`]): no transaction. What is
+        // known is read again, without the lock, once it is old.
+        use crate::gate::Look;
+        let gate = match self.gateway.gates.look(hostname) {
+            Look::Warm(gate) => Some(gate),
+            Look::Closed => None,
+            Look::Unknown => self.gate_read(hostname).await?,
+        };
+        if let Some(gate) = gate {
+            if !self.owns(gate.owner.as_deref()) {
+                return Err(misdirected());
+            }
+            let reservation = self.ingress_warm(&gate, request).await?;
+            return Ok((Some(gate.route), reservation));
+        }
+        // The cold path needs the database; while it cannot be reached it
+        // is refused at once rather than left to wait for a connection.
+        if self.gateway.outage.down_for().is_some() {
+            return Err(Error::database_unavailable());
+        }
+        self.load.cold();
+        // The request is counted as in flight from the moment it is
+        // admitted; one that is not admitted after all is not.
+        let reservation = uid();
+        let admitted = self
+            .ingress_cold(hostname, allow_wait, request, &reservation)
+            .await;
+        if admitted.is_err() {
+            self.gateway.gates.leave(&reservation);
+        }
+        admitted.map(|route| (route, reservation))
+    }
+    /// Whose `hostname` is, and its workspace's requests a minute.
+    async fn ingress_whose(&self, hostname: &str) -> Result<Option<(String, i64)>> {
+        let mut tx = self.transaction(false, false).await?;
+        Ok(optional(&mut tx,"SELECT t.id,t.http_requests_per_minute FROM tenants t WHERE t.id=COALESCE((SELECT tenant_id FROM routes WHERE hostname=$1 LIMIT 1),(SELECT tenant_id FROM app_http WHERE hostname=$1 LIMIT 1))",args![hostname]).await?
+            .map(|row| (s(&row["id"]).to_owned(), n(&row["http_requests_per_minute"]))))
+    }
+    /// What is to be known of `hostname` for its requests to be admitted
+    /// in memory, read without the lock: `None` when nothing serves it, its
+    /// workspace is not active, or its app's gate is closed.
+    async fn gate_read(&self, hostname: &str) -> Result<Option<crate::gate::Gate>> {
+        // While the database cannot be reached, what was last read is
+        // believed, for as long as the outage is within its bound.
+        let outage = &self.gateway.outage;
+        let stale = || {
+            if outage.serving_stale() {
+                Ok(self.gateway.gates.stale(hostname))
+            } else {
+                Err(Error::database_unavailable())
+            }
+        };
+        if outage.down_for().is_some() {
+            return stale();
+        }
+        match crate::outage::within(crate::outage::READ_WITHIN, self.gate_fetch(hostname)).await {
+            Err(error) if outage.failed(&error) => stale(),
+            read => read,
+        }
+    }
+    async fn gate_fetch(&self, hostname: &str) -> Result<Option<crate::gate::Gate>> {
+        let epoch = self.gateway.gates.epoch();
+        let mut tx = self.transaction(false, false).await?;
+        let Some(route) = Self::ingress_route(&mut tx, hostname).await? else {
+            self.gateway.gates.forget(hostname);
+            return Ok(None);
+        };
+        let app = optional(&mut tx, APP_OF_HOST, args![hostname]).await?;
+        let limits = one(
+            &mut tx,
+            "SELECT t.lifecycle_state='active' AS active,t.http_concurrent_requests,t.http_requests_per_minute,(SELECT edge_id FROM app_edges WHERE app_id=$2) AS owner FROM tenants t WHERE t.id=$1",
+            args![
+                route["tenant_id"],
+                route["http_app_id"]
+                    .as_str()
+                    .or(app.as_ref().and_then(|app| app["id"].as_str()))
+            ],
+        )
+        .await?;
+        drop(tx);
+        if limits["active"] != true {
+            self.gateway.gates.forget(hostname);
+            return Ok(None);
+        }
+        let gate = Self::gate_of(hostname, &route, app.as_ref(), &limits);
+        Ok(self
+            .gateway
+            .gates
+            .read(hostname, gate.clone(), epoch)
+            .then_some(gate))
+    }
+    fn gate_of(
+        hostname: &str,
+        route: &Value,
+        app: Option<&Value>,
+        limits: &Value,
+    ) -> crate::gate::Gate {
+        let id = |value: &Value| value.as_str().map(str::to_owned);
+        crate::gate::Gate {
+            tenant: s(&route["tenant_id"]).to_owned(),
+            project: s(&route["project_id"]).to_owned(),
+            app: id(&route["http_app_id"]).or_else(|| app.and_then(|app| id(&app["id"]))),
+            release: app.and_then(|app| id(&app["target_release_id"])),
+            hostname: route["hostname"].as_str().unwrap_or(hostname).to_owned(),
+            route: route.clone(),
+            concurrent: n(&limits["http_concurrent_requests"]),
+            per_minute: n(&limits["http_requests_per_minute"]),
+            owner: id(&limits["owner"]),
+        }
+    }
+    /// Admission in memory, for an app that is serving: its workspace's
+    /// allowance, limits and rate are what the gateway holds and counts.
+    /// The only transaction is one that extends a lease that has run out.
+    async fn ingress_warm(
+        &self,
+        gate: &crate::gate::Gate,
+        request: Option<(&str, &str)>,
+    ) -> Result<String> {
+        let key = (gate.tenant.clone(), gate.project.clone());
+        let (budgets, gates) = (&self.gateway.budgets, &self.gateway.gates);
+        if budgets.exhausted(&key) {
+            return Err(quota("transfer allowance exhausted"));
+        }
+        // A request is admitted while a block of the allowance is left.
+        if let Some(want) = budgets.short(&key)
+            && !self.lease_extend(&key, crate::lease::BLOCK, want).await
+        {
+            // Run dry while the database cannot be reached: not the
+            // allowance's end, and to be asked again.
+            if self.gateway.outage.down_for().is_some() {
+                return Err(Error::database_unavailable());
+            }
+            return Err(quota("transfer allowance exhausted"));
+        }
+        // This process's share of the workspace's limits ([`crate::shares`]).
+        let share = self
+            .share(&gate.tenant, gate.concurrent, gate.per_minute)
+            .await?;
+        let reservation = uid();
+        let entered = crate::gate::Entered {
+            tenant: gate.tenant.clone(),
+            app: gate.app.clone(),
+            row: false,
+            bound: true,
+        };
+        let mut share = share;
+        let mut entered = Some(entered);
+        loop {
+            let entering = entered.take().expect("not yet entered");
+            if gates.enter(&reservation, entering.clone(), share.concurrent) {
+                if self.http_rates.admit(&gate.tenant, share.per_minute) {
+                    break;
+                }
+                gates.leave(&reservation);
+            }
+            // This edge's share has no room, but the workspace may have:
+            // other edges give back what they do not use at their next
+            // flush ([`crate::shares`]).
+            let (in_flight, admitted) = (
+                gates.in_flight_of(&gate.tenant) as i64,
+                self.http_rates.count(&gate.tenant),
+            );
+            match self
+                .grow_share(&gate.tenant, gate.concurrent, gate.per_minute, |grown| {
+                    grown.concurrent > in_flight && grown.per_minute > admitted
+                })
+                .await
+            {
+                Some(grown) => {
+                    share = grown;
+                    entered = Some(entering);
+                }
+                None => return Err(quota("ingress allowance exhausted")),
+            }
+        }
+        budgets.take_off(&reservation, &key, true);
+        if let (Some((method, path)), Some(app), Some(release)) =
+            (request, &gate.app, &gate.release)
+        {
+            self.gateway.opened(
+                &reservation,
+                crate::gateway::Opened {
+                    tenant: gate.tenant.clone(),
+                    project: gate.project.clone(),
+                    app: app.clone(),
+                    release: release.clone(),
+                    execution: gate.route["execution_id"].as_str().map(str::to_owned),
+                    method: method.to_owned(),
+                    path: record_path(path),
+                },
+            );
+        }
+        if self
+            .http_rates
+            .first_this_minute(&gate.tenant, &gate.hostname)
+        {
+            self.gateway
+                .admitted(&reservation, &gate.tenant, &gate.hostname);
+        }
+        Ok(reservation)
+    }
+    /// Admission in a transaction under the mutation lock: what admits a
+    /// request to an app that is not serving, starts one that is idle, and
+    /// holds the request while it starts.
+    async fn ingress_cold(
+        &self,
+        hostname: &str,
+        allow_wait: bool,
+        request: Option<(&str, &str)>,
+        reservation: &str,
+    ) -> Result<Option<Value>> {
+        let epoch = self.gateway.gates.epoch();
+        let mut tx = self.gateway_transaction().await?;
         let route = Self::ingress_route(&mut tx, hostname).await?;
-        let app=optional(&mut tx,"SELECT a.*,h.hostname,h.state AS http_state,h.blocked,h.idle_draining,t.http FROM app_http h JOIN apps a ON a.id=h.app_id JOIN app_triggers t ON t.app_id=a.id JOIN app_releases l ON l.id=a.target_release_id WHERE h.hostname=$1 AND a.desired='enabled' AND t.http AND NOT h.blocked AND l.state<>'failed'",args![hostname]).await?;
+        let app = optional(&mut tx, APP_OF_HOST, args![hostname]).await?;
         // A request waits while its app has nothing ready to serve it but
         // is on its way to having: starting, being replaced in turn,
         // restarting after a failure, or idle and about to be woken.
@@ -351,62 +609,120 @@ impl Store {
                 "service unavailable",
             ));
         }
-        Self::expire_ingress(&mut tx).await?;
+        let expired = Self::expire_ingress(&mut tx).await?;
         let context = route
             .as_ref()
             .or(app.as_ref())
             .ok_or_else(Error::internal)?;
         let tenant = &context["tenant_id"];
         Self::require_workspace_active(&mut tx, s(tenant)).await?;
-        // The workspace's plan: requests in flight at once, which are the
-        // reservations held, and requests admitted in a minute, which are
-        // counted in memory ([`Rates`]).
+        // The workspace's plan: requests in flight at once and requests
+        // admitted in a minute, both counted in memory ([`crate::gate`],
+        // [`Rates`]).
         let limits = one(
             &mut tx,
-            "SELECT (SELECT count(*) FROM ingress_reservations WHERE tenant_id=t.id) held,t.http_concurrent_requests,t.http_requests_per_minute FROM tenants t WHERE t.id=$1",
-            args![tenant],
+            "SELECT true AS active,t.http_concurrent_requests,t.http_requests_per_minute,(SELECT edge_id FROM app_edges WHERE app_id=$2) AS owner FROM tenants t WHERE t.id=$1",
+            args![
+                tenant,
+                context["http_app_id"]
+                    .as_str()
+                    .or(app.as_ref().and_then(|app| app["id"].as_str()))
+            ],
         )
         .await?;
-        let reserve = request_bytes as i64 + 1024 * 1024;
-        if n(&limits["held"]) >= n(&limits["http_concurrent_requests"]) {
-            return Err(quota("ingress allowance exhausted"));
+        // Another edge's app: its requests are that edge's to admit.
+        if !self.owns(limits["owner"].as_str()) {
+            return Err(misdirected());
         }
-        Self::transfer_capacity(&mut tx, s(tenant), reserve).await?;
+        let entered = crate::gate::Entered {
+            tenant: s(tenant).to_owned(),
+            app: context["http_app_id"]
+                .as_str()
+                .or(app.as_ref().and_then(|app| app["id"].as_str()))
+                .map(str::to_owned),
+            // Only a request that waits for its app to start has a
+            // reservation: it is what starts the app.
+            row: route.is_none(),
+            bound: route.is_some(),
+        };
+        let (share, taken) = match self.gateway.shares.of(s(tenant)) {
+            Some(share) => (share, None),
+            None => {
+                let taken = self
+                    .take_share(
+                        &mut tx,
+                        s(tenant),
+                        n(&limits["http_concurrent_requests"]),
+                        n(&limits["http_requests_per_minute"]),
+                    )
+                    .await?;
+                (taken.0, Some(taken))
+            }
+        };
         if !self
-            .http_rates
-            .admit(s(tenant), n(&limits["http_requests_per_minute"]))
+            .gateway
+            .gates
+            .enter(reservation, entered, share.concurrent)
         {
             return Err(quota("ingress allowance exhausted"));
         }
-        let reservation = uid();
-        let app = app.as_ref().unwrap_or(&Value::Null);
-        exec(&mut tx,"INSERT INTO ingress_reservations(id,tenant_id,project_id,period,bytes,execution_id,app_id,release_id,app_revision,expires) VALUES($1,$2,$3,date_trunc('month',now() AT TIME ZONE 'UTC')::date,$4,$5,$6,$7,$8::bigint,now()+CASE WHEN $9 THEN interval '10 seconds' ELSE interval '90 seconds' END)",args![reservation,tenant,context["project_id"],reserve,route.as_ref().map(|r|r["execution_id"].clone()),app["id"],app["target_release_id"],app["revision"],route.is_none()]).await?;
-        if let Some((method, path)) = request.filter(|_| !app.is_null()) {
-            // The gateway supplies the URI path, never its potentially secret query.
-            let path: String = path
-                .split('?')
-                .next()
-                .unwrap_or("/")
-                .chars()
-                .take(2048)
-                .collect();
-            exec(&mut tx,"INSERT INTO app_http_runs(id,tenant_id,project_id,app_id,release_id,execution_id,method,path) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",args![reservation,tenant,context["project_id"],app["id"],app["target_release_id"],route.as_ref().map(|r|r["execution_id"].clone()),method,path]).await?;
+        // The request's bytes come out of the gateway's lease of the
+        // workspace's transfer allowance. A lease with not a block left is
+        // extended here, where the lock is already held; one that cannot
+        // be, and has nothing, admits no request.
+        let key = (s(tenant).to_owned(), s(&context["project_id"]).to_owned());
+        let grant = match self.gateway.budgets.short(&key) {
+            Some(want) => {
+                let (period, granted) = self.lease_grant(&mut tx, &key, want).await?;
+                // A request is admitted while a block of the allowance is
+                // left: what the lease has and what it was just granted.
+                if granted < crate::lease::BLOCK
+                    && !self
+                        .gateway
+                        .budgets
+                        .has(&key, crate::lease::BLOCK - granted)
+                {
+                    return Err(quota("transfer allowance exhausted"));
+                }
+                Some((period, granted, want))
+            }
+            None => None,
+        };
+        if !self.http_rates.admit(s(tenant), share.per_minute) {
+            return Err(quota("ingress allowance exhausted"));
         }
+        // What was read here, under the lock, is what the gateway now
+        // knows of the host name: its next requests come in warm.
+        let gate = route
+            .as_ref()
+            .map(|route| Self::gate_of(hostname, route, app.as_ref(), &limits));
+        let app = app.as_ref().unwrap_or(&Value::Null);
+        if route.is_none() {
+            exec(&mut tx,"INSERT INTO ingress_reservations(id,tenant_id,project_id,period,bytes,execution_id,app_id,release_id,app_revision,expires) VALUES($1,$2,$3,date_trunc('month',now() AT TIME ZONE 'UTC')::date,$4,$5,$6,$7,$8::bigint,now()+CASE WHEN $9 THEN interval '10 seconds' ELSE interval '90 seconds' END)",args![reservation,tenant,context["project_id"],0,route.as_ref().map(|r|r["execution_id"].clone()),app["id"],app["target_release_id"],app["revision"],route.is_none()]).await?;
+        }
+        // The request's record is kept in memory and written when it ends
+        // ([`crate::gateway`]): made here, and held once this has committed.
+        let record =
+            request
+                .filter(|_| !app.is_null())
+                .map(|(method, path)| crate::gateway::Opened {
+                    tenant: s(tenant).to_owned(),
+                    project: s(&context["project_id"]).to_owned(),
+                    app: s(&app["id"]).to_owned(),
+                    release: s(&app["target_release_id"]).to_owned(),
+                    execution: route
+                        .as_ref()
+                        .and_then(|route| route["execution_id"].as_str())
+                        .map(str::to_owned),
+                    method: method.to_owned(),
+                    path: record_path(path),
+                });
         // Admission is audited once a minute for each app or route, with
         // the first request of that minute; each request has its own record
-        // (`app_http_runs`) and its usage.
+        // (`app_http_runs`) and its usage. The audit row is the flusher's
+        // to write too.
         let admitted = context["hostname"].as_str().unwrap_or(hostname);
-        if self.http_rates.first_this_minute(s(tenant), admitted) {
-            Self::audit_system(
-                &mut tx,
-                "gateway",
-                "ingress.admit",
-                &json!(reservation),
-                tenant,
-                json!({"hostname": admitted}),
-            )
-            .await?;
-        }
+        let audited = self.http_rates.first_this_minute(s(tenant), admitted);
         if !app.is_null() {
             exec(
                 &mut tx,
@@ -417,10 +733,31 @@ impl Store {
             Self::wake_http(&mut tx, s(&app["id"])).await?;
         }
         tx.commit().await?;
-        Ok((route, reservation))
+        if let Some(taken) = taken {
+            self.gateway.shares.set(s(tenant), taken);
+        }
+        self.ingress_expired(&expired);
+        if let Some(gate) = gate {
+            self.gateway.gates.open(hostname, gate, epoch);
+        }
+        if let Some((period, granted, want)) = grant {
+            self.gateway.budgets.granted(&key, &period, granted, want);
+        }
+        // A request of an app that has nothing serving yet has no
+        // execution to pass bytes to until it is given one.
+        self.gateway
+            .budgets
+            .take_off(reservation, &key, route.is_some() || app.is_null());
+        if let Some(record) = record {
+            self.gateway.opened(reservation, record);
+        }
+        if audited {
+            self.gateway.admitted(reservation, s(tenant), admitted);
+        }
+        Ok(route)
     }
     pub async fn ingress_poll(&self, reservation: &str) -> Result<Option<Value>> {
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.gateway_transaction().await?;
         let q=optional(&mut tx,"SELECT q.*,h.hostname,h.blocked,a.desired,t.http,a.target_release_id,a.revision FROM ingress_reservations q JOIN apps a ON a.id=q.app_id JOIN app_http h ON h.app_id=a.id JOIN app_triggers t ON t.app_id=a.id WHERE q.id=$1 AND q.expires>now()",args![reservation]).await?.ok_or_else(||Error::new(StatusCode::SERVICE_UNAVAILABLE,"HTTP wake request expired"))?;
         Self::require_workspace_active(&mut tx, s(&q["tenant_id"])).await?;
         if !q["execution_id"].is_null()
@@ -446,6 +783,11 @@ impl Store {
             .await?;
         }
         tx.commit().await?;
+        if let Some(execution) = route.as_ref().and_then(|r| r["execution_id"].as_str()) {
+            self.gateway.bound(reservation, execution);
+            self.gateway.budgets.bound(reservation);
+            self.gateway.gates.bound(reservation);
+        }
         Ok(route)
     }
     pub async fn ingress_wait_request(
@@ -487,12 +829,27 @@ impl Store {
             }
         }
     }
-    /// Adds `bytes` to what a request in flight has reserved of the transfer
-    /// allowance, and keeps its reservation from expiring. Refused when the
-    /// allowance cannot cover them, the reservation is gone or the workspace
-    /// is not active: the request's bodies must then stop.
-    pub async fn ingress_extend(&self, reservation: &str, bytes: i64) -> Result<()> {
-        let mut tx = self.transaction(true, false).await?;
+    /// Keeps a request's reservation from expiring while its bodies
+    /// stream. Refused when the reservation is gone or the workspace is not
+    /// active: the request's bodies must then stop.
+    pub async fn ingress_renew(&self, reservation: &str) -> Result<()> {
+        // A request that came in warm has no reservation to keep: only
+        // that its workspace is still active is asked, without the lock.
+        if self.gateway.gates.has_row(reservation) == Some(false) {
+            let tenant = self
+                .gateway
+                .gates
+                .tenant_of(reservation)
+                .ok_or_else(Error::missing)?;
+            // While the database cannot be reached the workspace is as it
+            // was: nothing can suspend it.
+            if self.gateway.outage.serving_stale() {
+                return Ok(());
+            }
+            let mut tx = self.transaction(false, false).await?;
+            return Self::require_workspace_active(&mut tx, &tenant).await;
+        }
+        let mut tx = self.gateway_transaction().await?;
         let lease = optional(
             &mut tx,
             "SELECT tenant_id FROM ingress_reservations WHERE id=$1 AND expires>now() FOR UPDATE",
@@ -501,10 +858,12 @@ impl Store {
         .await?
         .ok_or_else(|| Error::new(StatusCode::SERVICE_UNAVAILABLE, "request expired"))?;
         Self::require_workspace_active(&mut tx, s(&lease["tenant_id"])).await?;
-        if bytes > 0 {
-            Self::transfer_capacity(&mut tx, s(&lease["tenant_id"]), bytes).await?;
-        }
-        exec(&mut tx,"UPDATE ingress_reservations SET bytes=bytes+$2,expires=now()+interval '90 seconds' WHERE id=$1",args![reservation,bytes]).await?;
+        exec(
+            &mut tx,
+            "UPDATE ingress_reservations SET expires=now()+interval '90 seconds' WHERE id=$1",
+            args![reservation],
+        )
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -564,25 +923,21 @@ impl Store {
             .await?;
         }
         tx.commit().await?;
+        // The limits the gateway holds for the workspace are the old ones,
+        // and so is this process's share of them: taken again at the next
+        // request. Another process's is brought to them by its next flush.
+        self.gateway.gates.forget_all();
+        self.gateway.shares.drop_share(tenant);
         Ok(row)
     }
     pub async fn ingress_finish(&self, reservation: &str, used: Option<i64>) -> Result<()> {
         self.ingress_complete(reservation, used, None).await
     }
-    /// Persist dispatch before attempting transport. Lost replies and process loss
-    /// remain unknown; neither expiry nor recovery replays an invocation.
-    pub async fn ingress_dispatched(&self, reservation: &str) -> Result<()> {
-        let mut tx = self.transaction(true, false).await?;
-        let lease = one(
-            &mut tx,
-            "SELECT * FROM ingress_reservations WHERE id=$1 AND expires>now()",
-            args![reservation],
-        )
-        .await?;
-        Self::require_workspace_active(&mut tx, s(&lease["tenant_id"])).await?;
-        exec(&mut tx,"UPDATE app_http_runs SET state='running',started_at=clock_timestamp(),execution_id=$2 WHERE id=$1 AND state='queued'",args![reservation,lease["execution_id"]]).await?;
-        tx.commit().await?;
-        Ok(())
+    /// The request is being offered to its app: from here, only its not
+    /// being taken proves that it did not run. Kept in the request's record,
+    /// in memory; nothing is written until a flush.
+    pub fn ingress_dispatched(&self, reservation: &str) {
+        self.gateway.dispatched(reservation);
     }
     pub async fn ingress_complete(
         &self,
@@ -590,30 +945,31 @@ impl Store {
         used: Option<i64>,
         status: Option<u16>,
     ) -> Result<()> {
-        let mut tx = self.transaction(true, false).await?;
-        if let Some(row) = optional(
-            &mut tx,
-            "DELETE FROM ingress_reservations WHERE id=$1 RETURNING *",
-            args![reservation],
-        )
-        .await?
-        {
-            exec(&mut tx,"UPDATE app_http_runs SET state=CASE WHEN $2::integer IS NOT NULL THEN CASE WHEN $2::integer<400 THEN 'succeeded' ELSE 'failed' END WHEN started_at IS NULL THEN 'failed' ELSE 'unknown' END,http_status=$2::integer,finished_at=clock_timestamp() WHERE id=$1 AND finished_at IS NULL",args![reservation,status]).await?;
-            let queued = !row["app_id"].is_null() && row["execution_id"].is_null();
-            let bytes = used
-                .unwrap_or(if queued { 0 } else { n(&row["bytes"]) })
-                .clamp(0, n(&row["bytes"]));
-            exec(&mut tx,"INSERT INTO traffic_usage(tenant_id,project_id,period,bytes,requests) VALUES($1,$2,$3::date,$4,1) ON CONFLICT(tenant_id,project_id,period) DO UPDATE SET bytes=traffic_usage.bytes+excluded.bytes,requests=traffic_usage.requests+1",args![row["tenant_id"],row["project_id"],row["period"],bytes]).await?;
-            if !queued {
-                exec(
+        // No longer in flight; that its app was active is written by the
+        // next flush. A request that came in warm has nothing in the
+        // database to settle: it ends here, in memory.
+        let settled = match self.gateway.gates.leave(reservation) {
+            Some(entered) if !entered.row => true,
+            _ => {
+                let mut tx = self.gateway_transaction().await?;
+                let row = optional(
                     &mut tx,
-                    "UPDATE app_http SET last_activity=now() WHERE execution_id=$1",
-                    args![row["execution_id"]],
+                    "DELETE FROM ingress_reservations WHERE id=$1 RETURNING id",
+                    args![reservation],
                 )
                 .await?;
+                tx.commit().await?;
+                row.is_some()
             }
-        }
-        tx.commit().await?;
+        };
+        // Its record ends with it, and what it used of its lease is used:
+        // written, with the request itself, by the next flush. One that
+        // already ended, because its reservation lapsed, is not ended
+        // otherwise.
+        self.gateway.ended(reservation, status);
+        // A request whose reservation had lapsed was counted when that was
+        // settled.
+        self.gateway.budgets.land(reservation, used, settled);
         Ok(())
     }
 }

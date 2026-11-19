@@ -61,7 +61,7 @@ pub const RESERVED: &str = "/_fenders/";
 pub const MAX_MESSAGE: usize = 1024 * 1024;
 /// Connections one app and one workspace may have open.
 const MAX_PER_APP: usize = 1000;
-const MAX_PER_WORKSPACE: usize = 4000;
+pub(crate) const MAX_PER_WORKSPACE: usize = 4000;
 /// Messages a connection may send in one second.
 const MAX_PER_SECOND: u32 = 20;
 /// How often a quiet connection is pinged, and how long one may send
@@ -123,9 +123,22 @@ impl Sockets {
         tenant: &str,
         project: &str,
     ) -> Option<mpsc::Receiver<Push>> {
+        self.open_within(id, app, tenant, project, MAX_PER_WORKSPACE as i64)
+    }
+
+    /// As [`open`](Self::open), with this process's share of the
+    /// workspace's connections ([`crate::shares`]).
+    pub(crate) fn open_within(
+        &self,
+        id: &str,
+        app: &str,
+        tenant: &str,
+        project: &str,
+        workspace: i64,
+    ) -> Option<mpsc::Receiver<Push>> {
         let mut open = self.lock();
         if open.values().filter(|c| c.app == app).count() >= MAX_PER_APP
-            || open.values().filter(|c| c.tenant == tenant).count() >= MAX_PER_WORKSPACE
+            || open.values().filter(|c| c.tenant == tenant).count() as i64 >= workspace
         {
             return None;
         }
@@ -141,6 +154,11 @@ impl Sockets {
             },
         );
         Some(pushed)
+    }
+
+    /// The workspace's connections this process holds.
+    pub fn count(&self, tenant: &str) -> i64 {
+        self.lock().values().filter(|c| c.tenant == tenant).count() as i64
     }
 
     fn closed(&self, id: &str) {
@@ -300,7 +318,15 @@ pub async fn accept(state: ApiState, host: String, request: Request) -> Result<R
             .await?;
         return Ok(status.into_response());
     }
-    let Some(pushed) = state.store.sockets.open(&id, &app.0, &app.1, &app.2) else {
+    let workspace = match state.store.gateway.shares.of(&app.1) {
+        Some(share) => share.connections,
+        None => MAX_PER_WORKSPACE as i64,
+    };
+    let Some(pushed) = state
+        .store
+        .sockets
+        .open_within(&id, &app.0, &app.1, &app.2, workspace)
+    else {
         let _ = event(&state, &host, &id, "disconnect", None, None, Bytes::new()).await;
         return Err(Error::new(
             StatusCode::TOO_MANY_REQUESTS,
@@ -505,13 +531,21 @@ impl crate::store::Store {
         project: &str,
         bytes: i64,
     ) -> Result<()> {
-        use crate::{args, db::exec};
-        let mut tx = self.transaction(true, false).await?;
-        Self::require_workspace_active(&mut tx, tenant).await?;
-        Self::transfer_capacity(&mut tx, tenant, bytes).await?;
-        exec(&mut tx,"INSERT INTO traffic_usage(tenant_id,project_id,period,bytes,requests) VALUES($1,$2,date_trunc('month',now() AT TIME ZONE 'UTC')::date,$3,0) ON CONFLICT(tenant_id,project_id,period) DO UPDATE SET bytes=traffic_usage.bytes+excluded.bytes",args![tenant,project,bytes]).await?;
-        tx.commit().await?;
-        Ok(())
+        // Out of the gateway's lease of the allowance, in memory, as a
+        // request's bytes are: a transaction only when the lease is short.
+        let key = (tenant.to_owned(), project.to_owned());
+        let budgets = &self.gateway.budgets;
+        if budgets.spend(&key, bytes) {
+            return Ok(());
+        }
+        if self
+            .lease_extend(&key, bytes, bytes.max(crate::lease::LEAST))
+            .await
+            && budgets.spend(&key, bytes)
+        {
+            return Ok(());
+        }
+        Err(crate::db::quota("transfer allowance exhausted"))
     }
 }
 
@@ -554,9 +588,9 @@ impl crate::store::Store {
         let status = refused
             .map(|status| status.as_u16())
             .filter(|status| (200..=599).contains(status));
-        let mut tx = self.transaction(true, false).await?;
-        exec(&mut tx,"INSERT INTO app_http_runs(id,tenant_id,project_id,app_id,release_id,method,path,state,http_status,started_at,finished_at,websocket) SELECT $1,a.tenant_id,a.project_id,a.id,COALESCE(a.active_release_id,a.target_release_id),'GET',$3,CASE WHEN $4 THEN 'failed' ELSE 'running' END,$5::integer,clock_timestamp(),CASE WHEN $4 THEN clock_timestamp() END,'{}'::jsonb FROM apps a WHERE a.id=$2 AND COALESCE(a.active_release_id,a.target_release_id) IS NOT NULL ON CONFLICT(id) DO NOTHING",args![id,app,path,refused.is_some(),status]).await?;
-        tx.commit().await?;
+        let mut tx = self.watched_transaction().await?;
+        exec(&mut tx,"INSERT INTO app_http_runs(id,tenant_id,project_id,app_id,release_id,method,path,state,http_status,started_at,finished_at,websocket,session_id) SELECT $1,a.tenant_id,a.project_id,a.id,COALESCE(a.active_release_id,a.target_release_id),'GET',$3,CASE WHEN $4 THEN 'failed' ELSE 'running' END,$5::integer,clock_timestamp(),CASE WHEN $4 THEN clock_timestamp() END,'{}'::jsonb,$6 FROM apps a WHERE a.id=$2 AND COALESCE(a.active_release_id,a.target_release_id) IS NOT NULL ON CONFLICT(id) DO NOTHING",args![id,app,path,refused.is_some(),status,self.gateway.session()]).await?;
+        self.commit_watched(tx).await?;
         Ok(())
     }
 
@@ -566,9 +600,9 @@ impl crate::store::Store {
     pub async fn websocket_closed(&self, id: &str, passed: [u64; 4]) -> Result<()> {
         use crate::{args, db::exec};
         let counts = serde_json::json!({"messages_in":passed[0],"bytes_in":passed[1],"messages_out":passed[2],"bytes_out":passed[3]});
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         exec(&mut tx,"UPDATE app_http_runs SET state='succeeded',finished_at=clock_timestamp(),websocket=$2 WHERE id=$1 AND websocket IS NOT NULL AND finished_at IS NULL",args![id,counts]).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(())
     }
 
@@ -580,21 +614,24 @@ impl crate::store::Store {
             db::{exec, rows, s},
         };
         let mut tx = self.transaction(false, false).await?;
-        let open = rows(&mut tx,"SELECT id FROM app_http_runs WHERE websocket IS NOT NULL AND finished_at IS NULL AND created<now()-interval '1 minute' LIMIT 512",args![]).await?;
+        // This process's connections it no longer holds, and those of a
+        // session that is gone: another edge's are its own to sweep.
+        let open = rows(&mut tx,&format!("SELECT id,session_id IS NOT DISTINCT FROM $1 AS mine FROM app_http_runs WHERE websocket IS NOT NULL AND finished_at IS NULL AND created<now()-interval '1 minute'
+            AND (session_id IS NULL OR session_id=$1 OR NOT EXISTS(SELECT 1 FROM gateway_sessions g WHERE g.id=app_http_runs.session_id AND g.seen>clock_timestamp()-interval '{}')) LIMIT 512",crate::gateway::SESSION_DEAD),args![self.gateway.session()]).await?;
         drop(tx);
         let lost: Vec<&str> = {
             let held = self.sockets.lock();
             open.iter()
+                .filter(|row| row["mine"] != true || !held.contains_key(s(&row["id"])))
                 .map(|row| s(&row["id"]))
-                .filter(|id| !held.contains_key(*id))
                 .collect()
         };
         if lost.is_empty() {
             return Ok(());
         }
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         exec(&mut tx,"UPDATE app_http_runs SET state='unknown',finished_at=clock_timestamp() WHERE websocket IS NOT NULL AND finished_at IS NULL AND id=ANY(ARRAY(SELECT jsonb_array_elements_text($1)))",args![serde_json::json!(lost)]).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(())
     }
 

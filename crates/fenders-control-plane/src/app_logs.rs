@@ -83,7 +83,7 @@ impl Store {
                 return Err(Error::invalid("invalid app log cursor"));
             }
             let decoded = self
-                .cipher
+                .cipher()?
                 .decrypt(token)
                 .map_err(|_| Error::invalid("invalid app log cursor"))?;
             let cursor: Cursor = serde_json::from_slice(&decoded)
@@ -122,7 +122,7 @@ impl Store {
             after: next,
         };
         let next = self
-            .cipher
+            .cipher()?
             .encrypt(&serde_json::to_vec(&cursor).map_err(|_| Error::internal())?);
         Ok(
             json!({"items":items,"next":next,"has_more":more,"encoding":"base64","collection":collection,"retention":{"days":7,"execution_bytes":EXECUTION_BYTES,"execution_records":EXECUTION_RECORDS,"workspace_bytes":WORKSPACE_BYTES,"workspace_records":WORKSPACE_RECORDS}}),

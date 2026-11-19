@@ -54,11 +54,17 @@ WITH scope AS MATERIALIZED (
     SELECT a.project_id,sum(a.size) bytes,sum(a.size) artifact FROM artifacts a JOIN scope p ON p.id=a.project_id
     WHERE a.tenant_id=$1 AND a.retired_at IS NULL GROUP BY a.project_id
 ), traffic AS (
-    SELECT t.project_id,t.bytes,t.requests FROM traffic_usage t JOIN scope p ON p.id=t.project_id
+    SELECT t.project_id,t.bytes,t.requests,t.conservative_bytes FROM traffic_usage t JOIN scope p ON p.id=t.project_id
     WHERE t.tenant_id=$1 AND t.period=date_trunc('month',now() AT TIME ZONE 'UTC')::date
 ), pending AS (
-    SELECT i.project_id,sum(i.bytes) bytes FROM ingress_reservations i JOIN scope p ON p.id=i.project_id
+    SELECT i.project_id,sum(i.bytes) bytes FROM (
+        SELECT tenant_id,project_id,period,bytes FROM ingress_reservations
+        UNION ALL SELECT tenant_id,project_id,period,held_bytes FROM gateway_transfer_leases
+    ) i JOIN scope p ON p.id=i.project_id
     WHERE i.tenant_id=$1 AND i.period=date_trunc('month',now() AT TIME ZONE 'UTC')::date GROUP BY i.project_id
+), leased AS (
+    SELECT g.project_id,sum(g.held_bytes) bytes FROM gateway_transfer_leases g JOIN scope p ON p.id=g.project_id
+    WHERE g.tenant_id=$1 AND g.period=date_trunc('month',now() AT TIME ZONE 'UTC')::date GROUP BY g.project_id
 ), allowance AS (
     SELECT a.project_id,sum(a.used_bytes) used_bytes,sum(a.held_bytes) held_bytes
     FROM transfer_allowance_accounting a JOIN scope p ON p.id=a.project_id
@@ -86,7 +92,7 @@ SELECT p.id,p.display_name AS name,
     COALESCE(s.bytes,0) storage_bytes,COALESCE(s.artifact,0) artifact_bytes,
     COALESCE(t.bytes,0) ingress_bytes,COALESCE(t.requests,0) ingress_requests,COALESCE(i.bytes,0) ingress_reserved_bytes,
     COALESCE(ta.used_bytes,0) transfer_accounted_bytes,COALESCE(ta.held_bytes,0) transfer_reserved_bytes,
-    COALESCE(tc.bytes,0) outbound_conservative_bytes,
+    COALESCE(tc.bytes,0) outbound_conservative_bytes,COALESCE(t.conservative_bytes,0) gateway_conservative_bytes,COALESCE(gl.bytes,0) gateway_leased_bytes,
     COALESCE(og.executions,0) outbound_grant_executions,
     COALESCE(u.executions,0) executions,COALESCE(u.measured_executions,0) measured_executions,
     CASE WHEN u.executions IS NULL THEN 0 ELSE u.cpu_usec END cpu_usec,u.last_cpu_observed,
@@ -97,5 +103,5 @@ FROM scope p LEFT JOIN reservations r ON r.project_id=p.id LEFT JOIN storage s O
 LEFT JOIN traffic t ON t.project_id=p.id LEFT JOIN pending i ON i.project_id=p.id
 LEFT JOIN execution_usage u ON u.project_id=p.id LEFT JOIN logs l ON l.project_id=p.id
 LEFT JOIN egress g ON g.project_id=p.id LEFT JOIN monthly mo ON mo.project_id=p.id
-LEFT JOIN allowance ta ON ta.project_id=p.id LEFT JOIN conservative tc ON tc.project_id=p.id
+LEFT JOIN allowance ta ON ta.project_id=p.id LEFT JOIN leased gl ON gl.project_id=p.id LEFT JOIN conservative tc ON tc.project_id=p.id
 LEFT JOIN outbound_grants og ON og.project_id=p.id ORDER BY p.display_name,p.id

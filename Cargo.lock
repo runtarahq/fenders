@@ -909,6 +909,7 @@ dependencies = [
  "hkdf",
  "http-body",
  "http-body-util",
+ "hyper",
  "hyper-util",
  "ipnet",
  "libc",
