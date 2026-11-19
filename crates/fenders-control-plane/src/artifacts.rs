@@ -76,7 +76,7 @@ impl Store {
     pub async fn claim_component(&self, node: &str, value: Value) -> Result<Value> {
         fields(&value, &["boot_id"], &["boot_id"])?;
         let boot = boot(&value)?;
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let worker = worker(&mut tx, node, boot).await?;
         let recent = optional(
             &mut tx,
@@ -107,7 +107,7 @@ impl Store {
         } else {
             Value::Null
         };
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(json!({"job":claim}))
     }
 
@@ -121,7 +121,7 @@ impl Store {
         fields(&value, &["boot_id"], &["boot_id"])?;
         // Reading customer code is also barred while a restored control plane is
         // fenced; an old node must not acquire work from a restored assignment.
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let row = assigned(&mut tx, node, boot(&value)?, artifact, generation).await?;
         if row["state"] != "validating" || row["lease_active"] != true {
             return Err(conflict("component validation lease expired"));
@@ -137,7 +137,7 @@ impl Store {
         if data.len() as i64 != n(&row["size"]) || digest(&data) != s(&row["digest"]) {
             return Err(Error::internal());
         }
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(data)
     }
 
@@ -153,7 +153,7 @@ impl Store {
             return Err(Error::invalid("one inspection or error is required"));
         }
         let boot = boot(&value)?;
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let row = assigned(&mut tx, node, boot, artifact, generation).await?;
         let state = if let Some(inspection) = value.get("inspection") {
             validate_inspection(inspection, s(&row["digest"]), n(&row["size"]) as usize)?;
@@ -187,7 +187,7 @@ impl Store {
             json!({"state":state,"generation":generation,"runtime":RUNTIME}),
         )
         .await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(json!({"accepted":true}))
     }
 }

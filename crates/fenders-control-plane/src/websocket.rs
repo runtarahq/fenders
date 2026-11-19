@@ -562,9 +562,9 @@ impl crate::store::Store {
         let status = refused
             .map(|status| status.as_u16())
             .filter(|status| (200..=599).contains(status));
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         exec(&mut tx,"INSERT INTO app_http_runs(id,tenant_id,project_id,app_id,release_id,method,path,state,http_status,started_at,finished_at,websocket) SELECT $1,a.tenant_id,a.project_id,a.id,COALESCE(a.active_release_id,a.target_release_id),'GET',$3,CASE WHEN $4 THEN 'failed' ELSE 'running' END,$5::integer,clock_timestamp(),CASE WHEN $4 THEN clock_timestamp() END,'{}'::jsonb FROM apps a WHERE a.id=$2 AND COALESCE(a.active_release_id,a.target_release_id) IS NOT NULL ON CONFLICT(id) DO NOTHING",args![id,app,path,refused.is_some(),status]).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(())
     }
 
@@ -574,9 +574,9 @@ impl crate::store::Store {
     pub async fn websocket_closed(&self, id: &str, passed: [u64; 4]) -> Result<()> {
         use crate::{args, db::exec};
         let counts = serde_json::json!({"messages_in":passed[0],"bytes_in":passed[1],"messages_out":passed[2],"bytes_out":passed[3]});
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         exec(&mut tx,"UPDATE app_http_runs SET state='succeeded',finished_at=clock_timestamp(),websocket=$2 WHERE id=$1 AND websocket IS NOT NULL AND finished_at IS NULL",args![id,counts]).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(())
     }
 

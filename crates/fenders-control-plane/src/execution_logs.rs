@@ -125,7 +125,7 @@ impl Store {
             return Err(Error::invalid("invalid log generation"));
         }
         let batch = Batch::parse(value)?;
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let execution_row = optional(&mut tx,
             "SELECT e.* FROM executions e JOIN nodes n ON n.id=e.node_id WHERE e.id=$1 AND e.generation=$2 AND e.node_id=$3 AND NOT e.log_ingestion_fenced AND NOT n.disabled AND n.backend='wasm' AND n.boot_id=$4 AND n.observed_confinement=$5",
             args![execution,generation,node,batch.boot_id,HOST_CONFINEMENT]).await?
@@ -196,7 +196,7 @@ impl Store {
         Self::expire_execution_logs(&mut tx).await?;
         Self::bound_execution_logs(&mut tx, execution, s(&execution_row["tenant_id"])).await?;
         let result = one(&mut tx,"SELECT capture_id,acknowledged,source_gap,interrupted,pruned_through,COALESCE(end_sequence=acknowledged,false) AS complete FROM execution_log_sources WHERE execution_id=$1",args![execution]).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(json!({"accepted":true,"cursor":result}))
     }
 

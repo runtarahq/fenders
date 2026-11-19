@@ -233,7 +233,7 @@ impl Store {
             return Err(Error::invalid("observation only applies to settlement"));
         }
         let hash = digest(serde_json::to_vec(&value).map_err(|_| Error::internal())?);
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let e=optional(&mut tx,"SELECT e.* FROM executions e WHERE e.id=$1 AND e.node_id=$2 AND e.generation=$3 FOR UPDATE",args![execution,node,generation]).await?
             .ok_or_else(||conflict("stale or foreign execution grant"))?;
         let host = one(
@@ -365,7 +365,7 @@ impl Store {
             exec(&mut tx,"UPDATE execution_egress_budgets SET request_id=$2,request_hash=$3,updated=now() WHERE execution_id=$1",args![execution,request,hash]).await?;
         }
         let result=one(&mut tx,"SELECT revision,state,period,base_bytes,ceiling_bytes,held_bytes,boot_id,CASE WHEN state='active' THEN GREATEST(0,LEAST(10000,floor(extract(epoch FROM (expires-clock_timestamp()))*1000)))::bigint ELSE 0 END ttl_ms FROM execution_egress_budgets WHERE execution_id=$1",args![execution]).await?;
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(result)
     }
 }

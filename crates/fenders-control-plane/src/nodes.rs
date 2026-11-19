@@ -514,7 +514,7 @@ impl Store {
     pub async fn assignment(&self, node: &str, execution: &str, generation: i64) -> Result<Value> {
         identity(execution)?;
         let prepared = self.prepare_https(node, execution, generation).await?;
-        let mut tx = self.transaction(true, false).await?;
+        let mut tx = self.watched_transaction().await?;
         let e = optional(
             &mut tx,
             "SELECT * FROM executions WHERE id=$1 AND node_id=$2 AND generation=$3 AND reserved",
@@ -613,7 +613,7 @@ impl Store {
         for (field, value) in run_channel.iter().flat_map(|v| v.as_object()).flatten() {
             spec[field] = value.clone();
         }
-        tx.commit().await?;
+        self.commit_watched(tx).await?;
         Ok(
             json!({"id":e["id"],"generation":e["generation"],"desired":e["desired"],"spec":spec,"artifact":artifact,"egress":egress,"compile_scope":e["tenant_id"]}),
         )
