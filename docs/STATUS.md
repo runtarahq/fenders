@@ -52,7 +52,8 @@ as both control plane and node.
 | Connections | An app reaches the TCP endpoints and public HTTPS origins it was given and nothing else; removing one stops the runs that hold it | `scripts/verify_connections_live.sh` |
 | Outbound byte limit | A run with a connection sends only what the tenant's monthly transfer allowance grants, and is ended when it would send more | `scripts/verify_egress_limit_live.sh` |
 | HTTP apps | An app with the HTTP trigger has a URL; bodies stream both ways; it scales between `scale.min` and `scale.max` executions; a new release takes over without failed requests | `scripts/verify_http_live.sh` |
-| Gateway limits | A request target too long for a shim is refused and wakes nothing; such requests do not end a starting app's execution; requests their clients abandon hold none of the transfer allowance | `scripts/verify_gateway_limits_live.sh` |
+| Gateway limits | A request target too long for a shim is refused and wakes nothing; such requests do not end a starting app's execution; requests their clients abandon hold none of the transfer allowance and none is left in flight | `scripts/verify_gateway_limits_live.sh` |
+| Gateway throughput | 1,325 requests a second to one app and 1,563 across four workspaces, from 32 clients, with no transaction under the mutation lock for a request to an app that serves (78 and 88 before, at about 2.8 such transactions a request); one machine as control plane, PostgreSQL and node ([the measurement](gateway-accounting.md#4-evidence-and-documents)) | `scripts/measure_gateway.sh` |
 | WebSocket | The gateway holds connections for an app and gives it their events as requests | Shown with a headless browser as the client; that check is not in this repository yet |
 | A shim asked to stop | Once its run is over, a shim holding the run's end for its launcher ends at once on SIGTERM | `scripts/verify_shim_stop_live.sh` |
 | The launcher from inside its VM | A test guest booted in place of the runtime: what a guest learns of a host file, threads and their exits, a pointer outside the guest, the socket rate; and from outside, that everything the launcher holds closes on exec and its own filter is on every thread | `scripts/verify_launcher_guest_live.sh` |
@@ -223,7 +224,9 @@ a workspace.
 
 - Every byte of every request, response and WebSocket message passes through
   the control plane, whose gateway and run channel must be one process. Its
-  throughput is not measured.
+  throughput was measured on one machine only (see Works); 16 MiB responses
+  went at 4 a second from 4 clients, before and after the gateway's
+  accounting was taken off the request path.
 - WebSocket connections and the request exchange live in that process's
   memory: a restart closes every connection, and a second control-plane
   process is not supported.
@@ -234,7 +237,34 @@ a workspace.
   connection limits (1000 an app, 4000 a tenant), are constants.
 - Scale-out reacts in seconds and by one execution at a time; a burst beyond
   the queue (64 requests an app) is answered 503.
-- The rate limit is counted in memory: a restart forgets the last minute.
+- The rate limit, and a workspace's requests in flight, are counted in
+  memory: a restart forgets the last minute, and the requests it had.
+- A request to an app that serves is admitted from what the gateway holds
+  in memory of its host name, which it reads again when it is two seconds
+  old, and after any change this process makes under the mutation lock. A
+  change made by another process (a second control plane during a rolling
+  update) is seen within those two seconds; a request admitted meanwhile to
+  an app that stopped serving is not taken, and is answered 503 never having
+  run. A request to an app that does not serve takes the path under the lock,
+  which starts an app that is idle and holds the request while it starts.
+- A request's record (`app_http_runs`, the app's events) is written up to a
+  second after it ends, or after a second in flight, by the gateway's flush.
+  A process that dies takes the records of what it had in flight with it.
+  Records the database does not take in time are dropped, oldest first, past
+  16384 waiting, and counted in `GET /v1/control-plane/status` as
+  `gateway.records_dropped`; what was used is never dropped.
+- A request's bytes come out of the gateway's lease of its workspace's
+  transfer allowance, for each project with traffic: between 1 and 64 MiB,
+  sized by what was drawn in the last five seconds, and given back after 30
+  seconds with no request. A lease is held, and so not available to the
+  workspace's outbound grants, while it lasts; the usage report says how much
+  is leased as `transfer_allowance.gateway_leased_bytes`. Changing the
+  allowance takes back what this process's leases hold unused. A request is
+  admitted while a block of the allowance (16 KiB) is left.
+- A control plane that stops gives its leases back. The lease of one that
+  dies, or does not flush for 15 seconds, is charged whole as used, and
+  recorded as `transfer_allowance.gateway_conservative_bytes`: what it passed
+  is not known.
 - Connections are limited per listener and per peer address, with unfinished
   handshakes budgeted apart from served connections: 512 served (128 an
   address) on the management and node-control listeners, 8192 (2048 an

@@ -1,8 +1,38 @@
 # Gateway accounting off the request path: the plan
 
-Status: decided on 19 November 2026 (D1 to D3); nothing here is built.
-D4 to D7 are the plan's own choices, and D4 and D5 are numbers that stage 0
-may change. [STATUS.md](STATUS.md) says what is true today.
+Status: built on 19 November 2026, all four stages, on
+`feature/gateway-accounting`. [STATUS.md](STATUS.md) says what is true and
+wins where this file differs. This file is the plan as it was decided, kept
+for its reasoning; delete it when that is no longer wanted.
+
+Built differently from what is written below:
+
+- **A gate is kept true by an epoch, not by `LISTEN/NOTIFY`.** Every
+  transaction under the mutation lock that is not the gateway's own advances
+  an epoch in memory, and what was read of a host name before it is not
+  believed after it, so a change this process makes is seen by the next
+  request. One another process makes is seen once what was read is two
+  seconds old, as planned. Nothing listens.
+- **A reservation row is kept only for a request that waits for its app to
+  start.** It is what wakes the app and binds the request to the execution
+  it is given. A request to an app that serves has none, and nothing to
+  renew: renewing its stream asks only that its workspace is still active.
+- **A request is admitted while a block (16 KiB) of the allowance is
+  left**, not while any of it is: a response is cut at a whole chunk, and
+  the crumbs left over would otherwise admit request after request, each
+  cut at once.
+- **A lease is brought to its size only while requests draw on it.** One
+  nothing draws on runs down and is given back. Bringing every lease back up
+  at each flush kept a megabyte or more from a workspace's outbound grants
+  for 30 seconds after its last request (`verify_egress_limit_live.sh`
+  found it).
+- **Changing an allowance takes back what this process's leases hold
+  unused**, in the same transaction: otherwise a lease kept an operator from
+  lowering an allowance (`verify_http_live.sh` found it).
+- **Not done: the edge tier, and the run channel's and outbound grants'
+  transactions**, as planned ("Not in this plan").
+
+D1 to D3 were decided on 19 November 2026; D4 to D7 are the plan's own.
 
 ## Why
 
@@ -232,6 +262,25 @@ Per request: two transactions, however large the bodies.
 Per warm request: no transaction. Per process: one a second.
 
 ### 4. Evidence and documents
+
+Done on 19 November 2026, at `ef08512`, on the same machine as stage 0:
+
+| Run | Clients | Requests a second | Median | 99th percentile | Locked transactions a request |
+|---|---|---|---|---|---|
+| One app, `GET /hello` | 32 | 1,325 (78) | 24 ms (392) | 29 ms (809) | 0 (2.7) |
+| Four workspaces in turn | 32 | 1,563 (88) | 3 ms (358) | 81 ms (498) | 0 (2.9) |
+| One app, 16 MiB responses | 4 | 4 (4) | 920 ms (999) | 1379 ms (1410) | 0 (18.6) |
+
+Stage 0's numbers in brackets. Under load the process made fewer locked
+transactions than idle: the scheduler, the node's heartbeats and the flush.
+The large bodies were never bound by the lock; they are bound by passing 16
+MiB through one process, twice.
+
+`verify_http_live.sh`, `verify_gateway_limits_live.sh`,
+`verify_egress_limit_live.sh` and `verify_management_api_live.sh` pass on a
+real node, with the checks of what is held changed for leases.
+
+The plan as it was:
 
 - The stage 0 script again, and both sets of numbers here.
 - `scripts/verify_http_live.sh`, `verify_gateway_limits_live.sh` and
