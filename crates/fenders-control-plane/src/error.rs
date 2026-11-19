@@ -33,6 +33,7 @@ pub const REASONS: &[&str] = &[
     "permission_denied",
     "quota_exhausted",
     "in_use",
+    "busy",
 ];
 
 impl Error {
@@ -98,6 +99,14 @@ impl From<sqlx::Error> for Error {
             sqlx::Error::Database(ref e) if e.code().is_some_and(|c| c == "23503") => {
                 Self::missing()
             }
+            // A lock waited for longer than a transaction may (`lock_timeout`):
+            // the control plane is busy, not broken, and the call may be
+            // made again. It is not the database being unreachable.
+            sqlx::Error::Database(ref e) if e.code().is_some_and(|c| c == "55P03") => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the control plane is busy; try again",
+            )
+            .coded("busy"),
             sqlx::Error::PoolTimedOut
             | sqlx::Error::PoolClosed
             | sqlx::Error::Io(_)

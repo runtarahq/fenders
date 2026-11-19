@@ -334,6 +334,7 @@ stands for things a program treats differently, the reason:
 | 409 | `quota_exhausted` | An allowance or a limit is reached; waiting does not cure it |
 | 409 | `in_use` | Something still names what is to be deleted; change that first |
 | 429 | `rate_limited` | Wait the seconds `Retry-After` gives |
+| 503 | `busy` | The control plane waited too long for its lock; send the same request again (same `Idempotency-Key`) |
 
 The whole list is the enum of `Error.code` in the contract. Beside it:
 

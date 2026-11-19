@@ -319,3 +319,29 @@ async fn a_database_that_hangs_is_taken_for_gone_and_served_around() {
     assert_eq!(counted, 3);
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_lock_waited_for_too_long_is_busy_not_broken_nor_the_database_gone() {
+    let l = Lab::new().await;
+    let mut holder = l.store.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(184923781)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let mut waiter = l.store.pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout='50ms'")
+        .execute(&mut *waiter)
+        .await
+        .unwrap();
+    let error: fenders_control_plane::error::Error =
+        sqlx::query("SELECT pg_advisory_xact_lock(184923781)")
+            .execute(&mut *waiter)
+            .await
+            .unwrap_err()
+            .into();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!error.is_database_unavailable());
+    drop(waiter);
+    holder.rollback().await.unwrap();
+    l.finish().await;
+}

@@ -4783,7 +4783,8 @@
               "workspace_suspended",
               "permission_denied",
               "quota_exhausted",
-              "in_use"
+              "in_use",
+              "busy"
             ]
           },
           "request_id": {
