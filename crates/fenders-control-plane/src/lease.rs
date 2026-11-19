@@ -235,14 +235,22 @@ impl Budgets {
         budget.exhausted = bytes < asked;
     }
 
-    /// A request was admitted: it draws its first block. `bound` when it
-    /// has an execution to go to.
+    /// A request was admitted: one with an execution to go to (`bound`)
+    /// draws its first block.
     pub fn take_off(&self, id: &str, key: &Key, bound: bool) {
         let mut inner = self.lock();
-        let reserved = inner
-            .budgets
-            .get_mut(key)
-            .map_or(0, |budget| budget.draw(BLOCK));
+        // A request waiting for its app to start passes nothing until it is
+        // bound to an execution, and draws its first block when its bytes
+        // do (`pass`): a thousand waiting together do not empty the lease,
+        // nor have the next to come extend it, one by one.
+        let reserved = if bound {
+            inner
+                .budgets
+                .get_mut(key)
+                .map_or(0, |budget| budget.draw(BLOCK))
+        } else {
+            0
+        };
         inner.flights.insert(
             id.to_owned(),
             Flight {
