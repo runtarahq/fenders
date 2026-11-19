@@ -57,6 +57,12 @@ where
 /// its pool's 16 connections.
 pub const LOCK_WAITERS: usize = 4;
 
+/// Connections a process's pool holds, unless told otherwise
+/// (`--database-connections`). An edge does a few reads for each request
+/// it has not seen the host name of: one taking thousands of requests to
+/// thousands of apps at once may want more.
+pub const CONNECTIONS: u32 = 16;
+
 /// How long a transaction waits for its turn to wait for the lock: as long
 /// as it would wait for the lock itself (`lock_timeout`).
 pub const LOCK_TURN_WAIT: Duration = Duration::from_secs(5);
@@ -272,9 +278,13 @@ pub fn write_edge_key(control_state: &Path, output: &Path) -> Result<Value> {
 
 impl Store {
     pub async fn connect(dsn: &str, state: &Path) -> Result<Self> {
+        Self::connect_with(dsn, state, CONNECTIONS).await
+    }
+    /// As [`Self::connect`], with a pool of `connections`.
+    pub async fn connect_with(dsn: &str, state: &Path, connections: u32) -> Result<Self> {
         crate::db::database_url(dsn)?;
         let pool = PgPoolOptions::new()
-            .max_connections(16)
+            .max_connections(connections)
             .acquire_timeout(Duration::from_secs(5))
             .connect(dsn)
             .await?;
@@ -326,9 +336,13 @@ impl Store {
             .map(|store| store.serving(Serves::Edge))
     }
     pub async fn connect_edge(dsn: &str, state: &Path) -> Result<Self> {
+        Self::connect_edge_with(dsn, state, CONNECTIONS).await
+    }
+    /// As [`Self::connect_edge`], with a pool of `connections`.
+    pub async fn connect_edge_with(dsn: &str, state: &Path, connections: u32) -> Result<Self> {
         crate::db::database_url(dsn)?;
         let pool = PgPoolOptions::new()
-            .max_connections(16)
+            .max_connections(connections)
             .acquire_timeout(Duration::from_secs(5))
             .connect(dsn)
             .await?;

@@ -40,6 +40,8 @@
 # LOCAL_NODE_CPU, LOCAL_NODE_MEMORY and LOCAL_NODE_INSTANCES on `up` say
 # what the node holds (400, 4096, 8): its own limits and its registration's.
 # CPU above what is given the node (400) overcommits it.
+# LOCAL_EDGE_CONNECTIONS is each edge's pool of database connections (32):
+# the control process keeps 16, and PostgreSQL takes 100 in all.
 # LOCAL_PG names the PostgreSQL container and its volume, for a second
 # environment whose database is not the first's; with it, give LOCAL_STATE
 # too, since a state directory and its database go together.
@@ -75,7 +77,7 @@ start_edge() { # NAME EDGE_NAME PROBE_PORT GATEWAY_PORT CHANNEL_PORT FORWARD_POR
     setsid nohup "$bin/fenders-control-plane" --role edge --state "$state/$name" --host 127.0.0.1 \
     --port "$3" --gateway-port "$4" --run-channel-port "$5" ${edge_name:+--edge-name "$edge_name" --forward-port "$6"} \
     --ca "$state/pki/ca.pem" --cert "$state/pki/$identity.pem" --key "$state/pki/$identity.key" \
-    ${LOCAL_EDGE_ARGS:-} >> "$state/$name.log" 2>&1 < /dev/null &
+    --database-connections "${LOCAL_EDGE_CONNECTIONS:-32}" ${LOCAL_EDGE_ARGS:-} >> "$state/$name.log" 2>&1 < /dev/null &
   echo $! > "$state/$name.pid"
   until curl -s --cacert "$state/pki/ca.pem" -o /dev/null "https://127.0.0.1:$3/healthz"; do
     running "$state/$name.pid" || { tail -5 "$state/$name.log" >&2; exit 1; }
