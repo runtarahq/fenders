@@ -8,6 +8,10 @@ use crate::{
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
+/// What a request is refused with when this process's share of its
+/// workspace's limits has no room for it.
+const SHARE_SHORT: &str = "ingress allowance exhausted";
+
 /// The largest request body and the largest response body passed on.
 pub const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -366,6 +370,7 @@ impl Store {
                 Err(error) => return Err(error),
             },
         };
+        let tenant = whose.as_ref().map(|(tenant, _)| tenant.clone());
         match whose {
             None => {
                 return Err(Error::new(
@@ -403,13 +408,59 @@ impl Store {
         // The request is counted as in flight from the moment it is
         // admitted; one that is not admitted after all is not.
         let reservation = uid();
-        let admitted = self
+        let mut admitted = self
             .ingress_cold(hostname, allow_wait, request, &reservation)
             .await;
+        // This process's share of the workspace's limits had no room for
+        // it. With the lock let go, it waits for one the workspace has room
+        // for, as a warm request does, and is admitted once more.
+        if matches!(&admitted, Err(e) if e.status == StatusCode::TOO_MANY_REQUESTS && e.message == SHARE_SHORT)
+            && let Some(tenant) = tenant.filter(|t| !t.is_empty())
+        {
+            self.gateway.gates.leave(&reservation);
+            if self.share_with_room(&tenant).await {
+                admitted = self
+                    .ingress_cold(hostname, allow_wait, request, &reservation)
+                    .await;
+            }
+        }
         if admitted.is_err() {
             self.gateway.gates.leave(&reservation);
         }
         admitted.map(|route| (route, reservation))
+    }
+
+    /// Takes this process's share of `tenant`'s limits again, until it has
+    /// room for one more request or the workspace has none to give, for
+    /// two seconds at most: another process gives back what it does not
+    /// use at its next flush ([`crate::shares`]). Whether it has room.
+    async fn share_with_room(&self, tenant: &str) -> bool {
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let taken = crate::outage::within(crate::outage::READ_WITHIN, async {
+                let mut tx = self.gateway_transaction().await?;
+                let limits = one(&mut tx,"SELECT http_concurrent_requests concurrent,http_requests_per_minute per_minute FROM tenants WHERE id=$1",args![tenant]).await?;
+                let taken = self
+                    .take_share(&mut tx, tenant, n(&limits["concurrent"]), n(&limits["per_minute"]))
+                    .await?;
+                tx.commit().await?;
+                Ok::<_, Error>(taken)
+            })
+            .await;
+            let Ok((share, room)) = taken else {
+                return false;
+            };
+            self.gateway.shares.set(tenant, (share, room));
+            if share.concurrent > self.gateway.gates.in_flight_of(tenant) as i64
+                && share.per_minute > self.http_rates.count(tenant)
+            {
+                return true;
+            }
+            if room.concurrent < 1 && room.per_minute < 1 || tokio::time::Instant::now() >= until {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
     /// Whose `hostname` is, and its workspace's requests a minute.
     async fn ingress_whose(&self, hostname: &str) -> Result<Option<(String, i64)>> {
@@ -664,7 +715,7 @@ impl Store {
             .gates
             .enter(reservation, entered, share.concurrent)
         {
-            return Err(quota("ingress allowance exhausted"));
+            return Err(quota(SHARE_SHORT));
         }
         // The request's bytes come out of the gateway's lease of the
         // workspace's transfer allowance. A lease with not a block left is
@@ -689,7 +740,7 @@ impl Store {
             None => None,
         };
         if !self.http_rates.admit(s(tenant), share.per_minute) {
-            return Err(quota("ingress allowance exhausted"));
+            return Err(quota(SHARE_SHORT));
         }
         // What was read here, under the lock, is what the gateway now
         // knows of the host name: its next requests come in warm.
