@@ -338,11 +338,26 @@ impl Store {
         // every second, outage or not.
         match &flushed {
             Ok(()) => self.gateway.outage.reached(),
+            // A flush that ran out of time may have waited for the lock
+            // behind other work: the database is gone only if it does not
+            // answer a question that takes none.
+            Err(error) if error.is_database_unavailable() && self.reachable().await => {}
             Err(error) => {
                 self.gateway.outage.failed(error);
             }
         }
         flushed
+    }
+
+    /// Whether the database answers, in [`crate::outage::READ_WITHIN`], a
+    /// question that takes no lock.
+    pub(crate) async fn reachable(&self) -> bool {
+        crate::outage::within(crate::outage::READ_WITHIN, async {
+            sqlx::query("SELECT 1").execute(&self.pool).await?;
+            Ok(())
+        })
+        .await
+        .is_ok()
     }
 
     /// The last flush of a gateway that is stopping: as any other, and
@@ -616,7 +631,7 @@ impl Store {
         if self.gateway.outage.down_for().is_some() {
             return Err(crate::error::Error::database_unavailable());
         }
-        let taken = crate::outage::within(crate::outage::READ_WITHIN, async {
+        let taken = crate::outage::within_locked(crate::outage::READ_WITHIN, async {
             let mut tx = self.gateway_transaction().await?;
             let share = self
                 .take_share(&mut tx, tenant, concurrent, per_minute)
@@ -663,7 +678,7 @@ impl Store {
                 self.gateway.shares.room_of(tenant)?,
             ));
         }
-        let taken = crate::outage::within(crate::outage::READ_WITHIN, async {
+        let taken = crate::outage::within_locked(crate::outage::READ_WITHIN, async {
             let mut tx = self.gateway_transaction().await?;
             let (concurrent, per_minute) = match limits {
                 Some(limits) => limits,
@@ -861,7 +876,7 @@ impl Store {
             return false;
         }
         let want = want.max(need);
-        let granted = crate::outage::within(crate::outage::READ_WITHIN, async {
+        let granted = crate::outage::within_locked(crate::outage::READ_WITHIN, async {
             let mut tx = self.gateway_transaction().await?;
             let granted = self.lease_grant(&mut tx, key, want).await?;
             tx.commit().await?;

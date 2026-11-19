@@ -345,3 +345,27 @@ async fn a_lock_waited_for_too_long_is_busy_not_broken_nor_the_database_gone() {
     holder.rollback().await.unwrap();
     l.finish().await;
 }
+
+/// A flush that waits for the lock behind other work for longer than it
+/// may is not the database being gone: the edge goes on serving as it was,
+/// not from memory as in an outage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flush_kept_waiting_for_the_lock_is_not_an_outage() {
+    let l = Lab::new().await;
+    let edge = Store::from_pool(l.store.pool.clone(), l.root.path())
+        .unwrap()
+        .serving(Serves::Edge);
+    let mut holder = l.store.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(184923781)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    assert!(edge.flush_gateway().await.is_err(), "it could not flush");
+    assert!(
+        edge.gateway.outage.down_for().is_none(),
+        "the database answered: no outage"
+    );
+    holder.rollback().await.unwrap();
+    edge.flush_gateway().await.unwrap();
+    l.finish().await;
+}
