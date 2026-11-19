@@ -474,3 +474,203 @@ async fn the_scheduler_gives_apps_to_live_edges_and_each_serves_its_own() {
         .unwrap();
     l.finish().await;
 }
+
+/// A request of an app another edge owns is passed to that edge over mutual
+/// TLS, and answered as if it had come there: a client's on the gateway,
+/// and a shim's asking for requests on the run channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edge_passes_another_edges_requests_to_it() {
+    use fenders_control_plane::{forward::Forwarder, pki};
+    use std::collections::BTreeMap;
+    let l = Lab::new().await;
+    let certs = tempfile::tempdir().unwrap();
+    let pins = pki::create(
+        certs.path(),
+        &BTreeMap::from([
+            ("owner".into(), vec!["127.0.0.1".into()]),
+            ("passer".into(), vec!["127.0.0.1".into()]),
+        ]),
+    )
+    .unwrap();
+    let file = |name: &str| certs.path().join(name);
+    // The owner's internal port, on a real socket.
+    let port = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = port.local_addr().unwrap();
+    let register = |name: &'static str, endpoint: String| {
+        let (store, operator, pin) = (
+            l.store.clone(),
+            l.operator.clone(),
+            s(&pins[name]).to_owned(),
+        );
+        async move {
+            s(&store
+                .register_edge_keyed(
+                    &operator,
+                    json!({"name":format!("edge-{name}"),"cert_sha256":pin,"endpoint":endpoint}),
+                    None,
+                )
+                .await
+                .unwrap()["id"])
+            .to_owned()
+        }
+    };
+    let owner_id = register("owner", format!("https://127.0.0.1:{}", address.port())).await;
+    let passer_id = register("passer", "https://127.0.0.1:1".into()).await;
+    let edge = |id: &str, name: &str| {
+        Store::from_pool(l.store.pool.clone(), l.root.path())
+            .unwrap()
+            .serving(Serves::Edge)
+            .as_edge(id.to_owned())
+            .with_forwarder(
+                Forwarder::new(
+                    &file("ca.pem"),
+                    &file(&format!("{name}.pem")),
+                    &file(&format!("{name}.key")),
+                )
+                .unwrap(),
+            )
+            .with_run_channel(
+                RunChannel::new("https://edges.test:9093", "fixture ca".into(), None).unwrap(),
+            )
+    };
+    let (owner, passer) = (edge(&owner_id, "owner"), edge(&passer_id, "passer"));
+    let state = |store: &Store| api::ApiState {
+        store: store.clone(),
+        domain: "apps.test".into(),
+        tls: None,
+    };
+    let config = fenders_control_plane::transport::server_config(
+        &file("owner.pem"),
+        &file("owner.key"),
+        Some(&file("ca.pem")),
+    )
+    .unwrap();
+    let serving = tokio::spawn(fenders_control_plane::stream_listener::serve(
+        port,
+        config,
+        fenders_control_plane::forward::router(state(&owner)),
+        std::future::pending(),
+    ));
+    // Only the owner is live: the app is placed on it.
+    owner.flush_gateway().await.unwrap();
+    let node = l.node("forward-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    passer.flush_gateway().await.unwrap();
+    let app = s(&route["app_id"]).to_owned();
+    let e = &all[0];
+    let (id, generation) = (s(&e["id"]).to_owned(), n(&e["generation"]));
+    let bearer = s(&l
+        .store
+        .clone()
+        .with_run_channel(
+            RunChannel::new("https://edges.test:9093", "fixture ca".into(), None).unwrap(),
+        )
+        .assignment(s(&node["id"]), &id, generation)
+        .await
+        .unwrap()["spec"]["channel"]["credential"])
+    .to_owned();
+    // The shim asks the passer for requests: passed to the owner, where it
+    // waits.
+    let asking = {
+        let (router, bearer, path) = (
+            run_channel::router(passer.clone()),
+            bearer.clone(),
+            format!("/run/{id}/{generation}/v1/run/http/next"),
+        );
+        tokio::spawn(async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("Authorization", format!("Bearer {bearer}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            (
+                status,
+                axum::body::to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .unwrap(),
+            )
+        })
+    };
+    for _ in 0..200 {
+        if owner.exchange.ready(&id) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        owner.exchange.ready(&id),
+        "the shim's ask reached the owner"
+    );
+    assert!(!passer.exchange.ready(&id));
+    // A client asks the passer: passed to the owner, which offers it to the
+    // shim that asked.
+    let client = {
+        let gateway = api::gateway(state(&passer));
+        let host = s(&route["hostname"]).to_owned();
+        tokio::spawn(async move {
+            gateway
+                .oneshot(
+                    Request::builder()
+                        .uri("/hello?x=1")
+                        .header("Host", host)
+                        .body(Body::from("asked"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        })
+    };
+    let (status, taken) = asking.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    let (head, rest) = fenders_control_plane::http_exchange::unframe(&taken).unwrap();
+    assert_eq!(head["path"], "/hello?x=1");
+    assert_eq!(&rest[..], b"asked");
+    // The shim answers, through the passer too.
+    let answered = run_channel::router(passer.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/run/{id}/{generation}/v1/run/http/response/{}",
+                    s(&head["id"])
+                ))
+                .header("Authorization", format!("Bearer {bearer}"))
+                .body(Body::from(fenders_control_plane::http_exchange::frame(
+                    &json!({"status":201,"headers":{"content-type":"text/plain"}}),
+                    b"made",
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    let response = client.await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        &axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()[..],
+        b"made"
+    );
+    // Admitted and counted by the owner, not the passer.
+    assert_eq!(owner.gateway.gates.in_flight_of(&l.tenant), 0);
+    assert!(owner.gateway.shares.of(&l.tenant).is_some());
+    assert!(passer.gateway.shares.of(&l.tenant).is_none());
+    let _ = app;
+    serving.abort();
+    l.finish().await;
+}

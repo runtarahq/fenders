@@ -74,6 +74,8 @@ pub struct Store {
     /// Where a control process reaches the edges' gateway, for a sample
     /// request an operator or a key asks of an app.
     pub(crate) edge_gateway: Option<std::sync::Arc<EdgeGateway>>,
+    /// How an edge passes requests of another's apps to it.
+    pub(crate) forwarder: Option<std::sync::Arc<crate::forward::Forwarder>>,
     /// Requests for HTTP apps, between the gateway and the run channel.
     pub exchange: std::sync::Arc<crate::http_exchange::Exchange>,
     /// The WebSocket connections the gateway holds for apps.
@@ -340,6 +342,7 @@ impl Store {
             pickup: Default::default(),
             run_channel: None,
             edge_gateway: None,
+            forwarder: None,
             exchange: Default::default(),
             http_rates: Default::default(),
             ingress_hosts: Default::default(),
@@ -446,6 +449,35 @@ impl Store {
             gateway.outage = crate::outage::Outage::new(bound);
         }
         self
+    }
+    /// Requests of apps other edges own are passed to them with `forwarder`.
+    pub fn with_forwarder(mut self, forwarder: crate::forward::Forwarder) -> Self {
+        self.forwarder = Some(std::sync::Arc::new(forwarder));
+        self
+    }
+    /// The edge that owns the app of `hostname`, when it is not this one:
+    /// what is known of the host name, or, for an app that does not serve,
+    /// what the database says.
+    pub(crate) async fn foreign_owner(&self, hostname: &str) -> Result<Option<String>> {
+        if self.gateway.edge.is_none() {
+            return Ok(None);
+        }
+        let epoch = self.gateway.gates.epoch();
+        let owner = match self.gateway.gates.look(hostname) {
+            crate::gate::Look::Warm(gate) => gate.owner,
+            _ if self.gateway.outage.serving_stale() => self
+                .gateway
+                .gates
+                .stale(hostname)
+                .and_then(|gate| gate.owner),
+            _ => {
+                let _ = epoch;
+                let mut tx = self.transaction(false, false).await?;
+                crate::db::optional(&mut tx,"SELECT x.edge_id FROM app_http h JOIN app_edges x ON x.app_id=h.app_id WHERE h.hostname=$1",crate::args![hostname]).await?
+                    .and_then(|row| row["edge_id"].as_str().map(str::to_owned))
+            }
+        };
+        Ok(owner.filter(|owner| !self.owns(Some(owner))))
     }
     /// This process serves as the registered edge `edge`. Set before the
     /// store is shared.

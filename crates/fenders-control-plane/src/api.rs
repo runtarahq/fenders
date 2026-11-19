@@ -1550,7 +1550,32 @@ async fn http_sample(state: &ApiState, hostname: &str, sample: HttpSample) -> Re
     }
 }
 
-async fn gateway_dispatch(State(state): State<ApiState>, req: Request) -> Result<Response> {
+pub(crate) async fn gateway_dispatch(
+    State(state): State<ApiState>,
+    req: Request,
+) -> Result<Response> {
+    // A request of an app another edge owns is passed to it, once.
+    if req
+        .extensions()
+        .get::<crate::forward::Forwarded>()
+        .is_none()
+        && state.store.gateway.edge.is_some()
+    {
+        let (parts, body) = req.into_parts();
+        let host = gateway_host(&parts, &state.domain)?;
+        let req = Request::from_parts(parts, body);
+        if let Some(owner) = state.store.foreign_owner(&host).await? {
+            return state
+                .store
+                .forward(&owner, crate::forward::Listener::Gateway, req)
+                .await;
+        }
+        return gateway_dispatch_owned(state, req).await;
+    }
+    gateway_dispatch_owned(state, req).await
+}
+
+async fn gateway_dispatch_owned(state: ApiState, req: Request) -> Result<Response> {
     // Paths under `/_fenders/` are the platform's: the gateway asks an app
     // for them itself (a WebSocket's events), a client cannot.
     if req.uri().path().starts_with(crate::websocket::RESERVED) {

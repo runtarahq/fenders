@@ -69,6 +69,10 @@ struct Args {
     /// every app.
     #[arg(long)]
     edge_name: Option<String>,
+    /// Where a named edge takes what other edges pass it, over mutual TLS
+    /// with --cert and --key: the port its registered endpoint names.
+    #[arg(long, default_value_t = 9096)]
+    forward_port: u16,
     /// How long the gateway and the run channel serve what they know while
     /// the database cannot be reached, in seconds.
     #[arg(long, default_value_t = 600)]
@@ -187,7 +191,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         store.check_schema().await?;
         if let Some(name) = &args.edge_name {
             let edge = store.edge_named(name).await?;
-            store = store.as_edge(edge);
+            let tls = tls.as_ref().ok_or("an edge serves over TLS")?;
+            store = store
+                .as_edge(edge)
+                .with_forwarder(crate::forward::Forwarder::new(
+                    &tls.ca, &tls.cert, &tls.key,
+                )?);
         }
         None
     } else {
@@ -307,8 +316,17 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             streaming.push((
                 tokio::net::TcpListener::bind((args.host, args.gateway_port)).await?,
                 gateway,
-                api::gateway(state),
+                api::gateway(state.clone()),
             ));
+            if role == Role::Edge && args.edge_name.is_some() {
+                // Other edges pass this one requests of the apps it owns,
+                // showing the certificates they were registered with.
+                streaming.push((
+                    tokio::net::TcpListener::bind((args.host, args.forward_port)).await?,
+                    transport::server_config(&tls.cert, &tls.key, Some(&tls.ca))?,
+                    crate::forward::router(state.clone()),
+                ));
+            }
             if role == Role::Edge || args.run_channel_endpoint.is_some() {
                 // The management configuration: this certificate, no client one.
                 streaming.push((

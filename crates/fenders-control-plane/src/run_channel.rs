@@ -320,7 +320,7 @@ pub fn router(store: Store) -> Router {
     Router::new().fallback(dispatch).with_state(store)
 }
 
-async fn dispatch(State(store): State<Store>, request: Request) -> Result<Response> {
+pub(crate) async fn dispatch(State(store): State<Store>, request: Request) -> Result<Response> {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().trim_matches('/').to_owned();
     let mut segments = path.splitn(4, '/');
@@ -388,7 +388,22 @@ async fn dispatch(State(store): State<Store>, request: Request) -> Result<Respon
         || rest.starts_with(WS_ONE))
         && !store.owns(launch.owner.as_deref())
     {
-        return Err(crate::ingress::misdirected());
+        // Passed to the edge that owns the app, once.
+        let Some(owner) = launch.owner.clone().filter(|_| {
+            parts
+                .extensions
+                .get::<crate::forward::Forwarded>()
+                .is_none()
+        }) else {
+            return Err(crate::ingress::misdirected());
+        };
+        return store
+            .forward(
+                &owner,
+                crate::forward::Listener::RunChannel,
+                axum::http::Request::from_parts(parts, body),
+            )
+            .await;
     }
     if parts.method == "POST" && rest == HTTP_NEXT {
         let key = launch
