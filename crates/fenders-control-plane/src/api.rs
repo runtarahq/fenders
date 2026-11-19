@@ -291,6 +291,18 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         }
     }
     crate::customer_api::authorize(&p, method, &segments)?;
+    // A workspace that was deleted does not exist, to the operator as to
+    // anyone: its keys open nothing, and nothing under it is a route. Its
+    // own deletion is the one request still answered, with its receipt.
+    if let ["v1", "workspaces", workspace, rest @ ..] = segments.as_slice()
+        && !(method == "DELETE" && rest.is_empty())
+        // Asked only for the operator: a key of one that is gone was
+        // revoked with it, and did not get this far.
+        && p.api_permissions.is_none()
+        && store.workspace_gone(workspace).await?
+    {
+        return Err(Error::missing());
+    }
     // Every route is one a tenant's key may be given, or one of the
     // operator's own. There is no third kind.
     if !exists(method) {
@@ -431,6 +443,10 @@ async fn dispatch_inner(State(state): State<ApiState>, req: Request) -> Result<R
         ("GET", ["v1", "control-plane", "status"]) => store.background_status(&p)?,
         ("GET", ["v1", "workspaces"]) => store.workspaces(&p, list_page(&parts.uri)?).await?,
         ("GET", ["v1", "workspaces", tenant]) => store.workspace(&p, tenant).await?,
+        ("DELETE", ["v1", "workspaces", tenant]) => {
+            no_body(&bytes)?;
+            store.delete_workspace(&p, tenant, key).await?
+        }
         ("GET", ["v1", "workspaces", tenant, "audit"]) => {
             let page =
                 axum::extract::Query::<crate::audit_trail::AuditPage>::try_from_uri(&parts.uri)

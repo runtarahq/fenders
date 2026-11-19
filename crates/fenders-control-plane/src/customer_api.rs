@@ -195,6 +195,7 @@ pub const KEY_ROUTES: &[(&str, &str, &str)] = &[
 pub const OPERATOR_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/workspaces"),
     ("PATCH", "/v1/workspaces/*"),
+    ("DELETE", "/v1/workspaces/*"),
     ("PATCH", "/v1/workspaces/*/http-limits"),
     ("POST", "/v1/workspaces/*/lifecycle"),
     ("GET", "/v1/workspaces/*/api-keys"),

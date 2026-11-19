@@ -3651,3 +3651,173 @@ async fn a_node_that_is_drained_and_runs_nothing_is_deleted() {
     );
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_suspended_workspace_is_deleted_and_is_then_no_workspace() {
+    let l = Lab::new().await;
+    // A workspace with something of everything in it.
+    let allowance = json!({"cpu_percent":100,"memory_mib":512,"storage_bytes":1048576,"instances":1,"transfer_bytes":1048576});
+    let (_, made) = call(
+        &l,
+        &l.token,
+        "POST",
+        "/v1/workspaces",
+        json!({"name":"leaving","allowance":allowance}),
+        "make",
+    )
+    .await;
+    let id = s(&made["id"]).to_owned();
+    let workspace = format!("/v1/workspaces/{id}");
+    let (_, k) = call(
+        &l,
+        &l.token,
+        "POST",
+        &format!("{workspace}/api-keys"),
+        json!({"name":"theirs","permissions":["read","apps:write","secrets:write","connections:write"],"ttl_seconds":3600}),
+        "key",
+    )
+    .await;
+    let token = s(&k["token"]).to_owned();
+    let (_, projects) = call(
+        &l,
+        &token,
+        "GET",
+        &format!("{workspace}/projects"),
+        json!({}),
+        "",
+    )
+    .await;
+    let project = format!("{workspace}/projects/{}", s(&projects["items"][0]["id"]));
+    let (status, _) = call(
+        &l,
+        &token,
+        "POST",
+        &format!("{project}/secrets"),
+        json!({"name":"theirs","value":"their-secret"}),
+        "secret",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = call(
+        &l,
+        &token,
+        "POST",
+        &format!("{project}/connections"),
+        json!({"type":"https","name":"theirs","origin":"https://example.com"}),
+        "connection",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let component = b"\0asm\x0d\0\x01\0 theirs alone".to_vec();
+    let artifact = l
+        .store
+        .upload(&l.operator, &id, s(&projects["items"][0]["id"]), &component)
+        .await
+        .unwrap();
+    let blob = l.root.path().join("blobs").join(s(&artifact["digest"]));
+    assert!(blob.exists());
+
+    // While it may still run things it is not deleted.
+    let active = bare(&l, &l.token, "DELETE", &workspace, "too-soon").await;
+    assert_eq!(active.0, StatusCode::CONFLICT, "{}", active.1);
+    assert_eq!(active.1["code"], "in_use");
+    let suspended = call(
+        &l,
+        &l.token,
+        "POST",
+        &format!("{workspace}/lifecycle"),
+        json!({"action":"suspend","reason":"Leaving","expected_revision":1}),
+        "suspend",
+    )
+    .await;
+    assert_eq!(suspended.1["status"], "suspended", "{}", suspended.1);
+    // Nor by a key, its own or another's.
+    assert_eq!(
+        bare(&l, &token, "DELETE", &workspace, "mine").await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    let gone = bare(&l, &l.token, "DELETE", &workspace, "gone").await;
+    assert_eq!(gone.0, StatusCode::OK, "{}", gone.1);
+    assert_eq!(gone.1, json!({"id":id}));
+    // A retry is told the same; asked anew, there is nothing to delete.
+    assert_eq!(bare(&l, &l.token, "DELETE", &workspace, "gone").await, gone);
+    assert_eq!(
+        bare(&l, &l.token, "DELETE", &workspace, "anew").await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Its key opens nothing.
+    assert_eq!(
+        call(&l, &token, "GET", "/v1/me", json!({}), "").await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    // To the operator it is no workspace: in no list, and nothing under it.
+    let (_, listed) = call(&l, &l.token, "GET", "/v1/workspaces", json!({}), "").await;
+    let ids: Vec<&str> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| s(&w["id"]))
+        .collect();
+    assert_eq!(ids, [l.tenant.as_str()]);
+    for (method, path, body) in [
+        ("GET", workspace.clone(), json!({})),
+        ("GET", format!("{workspace}/projects"), json!({})),
+        ("GET", format!("{workspace}/usage"), json!({})),
+        ("GET", format!("{workspace}/audit"), json!({})),
+        ("GET", format!("{workspace}/api-keys"), json!({})),
+        ("GET", format!("{project}/apps"), json!({})),
+        (
+            "PATCH",
+            workspace.clone(),
+            json!({"default_app_size":"large"}),
+        ),
+        (
+            "POST",
+            format!("{workspace}/api-keys"),
+            json!({"name":"back","permissions":["read"],"ttl_seconds":60}),
+        ),
+        (
+            "POST",
+            format!("{workspace}/lifecycle"),
+            json!({"action":"resume","reason":"Back","expected_revision":3}),
+        ),
+    ] {
+        let status = call(&l, &l.token, method, &path, body, &uid()).await.0;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+    // What made it usable is gone: the secret, the keys, the storage, and
+    // the component's bytes once the control plane clears them.
+    let (secrets, live_keys, stored): (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM secrets WHERE tenant_id=$1),(SELECT count(*) FROM credentials WHERE tenant_id=$1 AND NOT revoked),(SELECT COALESCE(sum(bytes),0)::bigint FROM storage_reservations WHERE tenant_id=$1)")
+        .bind(&id)
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!((secrets, live_keys, stored), (0, 0, 0));
+    l.store.schedule().await.unwrap();
+    assert!(!blob.exists());
+    // What it did is kept, in the database: its trail, to its last record.
+    let trail: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM audit WHERE tenant_id=$1 ORDER BY sequence")
+            .bind(&id)
+            .fetch_all(&l.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(trail.first().map(String::as_str), Some("tenant.create"));
+    assert_eq!(trail.last().map(String::as_str), Some("tenant.delete"));
+    assert!(trail.iter().any(|action| action == "secret.create"));
+    // The other workspace is as it was.
+    let (status, mine) = call(
+        &l,
+        &l.token,
+        "GET",
+        &format!("/v1/workspaces/{}", l.tenant),
+        json!({}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(mine["lifecycle_state"], "active");
+    l.finish().await;
+}

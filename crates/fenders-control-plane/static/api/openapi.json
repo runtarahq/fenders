@@ -3296,6 +3296,53 @@
             "operator": []
           }
         ]
+      },
+      "delete": {
+        "operationId": "delete__workspaces_workspace",
+        "summary": "Delete a workspace",
+        "description": "Only one that is suspended and runs nothing: otherwise 409 in_use. Its keys open nothing, its secrets are destroyed, its components' storage is released and their bytes removed, and its apps and connections are deleted. The record of what it used and did is kept in the control plane's database, and is not read through the API again: every route under it is 404, and it is in no list. It cannot be undone. Operator only.",
+        "tags": [
+          "operator"
+        ],
+        "security": [
+          {
+            "operator": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Workspace"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deleted"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "default": {
+            "$ref": "#/components/responses/Refused"
+          }
+        }
       }
     },
     "/workspaces/{workspace}/http-limits": {

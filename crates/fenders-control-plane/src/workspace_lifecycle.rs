@@ -48,7 +48,128 @@ impl WorkspaceAction {
         self
     }
 }
+/// A workspace that is gone is kept as a row, for what was used and done in
+/// it; when it went is how it is told from one that is there.
+pub(crate) const DELETION_MIGRATION: &str =
+    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS deleted_at timestamptz";
+
 impl Store {
+    /// Whether a workspace was deleted. One that never was is not gone:
+    /// whatever looks for it says so itself.
+    pub async fn workspace_gone(&self, tenant: &str) -> Result<bool> {
+        if identity(tenant).is_err() {
+            return Ok(false);
+        }
+        let mut tx = self.transaction(false, false).await?;
+        Ok(
+            sqlx::query_scalar::<_, bool>("SELECT deleted_at IS NOT NULL FROM tenants WHERE id=$1")
+                .bind(tenant)
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(false),
+        )
+    }
+    /// Removes a workspace that has been suspended and runs nothing.
+    ///
+    /// What made it usable goes: its keys open nothing, its secrets are
+    /// destroyed, its components' storage is released and their bytes
+    /// removed, its apps and connections are deleted. What records what it
+    /// was and did stays in the database: the row itself, its projects, its
+    /// usage, its operations and its audit trail. None of that is read
+    /// through the API again: to the API the workspace does not exist.
+    pub async fn delete_workspace(
+        &self,
+        p: &crate::model::Principal,
+        tenant: &str,
+        key: &str,
+    ) -> Result<Value> {
+        p.operator()?;
+        identity(tenant)?;
+        let request = json!({"kind":"workspace.delete","workspace":tenant});
+        let mut tx = self.transaction(true, false).await?;
+        if let Some(row) =
+            crate::customer_api::operator_receipt(&mut tx, &p.id, key, &request).await?
+        {
+            return Ok(row);
+        }
+        let found = one(
+            &mut tx,
+            "SELECT lifecycle_state,EXISTS(SELECT 1 FROM executions e WHERE e.tenant_id=t.id AND e.reserved) AS running FROM tenants t WHERE t.id=$1 AND t.deleted_at IS NULL FOR UPDATE OF t",
+            args![tenant],
+        )
+        .await?;
+        if found["lifecycle_state"] != "suspended" || b(&found["running"]) {
+            return Err(conflict(
+                "suspend the workspace, and wait until it is suspended, before deleting it",
+            )
+            .coded("in_use"));
+        }
+        // Nothing of it starts again: its apps are deleted as an app is,
+        // and with them their triggers and schedules.
+        for app in rows(
+            &mut tx,
+            "SELECT id FROM apps WHERE tenant_id=$1 AND NOT deleted",
+            args![tenant],
+        )
+        .await?
+        {
+            Self::cancel_schedule_dispatch(&mut tx, s(&app["id"]), "workspace-deleted").await?;
+            Self::reset_schedule_clock(&mut tx, s(&app["id"]), false).await?;
+        }
+        exec(&mut tx,"UPDATE apps SET deleted=true,desired='stopped',revision=revision+1,updated=now() WHERE tenant_id=$1 AND NOT deleted",args![tenant]).await?;
+        exec(&mut tx,"UPDATE app_triggers SET manual=false,http=false,revision=revision+1 WHERE tenant_id=$1",args![tenant]).await?;
+        exec(&mut tx,"UPDATE operations SET state='failed',error='workspace-deleted',updated=now() WHERE tenant_id=$1 AND state='pending'",args![tenant]).await?;
+        // Its keys open nothing.
+        exec(
+            &mut tx,
+            "UPDATE credentials SET revoked=true WHERE tenant_id=$1 AND NOT revoked",
+            args![tenant],
+        )
+        .await?;
+        // Its secrets are destroyed, and what named them names nothing.
+        exec(&mut tx,"UPDATE external_endpoints SET deleted=true,username_secret_id=NULL,password_secret_id=NULL WHERE tenant_id=$1",args![tenant]).await?;
+        exec(
+            &mut tx,
+            "UPDATE external_https_endpoints SET deleted=true WHERE tenant_id=$1",
+            args![tenant],
+        )
+        .await?;
+        exec(
+            &mut tx,
+            "DELETE FROM secrets WHERE tenant_id=$1",
+            args![tenant],
+        )
+        .await?;
+        // Its components are retired as retention retires one: the storage
+        // is released, and the bytes go when no other workspace has them.
+        exec(&mut tx,"INSERT INTO artifact_blob_garbage(digest) SELECT DISTINCT digest FROM artifacts WHERE tenant_id=$1 AND retired_at IS NULL ON CONFLICT(digest) DO NOTHING",args![tenant]).await?;
+        exec(&mut tx,"UPDATE artifact_validations v SET state='pending',inspection=NULL,error=NULL,node_id=NULL,node_boot=NULL,lease_until=NULL,generation=generation+1,updated=now() FROM artifacts a WHERE v.artifact_id=a.id AND a.tenant_id=$1 AND a.retired_at IS NULL",args![tenant]).await?;
+        exec(
+            &mut tx,
+            "UPDATE artifacts SET retired_at=now() WHERE tenant_id=$1 AND retired_at IS NULL",
+            args![tenant],
+        )
+        .await?;
+        exec(
+            &mut tx,
+            "UPDATE tenants SET deleted_at=now() WHERE id=$1",
+            args![tenant],
+        )
+        .await?;
+        let row = json!({"id":tenant});
+        exec(&mut tx,"INSERT INTO audit(tenant_id,actor,action,resource_id,detail) VALUES($1,$2,'tenant.delete',$1,'{}'::jsonb)",args![tenant,p.id]).await?;
+        crate::customer_api::save_operator_receipt(
+            &mut tx,
+            &p.id,
+            key,
+            Some(tenant),
+            &request,
+            &row,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
     pub(crate) async fn workspace_active(tx: &mut Tx, tenant: &str) -> Result<bool> {
         let state: Option<String> =
             sqlx::query_scalar("SELECT lifecycle_state FROM tenants WHERE id=$1")

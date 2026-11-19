@@ -470,7 +470,7 @@ impl Store {
         p.scope(tenant, p.project_id.as_deref(), false, false)?;
         let mut tx = self.transaction(false, false).await?;
         Self::live_principal(&mut tx, p).await?;
-        sqlx::query_scalar::<_, Value>(&format!("SELECT CASE WHEN $1 THEN {WORKSPACE} ELSE {WORKSPACE}-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE t.id=$2"))
+        sqlx::query_scalar::<_, Value>(&format!("SELECT CASE WHEN $1 THEN {WORKSPACE} ELSE {WORKSPACE}-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE t.id=$2 AND t.deleted_at IS NULL"))
             .bind(p.role == Role::Operator)
             .bind(tenant)
             .fetch_optional(&mut *tx)
@@ -487,7 +487,7 @@ impl Store {
             // A workspace's own credentials see its plan and its state, not
             // what the operator wrote of it for itself: the reason it gave
             // for a suspension, and the revisions of its own edits.
-            &format!("SELECT CASE WHEN $1 THEN {WORKSPACE} ELSE {WORKSPACE}-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE ($1 OR t.id=$2) AND ($3::text IS NULL OR (t.created,t.id)<(SELECT c.created,c.id FROM tenants c WHERE c.id=$3)) ORDER BY t.created DESC,t.id DESC LIMIT $4"),
+            &format!("SELECT CASE WHEN $1 THEN {WORKSPACE} ELSE {WORKSPACE}-ARRAY['lifecycle_reason','lifecycle_revision','allowance_revision'] END FROM tenants t WHERE ($1 OR t.id=$2) AND t.deleted_at IS NULL AND ($3::text IS NULL OR (t.created,t.id)<(SELECT c.created,c.id FROM tenants c WHERE c.id=$3)) ORDER BY t.created DESC,t.id DESC LIMIT $4"),
         )
         .bind(p.role == Role::Operator)
         .bind(&p.tenant_id)

@@ -985,6 +985,10 @@ async fn every_operation_answers_as_the_contract_says() {
     )
     .await;
 
+    // The other workspace was suspended at the start, and may go.
+    let other = other.replace("/v1/tenants/", "/v1/workspaces/");
+    t.ok(&operator, "DELETE", &other, None).await;
+
     // Whether it is up and can serve, asked with no credential.
     for probe in ["/healthz", "/readyz"] {
         let response = api::router(l.store.clone())
