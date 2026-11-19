@@ -107,6 +107,10 @@ fn diagnostic(reason: Option<&str>, state: &str) -> Option<Value> {
             "The worker could not admit this execution because storage was constrained.",
             "This request did not start the component. After capacity is restored, explicitly run the command again or activate the intended HTTP version. Fenders will not replay this command automatically.",
         ),
+        "wake-timed-out" => (
+            "A request woke this app and it did not serve within the wake deadline.",
+            "It is stopping and goes back to idle; its next request wakes it again. A workspace or worker without room is the usual cause.",
+        ),
         "evicted" => (
             "Stopped while idle, to make room for other work of this workspace.",
             "An app that handled no request for a few seconds gives way when the workspace's allowance or a worker has no room for something else of the workspace. It wakes again on its next request.",

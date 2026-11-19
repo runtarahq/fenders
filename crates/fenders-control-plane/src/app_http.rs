@@ -199,6 +199,31 @@ impl Store {
         Ok(())
     }
 
+    /// A wake that did not have the app serving in time, of a release
+    /// that has served: the app goes back to idle, what was started for it
+    /// stopped as an idle app's is, and the next request wakes it again.
+    /// A release's first start that does not serve in time fails it, and
+    /// blocks the app until another is released; a wake that does not is
+    /// most often a full workspace or node, which passes.
+    async fn give_up_wake(&self, tx: &mut Tx, binding: &Value, seen: &Observed) -> Result<()> {
+        let app = s(&binding["app_id"]);
+        exec(tx,"UPDATE app_http SET state='stopping',reason='wake-timed-out',idle_draining=true,drain_until=NULL,ready_until=NULL,updated=now() WHERE app_id=$1",args![app]).await?;
+        if !binding["deployment_id"].is_null() {
+            exec(
+                tx,
+                "UPDATE deployments SET desired='stopped' WHERE id=$1",
+                args![binding["deployment_id"]],
+            )
+            .await?;
+        }
+        let mut drain = binding.clone();
+        drain["drain_until"] = Value::Null;
+        if self.drain_http(tx, &drain, seen).await? {
+            exec(tx,"UPDATE app_http SET state='idle',reason=NULL,execution_id=NULL,idle_draining=false,drain_until=NULL,ready_until=NULL,updated=now() WHERE app_id=$1",args![app]).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn drain_http(
         &self,
         tx: &mut Tx,
@@ -327,10 +352,8 @@ impl Store {
                 continue;
             }
             if let Some(e)=optional(tx,"SELECT e.*,n.last_seen>now()-interval '15 seconds' AND NOT n.disabled AND n.observed_confinement=$2 AS healthy FROM executions e LEFT JOIN nodes n ON n.id=e.node_id WHERE e.id=$1",args![binding["execution_id"],HOST_CONFINEMENT]).await? {
-                if app["configuration"]["keep_warm"]==false && release["state"]=="ready" && binding["expired"]==true {
-                    Self::http_failure(tx,&app,"http-readiness-timeout").await?;
-                    exec(tx,"UPDATE executions SET desired='stopped',generation=generation+1,updated=now() WHERE id=$1 AND reserved AND desired<>'stopped'",args![e["id"]]).await?;
-                    if e["node_id"].is_null() {exec(tx,"UPDATE executions SET state='stopped',reserved=false,finished_at=now() WHERE id=$1",args![e["id"]]).await?;}
+                if release["state"]=="ready" && binding["expired"]==true && !(e["state"]=="running" && e["desired"]=="running" && seen.ready(s(&e["id"]))) {
+                    self.give_up_wake(tx,&binding,&seen).await?;
                     continue;
                 }
                 // A node says a run is running when its VM starts. An app
@@ -373,7 +396,9 @@ impl Store {
                     }
                     continue;
                 }
-                if binding["expired"]==true {
+                if binding["expired"]==true && release["state"]=="ready" {
+                    self.give_up_wake(tx,&binding,&seen).await?;
+                } else if binding["expired"]==true {
                     Self::http_failure(tx,&app,"http-readiness-timeout").await?;
                     exec(tx,"UPDATE executions SET desired='stopped',generation=generation+1,updated=now() WHERE id=$1 AND reserved AND desired<>'stopped'",args![e["id"]]).await?;
                     if e["node_id"].is_null() {exec(tx,"UPDATE executions SET state='stopped',reserved=false,finished_at=now() WHERE id=$1",args![e["id"]]).await?;}
@@ -383,6 +408,7 @@ impl Store {
                 }
                 continue;
             }
+            if binding["expired"]==true && release["state"]=="ready" {self.give_up_wake(tx,&binding,&seen).await?;continue;}
             if binding["expired"]==true {Self::http_failure(tx,&app,"http-readiness-timeout").await?;continue;}
             if release["inspection"]["http"]!=true {Self::http_failure(tx,&app,"incompatible-http-entry-point").await?;continue;}
             let spec=crate::app_runtime::http_spec(release["spec"].clone(),&release["configuration"])?;

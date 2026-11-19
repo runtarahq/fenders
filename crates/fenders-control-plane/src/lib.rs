@@ -60,6 +60,7 @@ pub mod supervision;
 pub use fenders_node_protocol::transport;
 pub mod usage;
 mod usage_compaction;
+pub mod wakes;
 pub mod websocket;
 pub mod workloads;
 mod workspace_lifecycle;

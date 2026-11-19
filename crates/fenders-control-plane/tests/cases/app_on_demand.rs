@@ -23,11 +23,12 @@ async fn expired_assigned_wake_retains_quota_until_fenced_and_keep_warm_is_expli
     assert_eq!(stopping["desired"], "stopped");
     assert_eq!(stopping["reserved"], true);
     l.report(&node, &starting, "running", 1).await;
-    assert_eq!(l.http(&app).await["state"], "unavailable");
-    assert_eq!(
-        l.store.ingress_poll(&q).await.unwrap_err().status,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
+    // The wake gave up: the app is not blocked, it goes back to idle once
+    // what was started for it has stopped. The request waits on until its
+    // own deadline, for a wake that may yet serve it.
+    assert_eq!(l.http(&app).await["state"], "stopping");
+    assert_eq!(l.http(&app).await["reason"], "wake-timed-out");
+    assert!(l.store.ingress_poll(&q).await.unwrap().is_none());
     l.store.ingress_finish(&q, Some(0)).await.unwrap();
     l.report(&node, &stopping, "stopped", 2).await;
     assert_eq!(l.execution(s(&starting["id"])).await["reserved"], false);
@@ -429,7 +430,15 @@ async fn on_demand_queue_recovery_and_capacity_failures_preserve_boundaries() {
         .await
         .unwrap();
     l.store.schedule().await.unwrap();
-    assert_eq!(l.http(&app).await["reason"], "http-readiness-timeout");
+    // The wake gave up and the app is idle, not blocked; the request is
+    // refused once its own deadline passes.
+    assert_eq!(l.http(&app).await["state"], "idle");
+    assert!(l.http(&app).await["reason"].is_null());
+    sqlx::query("UPDATE ingress_reservations SET expires=now()-interval '1 second' WHERE id=$1")
+        .bind(&q)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
     assert_eq!(
         l.store.ingress_poll(&q).await.unwrap_err().status,
         StatusCode::SERVICE_UNAVAILABLE
@@ -454,5 +463,58 @@ async fn on_demand_queue_recovery_and_capacity_failures_preserve_boundaries() {
             .status,
         StatusCode::SERVICE_UNAVAILABLE
     );
+    l.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_to_an_idle_app_wake_it_once_and_wait_without_the_lock() {
+    let l = Lab::new().await;
+    let node = l.node("worker").await;
+    let app = l.demand_app(&node).await;
+    l.idle_http(&app, &node).await;
+    let host = format!("app-{app}.apps.test");
+    l.store
+        .update_http_limits(
+            &l.operator,
+            &l.tenant,
+            json!({"concurrent_requests":100,"requests_per_minute":1000}),
+        )
+        .await
+        .unwrap();
+    let locked = || {
+        l.store.load.snapshot()["database"]["locked_transactions"]
+            .as_u64()
+            .unwrap()
+    };
+    let before = locked();
+    let waiting: Vec<_> = (0..20)
+        .map(|_| {
+            let (store, host) = (l.store.clone(), host.clone());
+            tokio::spawn(async move { store.ingress_wait_request(&host, 0, None).await })
+        })
+        .collect();
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    // One of them woke the app; the others follow it, with no reservation
+    // of their own; and none asks again under the lock while it waits.
+    let reservations: i64 = sqlx::query_scalar("SELECT count(*) FROM ingress_reservations")
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(reservations, 1);
+    assert!(
+        locked() - before <= 2,
+        "{} locked transactions while waiting",
+        locked() - before
+    );
+    l.store.schedule().await.unwrap();
+    let e = l.execution(s(&l.http(&app).await["execution_id"])).await;
+    l.report(&node, &e, "running", 1).await;
+    l.store.schedule().await.unwrap();
+    assert_eq!(l.http(&app).await["state"], "serving");
+    for waited in waiting {
+        let (route, lease) = waited.await.unwrap().unwrap();
+        assert_eq!(route["execution_id"], e["id"]);
+        l.store.ingress_finish(&lease, Some(0)).await.unwrap();
+    }
     l.finish().await;
 }

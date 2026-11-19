@@ -808,6 +808,12 @@ impl Store {
         Ok(route)
     }
     pub async fn ingress_poll(&self, reservation: &str) -> Result<Option<Value>> {
+        // Asked without the lock first: until something serves the app
+        // there is nothing to bind the request to, and a thousand waiting
+        // requests asking under the lock would hold back everything else.
+        if !self.wake_settled(reservation).await? {
+            return Ok(None);
+        }
         let mut tx = self.gateway_transaction().await?;
         let q=optional(&mut tx,"SELECT q.*,h.hostname,h.blocked,a.desired,t.http,a.target_release_id,a.revision FROM ingress_reservations q JOIN apps a ON a.id=q.app_id JOIN app_http h ON h.app_id=a.id JOIN app_triggers t ON t.app_id=a.id WHERE q.id=$1 AND q.expires>now()",args![reservation]).await?.ok_or_else(||Error::new(StatusCode::SERVICE_UNAVAILABLE,"HTTP wake request expired"))?;
         Self::require_workspace_active(&mut tx, s(&q["tenant_id"])).await?;
@@ -841,20 +847,63 @@ impl Store {
         }
         Ok(route)
     }
+    /// Whether a waiting request's app serves, or its wake ended or
+    /// changed: what [`Self::ingress_poll`] then decides under the lock.
+    /// Read without it.
+    async fn wake_settled(&self, reservation: &str) -> Result<bool> {
+        let mut tx = self.transaction(false, false).await?;
+        let Some(q) = optional(&mut tx,"SELECT h.hostname,(h.blocked OR q.execution_id IS NOT NULL OR a.desired<>'enabled' OR NOT t.http OR a.target_release_id IS DISTINCT FROM q.release_id OR a.revision<>q.app_revision) AS changed FROM ingress_reservations q JOIN apps a ON a.id=q.app_id JOIN app_http h ON h.app_id=a.id JOIN app_triggers t ON t.app_id=a.id WHERE q.id=$1 AND q.expires>now()",args![reservation]).await? else {
+            return Ok(true);
+        };
+        if q["changed"] == true {
+            return Ok(true);
+        }
+        Ok(Self::ingress_route(&mut tx, s(&q["hostname"]))
+            .await?
+            .is_some())
+    }
+
     pub async fn ingress_wait_request(
         &self,
         hostname: &str,
         request_bytes: usize,
         request: Option<(&str, &str)>,
     ) -> Result<(Value, String)> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        // A request to an app that serves goes in at once. One to an app
+        // being woken by another request of this process waits for that
+        // one, without the lock, and goes in after it ([`crate::wakes`]).
+        let _leading = loop {
+            if matches!(
+                self.gateway.gates.look(hostname),
+                crate::gate::Look::Warm(_)
+            ) {
+                break None;
+            }
+            match self.gateway.wakes.join(hostname) {
+                crate::wakes::Wake::Lead(leading) => break Some(leading),
+                crate::wakes::Wake::Follow(done) => {
+                    if tokio::time::timeout_at(deadline, crate::wakes::followed(done))
+                        .await
+                        .is_err()
+                    {
+                        return Err(Error::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "HTTP wake deadline exceeded",
+                        ));
+                    }
+                }
+            }
+        };
         let (route, lease) = self
             .ingress_begin_request(hostname, request_bytes, true, request)
             .await?;
         if let Some(route) = route {
             return Ok((route, lease));
         }
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
+            // Looked at again when what serves changes, or a moment later.
+            let moved = self.gateway.gates.moved();
             let polled = tokio::time::timeout_at(deadline, self.ingress_poll(&lease))
                 .await
                 .unwrap_or_else(|_| {
@@ -866,7 +915,8 @@ impl Store {
             match polled {
                 Ok(Some(route)) => return Ok((route, lease)),
                 Ok(None) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_millis(250), moved).await;
                 }
                 result => {
                     self.ingress_finish(&lease, Some(0)).await?;

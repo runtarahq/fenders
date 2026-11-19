@@ -165,6 +165,8 @@ pub struct Gateway {
     /// The registered edge this process serves as, if any: it then owns
     /// only the apps the scheduler gives it ([`crate::edges`]).
     pub edge: Option<String>,
+    /// Requests waiting together for an app to start ([`crate::wakes`]).
+    pub wakes: std::sync::Arc<crate::wakes::Wakes>,
 }
 
 impl Default for Gateway {
@@ -179,6 +181,7 @@ impl Default for Gateway {
             outage: Default::default(),
             shares: Default::default(),
             edge: None,
+            wakes: Default::default(),
             extending: Default::default(),
         }
     }
