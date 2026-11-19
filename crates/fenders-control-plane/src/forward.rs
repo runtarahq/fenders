@@ -176,17 +176,23 @@ impl Forwarder {
         Ok(tls)
     }
 
-    /// The HTTP/2 connection to `edge`, made now if there is none.
+    /// The HTTP/2 connection to `edge` for what comes to `listener`, made
+    /// now if there is none. Clients' requests and shims' asks go on
+    /// connections of their own: a shim's ask waits long for a request, and
+    /// a burst of clients' requests waiting for their apps to start do not
+    /// hold up the asks that would start serving them.
     async fn sender(
         &self,
         edge: &str,
+        listener: Listener,
         peer: &Peer,
     ) -> Result<hyper::client::conn::http2::SendRequest<Body>> {
+        let key = format!("{edge}/{}", listener.name());
         if let Some(sender) = self
             .connections
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(edge)
+            .get(&key)
             .filter(|sender| !sender.is_closed())
             .cloned()
         {
@@ -203,7 +209,7 @@ impl Forwarder {
         self.connections
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(edge.to_owned(), sender.clone());
+            .insert(key, sender.clone());
         Ok(sender)
     }
 }
@@ -325,7 +331,7 @@ impl crate::store::Store {
         let mut tries = 0;
         let answer = loop {
             tries += 1;
-            let mut sender = forwarder.sender(edge, &peer).await?;
+            let mut sender = forwarder.sender(edge, listener, &peer).await?;
             match sender.try_send_request(request).await {
                 Ok(answer) => break answer,
                 Err(mut failed) => {
@@ -333,7 +339,7 @@ impl crate::store::Store {
                         .connections
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .remove(edge);
+                        .remove(&format!("{edge}/{}", listener.name()));
                     match failed.take_message() {
                         Some(unsent) if tries < 3 => request = unsent,
                         _ => {

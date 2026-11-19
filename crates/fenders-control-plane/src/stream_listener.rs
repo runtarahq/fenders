@@ -110,9 +110,14 @@ async fn serve_closing_idle(
                 .timer(TokioTimer::new())
                 .header_read_timeout(Duration::from_secs(10));
             // A peer that is gone is noticed, whatever it had in flight.
+            // As many streams at once as the gateway takes requests: an
+            // edge passes another's requests and its shims' asks over one
+            // connection to it, hundreds of them waiting together during a
+            // burst of wakes; the default 200 queued the rest behind them.
             builder
                 .http2()
                 .timer(TokioTimer::new())
+                .max_concurrent_streams(crate::api::GATEWAY_REQUESTS as u32)
                 .keep_alive_interval(Duration::from_secs(20))
                 .keep_alive_timeout(Duration::from_secs(20));
             // With upgrades: the gateway accepts WebSocket connections.
