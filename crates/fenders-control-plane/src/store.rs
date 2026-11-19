@@ -514,10 +514,39 @@ impl Store {
                 .stale(hostname)
                 .and_then(|gate| gate.owner),
             _ => {
-                let _ = epoch;
-                let mut tx = self.transaction(false, false).await?;
-                crate::db::optional(&mut tx,"SELECT x.edge_id FROM app_http h JOIN app_edges x ON x.app_id=h.app_id WHERE h.hostname=$1",crate::args![hostname]).await?
-                    .and_then(|row| row["edge_id"].as_str().map(str::to_owned))
+                // What was read is believed as a gate is: for as long as it
+                // is fresh, and the gates' epoch has not moved, as a change
+                // of owner moves it (`app_edges`' trigger).
+                let known = self
+                    .gateway
+                    .owners
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(hostname)
+                    .filter(|(_, read, at)| *at == epoch && read.elapsed() < crate::gate::FRESH)
+                    .map(|(owner, _, _)| owner.clone());
+                match known {
+                    Some(owner) => owner,
+                    None => {
+                        let mut tx = self.transaction(false, false).await?;
+                        let owner = crate::db::optional(&mut tx,"SELECT x.edge_id FROM app_http h JOIN app_edges x ON x.app_id=h.app_id WHERE h.hostname=$1",crate::args![hostname]).await?
+                            .and_then(|row| row["edge_id"].as_str().map(str::to_owned));
+                        let mut owners = self
+                            .gateway
+                            .owners
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        // Bounded: a flood of made-up names forgets the rest.
+                        if owners.len() >= 65536 {
+                            owners.clear();
+                        }
+                        owners.insert(
+                            hostname.to_owned(),
+                            (owner.clone(), std::time::Instant::now(), epoch),
+                        );
+                        owner
+                    }
+                }
             }
         };
         Ok(owner.filter(|owner| !self.owns(Some(owner))))

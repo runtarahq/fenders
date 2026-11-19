@@ -144,6 +144,10 @@ struct Written {
     granted: Vec<(crate::lease::Key, i64, i64)>,
 }
 
+/// An app's owner as read for a host name: the edge, when it was read,
+/// and the gates' epoch then.
+pub(crate) type Owned = (Option<String>, std::time::Instant, u64);
+
 pub struct Gateway {
     session: String,
     inner: Mutex<Inner>,
@@ -172,6 +176,13 @@ pub struct Gateway {
     /// Whether the database last answered a question of its own, and
     /// when ([`Store::database_answers`]).
     probed: tokio::sync::Mutex<Option<(std::time::Instant, bool)>>,
+    /// Which edge owns a host name's app, as read, when, and in which of
+    /// the gates' epochs: an edge passing another's requests on reads it
+    /// once, not for each ([`Store::foreign_owner`]).
+    pub(crate) owners: Mutex<std::collections::HashMap<String, Owned>>,
+    /// Whether an edge's certificate is a registered edge's, as read, and
+    /// when ([`Store::edge_peer`]).
+    pub(crate) peers: Mutex<std::collections::HashMap<String, (bool, std::time::Instant)>>,
 }
 
 impl Default for Gateway {
@@ -189,6 +200,8 @@ impl Default for Gateway {
             wakes: Default::default(),
             flush_within: crate::outage::FLUSH_WITHIN,
             probed: Default::default(),
+            owners: Default::default(),
+            peers: Default::default(),
             extending: Default::default(),
         }
     }

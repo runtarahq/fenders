@@ -407,17 +407,42 @@ impl crate::store::Store {
     /// Whether a forwarding peer, by the pin of the certificate it showed,
     /// is a registered edge.
     pub(crate) async fn edge_peer(&self, pin: &str) -> Result<()> {
-        let mut tx = self.transaction(false, false).await?;
-        crate::db::optional(
-            &mut tx,
-            "SELECT id FROM edges WHERE cert_sha256=$1 AND NOT deleted",
-            crate::args![pin],
-        )
-        .await?
-        .map(|_| ())
-        .ok_or_else(Error::unauthorized)
+        // Read once every few seconds, not for each request passed on: an
+        // edge deleted is refused within them.
+        let known = self
+            .gateway
+            .peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(pin)
+            .filter(|(_, read)| read.elapsed() < PEER_REGISTERED)
+            .map(|(registered, _)| *registered);
+        let registered = match known {
+            Some(registered) => registered,
+            None => {
+                let mut tx = self.transaction(false, false).await?;
+                let registered = crate::db::optional(
+                    &mut tx,
+                    "SELECT id FROM edges WHERE cert_sha256=$1 AND NOT deleted",
+                    crate::args![pin],
+                )
+                .await?
+                .is_some();
+                let mut peers = self.gateway.peers.lock().unwrap_or_else(|e| e.into_inner());
+                if peers.len() >= 4096 {
+                    peers.clear();
+                }
+                peers.insert(pin.to_owned(), (registered, std::time::Instant::now()));
+                registered
+            }
+        };
+        registered.then_some(()).ok_or_else(Error::unauthorized)
     }
 }
+
+/// How long what was read of an edge's certificate is believed, as the
+/// passing edge receives it.
+const PEER_REGISTERED: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// An edge's internal port: what another edge passes on, from a registered
 /// edge only, served as the listener it came to would serve it.
