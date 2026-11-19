@@ -20,6 +20,71 @@ use tokio::sync::watch;
 pub struct Wakes {
     waking: Mutex<HashMap<String, (u64, watch::Receiver<()>)>>,
     next: std::sync::atomic::AtomicU64,
+    /// The reservations of requests waking apps, asked about together:
+    /// one query a round for all of them, not one each ([`Rounds`]).
+    pub rounds: Rounds,
+}
+
+/// Whether waiting requests' apps serve, asked in rounds: whichever
+/// waiting request finds none running and the last one old enough runs
+/// the next, for every reservation waiting; the others read its answer.
+/// However many requests wait, the database is asked a few times a second.
+#[derive(Default)]
+pub struct Rounds {
+    waiting: Mutex<std::collections::HashSet<String>>,
+    settled: Mutex<(
+        Option<std::time::Instant>,
+        std::collections::HashSet<String>,
+    )>,
+    running: tokio::sync::Mutex<()>,
+}
+
+/// How often a round is run at most.
+pub const ROUND: std::time::Duration = std::time::Duration::from_millis(100);
+
+impl Rounds {
+    fn waiting(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<String>> {
+        self.waiting.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn settled_lock(
+        &self,
+    ) -> std::sync::MutexGuard<
+        '_,
+        (
+            Option<std::time::Instant>,
+            std::collections::HashSet<String>,
+        ),
+    > {
+        self.settled.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// `reservation` waits, until [`Self::done`].
+    pub fn wait(&self, reservation: &str) {
+        self.waiting().insert(reservation.to_owned());
+    }
+    pub fn done(&self, reservation: &str) {
+        self.waiting().remove(reservation);
+        self.settled_lock().1.remove(reservation);
+    }
+    /// Whether the last round found `reservation`'s app serving, or its
+    /// wake ended or changed.
+    pub fn settled(&self, reservation: &str) -> bool {
+        self.settled_lock().1.contains(reservation)
+    }
+    /// The reservations to ask about, when this caller is to run the next
+    /// round: none is running and the last is at least [`ROUND`] old. The
+    /// guard is held while it runs.
+    pub fn take_turn(&self) -> Option<(tokio::sync::MutexGuard<'_, ()>, Vec<String>)> {
+        let guard = self.running.try_lock().ok()?;
+        if self.settled_lock().0.is_some_and(|at| at.elapsed() < ROUND) {
+            return None;
+        }
+        Some((guard, self.waiting().iter().cloned().collect()))
+    }
+    /// What a round found settled.
+    pub fn answer(&self, settled: std::collections::HashSet<String>) {
+        let mut last = self.settled_lock();
+        *last = (Some(std::time::Instant::now()), settled);
+    }
 }
 
 /// What a request to a host name that does not serve does: wake its app,
@@ -114,5 +179,24 @@ mod tests {
         waiting.await.unwrap();
         // Done: the next leads again.
         assert!(matches!(wakes.join("a.apps.test"), Wake::Lead(_)));
+    }
+
+    #[tokio::test]
+    async fn one_round_at_a_time_and_not_more_often_than_a_round() {
+        let rounds = Rounds::default();
+        rounds.wait("a");
+        rounds.wait("b");
+        let (turn, mut waiting) = rounds.take_turn().expect("the first takes a turn");
+        waiting.sort();
+        assert_eq!(waiting, ["a", "b"]);
+        assert!(rounds.take_turn().is_none(), "one is running");
+        rounds.answer(["a".to_owned()].into());
+        drop(turn);
+        assert!(rounds.settled("a") && !rounds.settled("b"));
+        assert!(rounds.take_turn().is_none(), "the last is too recent");
+        tokio::time::sleep(ROUND).await;
+        assert!(rounds.take_turn().is_some());
+        rounds.done("a");
+        assert!(!rounds.settled("a"));
     }
 }

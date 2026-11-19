@@ -908,6 +908,32 @@ impl Store {
         }
         Ok(route)
     }
+    /// Runs a round of [`crate::wakes::Rounds`] when it is this caller's
+    /// turn: which of the waiting reservations' apps serve, or whose wake
+    /// ended or changed. Read without the lock, in one query.
+    async fn wake_round(&self) -> Result<()> {
+        let Some((_turn, waiting)) = self.gateway.wakes.rounds.take_turn() else {
+            return Ok(());
+        };
+        if waiting.is_empty() {
+            self.gateway.wakes.rounds.answer(Default::default());
+            return Ok(());
+        }
+        let mut tx = self.transaction(false, false).await?;
+        let settled = rows(&mut tx,"SELECT x.id FROM jsonb_array_elements_text($1::jsonb) x(id)
+            LEFT JOIN ingress_reservations q ON q.id=x.id AND q.expires>now()
+            LEFT JOIN apps a ON a.id=q.app_id LEFT JOIN app_http h ON h.app_id=a.id LEFT JOIN app_triggers t ON t.app_id=a.id
+            WHERE q.id IS NULL OR h.blocked OR q.execution_id IS NOT NULL OR a.desired<>'enabled' OR NOT t.http OR a.target_release_id IS DISTINCT FROM q.release_id OR a.revision<>q.app_revision
+            OR EXISTS(SELECT 1 FROM routes r JOIN deployments d ON d.id=r.deployment_id JOIN executions e ON e.deployment_id=d.id AND h.execution_id=e.id JOIN nodes n ON n.id=e.node_id
+                WHERE r.hostname=h.hostname AND d.desired='running' AND e.desired='running' AND e.state='running' AND e.reserved AND NOT n.disabled AND n.last_seen>now()-interval '15 seconds' AND n.observed_confinement=$2 AND h.state='serving')",args![json!(waiting),HOST_CONFINEMENT]).await?;
+        tx.commit().await?;
+        self.gateway
+            .wakes
+            .rounds
+            .answer(settled.iter().map(|r| s(&r["id"]).to_owned()).collect());
+        Ok(())
+    }
+
     /// Whether a waiting request's app serves, or its wake ended or
     /// changed: what [`Self::ingress_poll`] then decides under the lock.
     /// Read without it.
@@ -962,17 +988,40 @@ impl Store {
         if let Some(route) = route {
             return Ok((route, lease));
         }
+        // It waits among the others: asked about in rounds, together
+        // ([`crate::wakes::Rounds`]), and asked about alone, and bound to
+        // the execution under the lock, only once a round finds it settled.
+        struct Waiting<'a>(&'a crate::wakes::Rounds, String);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.done(&self.1);
+            }
+        }
+        self.gateway.wakes.rounds.wait(&lease);
+        let _waiting = Waiting(&self.gateway.wakes.rounds, lease.clone());
         loop {
             // Looked at again when what serves changes, or a moment later.
             let moved = self.gateway.gates.moved();
-            let polled = tokio::time::timeout_at(deadline, self.ingress_poll(&lease))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(Error::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "HTTP wake deadline exceeded",
-                    ))
-                });
+            // A round that fails (the database is slow to answer) is as one
+            // that found nothing: the next will ask again.
+            let _ = tokio::time::timeout_at(deadline, self.wake_round()).await;
+            let polled = if self.gateway.wakes.rounds.settled(&lease) {
+                tokio::time::timeout_at(deadline, self.ingress_poll(&lease))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(Error::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "HTTP wake deadline exceeded",
+                        ))
+                    })
+            } else if tokio::time::Instant::now() >= deadline {
+                Err(Error::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "HTTP wake deadline exceeded",
+                ))
+            } else {
+                Ok(None)
+            };
             match polled {
                 Ok(Some(route)) => return Ok((route, lease)),
                 Ok(None) if tokio::time::Instant::now() < deadline => {
