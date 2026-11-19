@@ -16,9 +16,11 @@
 #  - each request is listed in the app's events with its status;
 #  - a 16 MiB upload and a 16 MiB download pass whole, a response of
 #    server-sent events arrives event by event, and exactly the bytes of
-#    those bodies are counted against the workspace's transfer allowance;
-#  - with 2 MiB of allowance left, an 8 MiB download is cut at 2 MiB, the
-#    allowance is not exceeded, and the next request is refused;
+#    those bodies are counted against the workspace's transfer allowance,
+#    with no more held than the gateway's lease of it (64 MiB at most);
+#  - with 2 MiB of allowance left, an 8 MiB download is cut at 2 MiB, what
+#    is counted and held is not more than the allowance, and the next
+#    request is refused;
 #  - an app allowed three executions grows to three under six clients with
 #    no request failing, and shrinks back to one when the load ends;
 #  - a new release of an app under steady load takes over on another
@@ -247,11 +249,12 @@ jq -n --arg tag "$tag" --arg domain "$domain" \
       and .streamed.server_sent_events.events == 8
       and .streamed.server_sent_events.first_byte_seconds < 1 and .streamed.server_sent_events.seconds > 2
       and .streamed.counted_bytes == 32 * $mib + ("count:\(16 * $mib)" | length) + .streamed.server_sent_events.received_bytes
-      and .streamed.held_after == 0
+      and .streamed.held_after <= 64 * $mib
       and .two_mebibytes_left_eight_to_download.download.received_bytes <= 2 * $mib
       and .two_mebibytes_left_eight_to_download.download.received_bytes > 2 * $mib - 65536
       and .two_mebibytes_left_eight_to_download.counted_after <= .two_mebibytes_left_eight_to_download.allowance
-      and .two_mebibytes_left_eight_to_download.held_after == 0
+      and .two_mebibytes_left_eight_to_download.counted_after + .two_mebibytes_left_eight_to_download.held_after
+          <= .two_mebibytes_left_eight_to_download.allowance
       and .two_mebibytes_left_eight_to_download.next_request.status == 429
       and .six_clients_up_to_three_executions.requests == 180
       and .six_clients_up_to_three_executions.not_200 == 0
