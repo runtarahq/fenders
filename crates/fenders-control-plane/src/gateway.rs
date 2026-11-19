@@ -169,6 +169,9 @@ pub struct Gateway {
     pub wakes: std::sync::Arc<crate::wakes::Wakes>,
     /// How long a flush may take ([`crate::outage::FLUSH_WITHIN`]).
     pub(crate) flush_within: std::time::Duration,
+    /// Whether the database last answered a question of its own, and
+    /// when ([`Store::database_answers`]).
+    probed: tokio::sync::Mutex<Option<(std::time::Instant, bool)>>,
 }
 
 impl Default for Gateway {
@@ -185,6 +188,7 @@ impl Default for Gateway {
             edge: None,
             wakes: Default::default(),
             flush_within: crate::outage::FLUSH_WITHIN,
+            probed: Default::default(),
             extending: Default::default(),
         }
     }
@@ -344,23 +348,47 @@ impl Store {
             // A flush that ran out of time may have waited for the lock
             // behind other work: the database is gone only if it does not
             // answer a question that takes none.
-            Err(error) if error.is_database_unavailable() && self.reachable().await => {}
             Err(error) => {
-                self.gateway.outage.failed(error);
+                self.confirm_outage(error).await;
             }
         }
         flushed
     }
 
     /// Whether the database answers, in [`crate::outage::READ_WITHIN`], a
-    /// question that takes no lock.
-    pub(crate) async fn reachable(&self) -> bool {
-        crate::outage::within(crate::outage::READ_WITHIN, async {
-            sqlx::query("SELECT 1").execute(&self.pool).await?;
-            Ok(())
+    /// question asked on a connection of its own, not one of the pool's:
+    /// a burst can keep every one of those busy, and a read waiting for one
+    /// cannot tell that from a database that does not answer. Asked once
+    /// for every caller that wonders within a second.
+    pub(crate) async fn database_answers(&self) -> bool {
+        use sqlx::Connection;
+        let mut probed = self.gateway.probed.lock().await;
+        if let Some((at, answered)) = *probed
+            && at.elapsed() < std::time::Duration::from_secs(1)
+        {
+            return answered;
+        }
+        let options = self.pool.connect_options();
+        let answered = tokio::time::timeout(crate::outage::READ_WITHIN, async {
+            let mut connection = sqlx::postgres::PgConnection::connect_with(&options).await?;
+            sqlx::query("SELECT 1").execute(&mut connection).await?;
+            connection.close().await
         })
         .await
-        .is_ok()
+        .is_ok_and(|asked| asked.is_ok());
+        *probed = Some((std::time::Instant::now(), answered));
+        answered
+    }
+
+    /// Whether `error` is the database being gone, as it then marks: one
+    /// that says so (a call that ran out of time, a connection that could
+    /// not be had) is believed only if the database does not answer a
+    /// question of its own ([`Self::database_answers`]).
+    pub(crate) async fn confirm_outage(&self, error: &crate::error::Error) -> bool {
+        if !crate::outage::unreachable(error) || self.database_answers().await {
+            return false;
+        }
+        self.gateway.outage.failed(error)
     }
 
     /// The last flush of a gateway that is stopping: as any other, and
@@ -649,7 +677,7 @@ impl Store {
                 Ok(taken.0)
             }
             Err(error) => {
-                self.gateway.outage.failed(&error);
+                self.confirm_outage(&error).await;
                 Err(error)
             }
         }
@@ -892,7 +920,7 @@ impl Store {
                 self.gateway.budgets.has(key, need)
             }
             Err(error) => {
-                self.gateway.outage.failed(&error);
+                self.confirm_outage(&error).await;
                 false
             }
         }

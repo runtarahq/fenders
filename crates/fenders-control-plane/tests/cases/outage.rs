@@ -373,3 +373,31 @@ async fn a_flush_kept_waiting_for_the_lock_is_not_an_outage() {
     edge.flush_gateway().await.unwrap();
     l.finish().await;
 }
+
+/// A burst keeps every connection of a process's pool busy: a read that
+/// waits too long for one is not the database being gone, which answers a
+/// question asked on a connection of its own. The request is refused as
+/// busy, and the edge does not serve from memory as in an outage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pool_kept_busy_is_not_an_outage() {
+    let l = Lab::new().await;
+    let options = l.store.pool.connect_options().as_ref().clone();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let edge = Store::from_pool(pool.clone(), l.root.path())
+        .unwrap()
+        .serving(Serves::Edge);
+    let held = pool.acquire().await.unwrap();
+    let refused = edge
+        .ingress_start("app-none.apps.test", 0)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!refused.is_database_unavailable(), "{}", refused.message);
+    assert!(edge.gateway.outage.down_for().is_none(), "no outage");
+    drop(held);
+    l.finish().await;
+}

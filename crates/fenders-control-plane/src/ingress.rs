@@ -374,8 +374,8 @@ impl Store {
                     whose
                 }
                 // The database went away: what the gates know decides.
-                Err(error) if self.gateway.outage.failed(&error) => Some((String::new(), i64::MAX)),
-                Err(error) => return Err(error),
+                Err(error) if self.confirm_outage(&error).await => Some((String::new(), i64::MAX)),
+                Err(error) => return Err(crate::outage::busy(error)),
             },
         };
         let tenant = whose.as_ref().map(|(tenant, _)| tenant.clone());
@@ -495,7 +495,8 @@ impl Store {
             return stale();
         }
         match crate::outage::within(crate::outage::READ_WITHIN, self.gate_fetch(hostname)).await {
-            Err(error) if outage.failed(&error) => stale(),
+            Err(error) if self.confirm_outage(&error).await => stale(),
+            Err(error) => Err(crate::outage::busy(error)),
             read => read,
         }
     }

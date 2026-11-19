@@ -116,6 +116,20 @@ pub async fn within_locked<T>(
         })
 }
 
+/// What a call that said the database was gone answers when the database
+/// answered after all: the process is busy.
+pub fn busy(error: crate::error::Error) -> crate::error::Error {
+    if unreachable(&error) {
+        crate::error::Error::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "the control plane is busy; try again",
+        )
+        .coded("busy")
+    } else {
+        error
+    }
+}
+
 /// Whether `error` is the database not being there.
 pub fn unreachable(error: &crate::error::Error) -> bool {
     error.is_database_unavailable()
