@@ -46,6 +46,7 @@ fn migrations() -> Vec<(String, Vec<&'static str>)> {
     let egress_renewals = [include_str!("../sql/egress_renewals.sql")];
     let gateway_observations = [crate::observed::MIGRATION];
     let lease_recalls = [include_str!("../sql/lease_recalls.sql")];
+    let websocket_sessions = [include_str!("../sql/websocket_sessions.sql")];
     vec![
         (
             digest(format!("{SCHEMA}\0{}", BASELINE.join("\0"))),
@@ -75,6 +76,7 @@ fn migrations() -> Vec<(String, Vec<&'static str>)> {
             gateway_observations.to_vec(),
         ),
         (digest(lease_recalls[0]), lease_recalls.to_vec()),
+        (digest(websocket_sessions[0]), websocket_sessions.to_vec()),
     ]
 }
 

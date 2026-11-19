@@ -49,6 +49,22 @@ impl Store {
     pub fn pickup(&self) -> std::sync::Arc<Pickup> {
         self.pickup.clone()
     }
+    /// Hears what other processes change of what decides whether an app
+    /// serves (`fenders_gates`, `sql/gate_changes.sql`), and moves this
+    /// process's epoch: what its gateway and run channel know is read
+    /// again. Runs until the listener fails; the supervisor restarts it.
+    pub async fn listen_for_gates(&self) -> Result<()> {
+        let mut listener = sqlx::postgres::PgListener::connect_with(&self.pool).await?;
+        listener.listen("fenders_gates").await?;
+        // What changed before this listened was not heard.
+        self.gateway.gates.changed();
+        loop {
+            // A notice, or the connection lost and made again: either way
+            // something may have changed.
+            listener.try_recv().await?;
+            self.gateway.gates.changed();
+        }
+    }
     /// Runs until the listener fails; the supervisor restarts it.
     pub async fn listen_for_pickup(&self) -> Result<()> {
         let mut listener = sqlx::postgres::PgListener::connect_with(&self.pool).await?;

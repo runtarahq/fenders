@@ -193,3 +193,101 @@ async fn an_allowance_is_lowered_below_an_edges_lease_once_the_edge_gives_it_bac
     edge.ingress_finish(&flying, Some(10)).await.unwrap();
     l.finish().await;
 }
+
+/// What one process changes of what decides whether an app serves, another
+/// hears: its gateway reads what it knows again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edge_hears_what_another_process_changes() {
+    let l = Lab::new().await;
+    let edge = Store::from_pool(l.store.pool.clone(), l.root.path())
+        .unwrap()
+        .serving(Serves::Edge);
+    let listening = {
+        let edge = edge.clone();
+        tokio::spawn(async move { edge.listen_for_gates().await })
+    };
+    let epoch = || edge.gateway.gates.epoch();
+    // Listening: it has heard nothing yet, and reads everything again.
+    let mut before = epoch();
+    for _ in 0..100 {
+        if epoch() > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    before = before.max(epoch());
+    // Another process changes a workspace's limits.
+    l.store
+        .update_http_limits(
+            &l.operator,
+            &l.tenant,
+            json!({"concurrent_requests":3,"requests_per_minute":30}),
+        )
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if epoch() > before {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(epoch() > before, "heard");
+    listening.abort();
+    l.finish().await;
+}
+
+/// A WebSocket connection's row is swept by the session that holds it, or
+/// when that session is gone: not by another edge, which does not hold it.
+#[tokio::test]
+async fn an_edge_sweeps_only_its_own_and_dead_sessions_websocket_rows() {
+    let l = Lab::new().await;
+    let node = l.node("ws-worker").await;
+    approve_component(&l, &node, true, true).await;
+    let (app, version) = define_app(&l, "sockets").await;
+    l.http_trigger(&app, true, true, "enable-http").await;
+    l.release(&app, &version, "first").await;
+    let edge = Store::from_pool(l.store.pool.clone(), l.root.path())
+        .unwrap()
+        .serving(Serves::Edge);
+    edge.flush_gateway().await.unwrap();
+    let (live, dead) = (uid(), uid());
+    sqlx::query("INSERT INTO gateway_sessions(id) VALUES($1)")
+        .bind(&live)
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    let row = |id: String, session: Option<String>| {
+        let (pool, app) = (l.store.pool.clone(), app.clone());
+        async move {
+            sqlx::query("INSERT INTO app_http_runs(id,tenant_id,project_id,app_id,release_id,method,path,state,started_at,websocket,session_id,created) SELECT $1,a.tenant_id,a.project_id,a.id,COALESCE(a.active_release_id,a.target_release_id),'GET','/','running',clock_timestamp(),'{}'::jsonb,$3,now()-interval '2 minutes' FROM apps a WHERE a.id=$2")
+                .bind(id)
+                .bind(app)
+                .bind(session)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let (mine, others, gone) = (uid(), uid(), uid());
+    row(mine.clone(), Some(edge.gateway.session().to_owned())).await;
+    row(others.clone(), Some(live)).await;
+    row(gone.clone(), Some(dead)).await;
+    edge.websocket_sweep().await.unwrap();
+    let finished = |id: String| {
+        let pool = l.store.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT finished_at IS NOT NULL FROM app_http_runs WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert!(finished(mine).await, "its own, which it does not hold");
+    assert!(!finished(others).await, "another live edge's");
+    assert!(finished(gone).await, "a session that is gone");
+    l.finish().await;
+}

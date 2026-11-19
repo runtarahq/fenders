@@ -563,7 +563,7 @@ impl crate::store::Store {
             .map(|status| status.as_u16())
             .filter(|status| (200..=599).contains(status));
         let mut tx = self.watched_transaction().await?;
-        exec(&mut tx,"INSERT INTO app_http_runs(id,tenant_id,project_id,app_id,release_id,method,path,state,http_status,started_at,finished_at,websocket) SELECT $1,a.tenant_id,a.project_id,a.id,COALESCE(a.active_release_id,a.target_release_id),'GET',$3,CASE WHEN $4 THEN 'failed' ELSE 'running' END,$5::integer,clock_timestamp(),CASE WHEN $4 THEN clock_timestamp() END,'{}'::jsonb FROM apps a WHERE a.id=$2 AND COALESCE(a.active_release_id,a.target_release_id) IS NOT NULL ON CONFLICT(id) DO NOTHING",args![id,app,path,refused.is_some(),status]).await?;
+        exec(&mut tx,"INSERT INTO app_http_runs(id,tenant_id,project_id,app_id,release_id,method,path,state,http_status,started_at,finished_at,websocket,session_id) SELECT $1,a.tenant_id,a.project_id,a.id,COALESCE(a.active_release_id,a.target_release_id),'GET',$3,CASE WHEN $4 THEN 'failed' ELSE 'running' END,$5::integer,clock_timestamp(),CASE WHEN $4 THEN clock_timestamp() END,'{}'::jsonb,$6 FROM apps a WHERE a.id=$2 AND COALESCE(a.active_release_id,a.target_release_id) IS NOT NULL ON CONFLICT(id) DO NOTHING",args![id,app,path,refused.is_some(),status,self.gateway.session()]).await?;
         self.commit_watched(tx).await?;
         Ok(())
     }
@@ -588,13 +588,16 @@ impl crate::store::Store {
             db::{exec, rows, s},
         };
         let mut tx = self.transaction(false, false).await?;
-        let open = rows(&mut tx,"SELECT id FROM app_http_runs WHERE websocket IS NOT NULL AND finished_at IS NULL AND created<now()-interval '1 minute' LIMIT 512",args![]).await?;
+        // This process's connections it no longer holds, and those of a
+        // session that is gone: another edge's are its own to sweep.
+        let open = rows(&mut tx,&format!("SELECT id,session_id IS NOT DISTINCT FROM $1 AS mine FROM app_http_runs WHERE websocket IS NOT NULL AND finished_at IS NULL AND created<now()-interval '1 minute'
+            AND (session_id IS NULL OR session_id=$1 OR NOT EXISTS(SELECT 1 FROM gateway_sessions g WHERE g.id=app_http_runs.session_id AND g.seen>clock_timestamp()-interval '{}')) LIMIT 512",crate::gateway::SESSION_DEAD),args![self.gateway.session()]).await?;
         drop(tx);
         let lost: Vec<&str> = {
             let held = self.sockets.lock();
             open.iter()
+                .filter(|row| row["mine"] != true || !held.contains_key(s(&row["id"])))
                 .map(|row| s(&row["id"]))
-                .filter(|id| !held.contains_key(*id))
                 .collect()
         };
         if lost.is_empty() {

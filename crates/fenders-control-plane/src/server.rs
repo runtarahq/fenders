@@ -226,6 +226,18 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
     if serves(Part::Gateway) {
+        // What other processes change is heard, and what the gateway and
+        // the run channel know of it read again.
+        let listener = store.clone();
+        background.periodic(
+            Component::GateListener,
+            std::time::Duration::ZERO,
+            delay,
+            move || {
+                let listener = listener.clone();
+                async move { listener.listen_for_gates().await }
+            },
+        )?;
         // What the gateway holds in memory is written once a second.
         let flusher = store.clone();
         background.periodic(
