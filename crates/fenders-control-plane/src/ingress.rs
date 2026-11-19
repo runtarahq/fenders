@@ -390,6 +390,7 @@ impl Store {
                 .or(app.as_ref().and_then(|app| app["id"].as_str()))
                 .map(str::to_owned),
             row: true,
+            bound: route.is_some(),
         };
         if !self
             .gateway
@@ -507,6 +508,7 @@ impl Store {
         if let Some(execution) = route.as_ref().and_then(|r| r["execution_id"].as_str()) {
             self.gateway.bound(reservation, execution);
             self.gateway.budgets.bound(reservation);
+            self.gateway.gates.bound(reservation);
         }
         Ok(route)
     }
@@ -651,18 +653,9 @@ impl Store {
             args![reservation],
         )
         .await?;
-        if let Some(row) = &row {
-            let queued = !row["app_id"].is_null() && row["execution_id"].is_null();
-            if !queued {
-                exec(
-                    &mut tx,
-                    "UPDATE app_http SET last_activity=now() WHERE execution_id=$1",
-                    args![row["execution_id"]],
-                )
-                .await?;
-            }
-        }
         tx.commit().await?;
+        // No longer in flight; that its app was active is written by the
+        // next flush.
         self.gateway.gates.leave(reservation);
         // Its record ends with it, and what it used of its lease is used:
         // written, with the request itself, by the next flush. One that

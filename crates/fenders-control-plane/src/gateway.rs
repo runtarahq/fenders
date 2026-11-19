@@ -116,6 +116,8 @@ struct Batch {
     open: Vec<String>,
     admitted: Vec<Admitted>,
     leases: crate::lease::Taken,
+    /// Apps with a request in flight, or one since the last flush.
+    active: Vec<String>,
 }
 
 /// What a flush did for the leases, to be told to their budgets once it
@@ -233,7 +235,7 @@ impl Gateway {
     /// Whether a flush has anything to do: something to write, or a session
     /// row to touch.
     fn due(&self) -> bool {
-        if self.budgets.due() {
+        if self.budgets.due() || self.gates.due() {
             return true;
         }
         let inner = self.lock();
@@ -264,6 +266,7 @@ impl Gateway {
     /// Puts back what a flush took and could not write.
     fn restore(&self, batch: Batch) {
         self.budgets.restore(batch.leases);
+        self.gates.touch(&batch.active);
         let mut inner = self.lock();
         for id in batch.open {
             if let Some((_, changed)) = inner.open.get_mut(&id) {
@@ -319,6 +322,7 @@ impl Store {
         // long ago they were, by the database's clock.
         let mut batch = self.gateway.take();
         batch.leases = self.gateway.budgets.take(&period, closing);
+        batch.active = self.gateway.gates.take_active();
         let written = match self.write_gateway(&mut tx, &batch, closing).await {
             Ok(written) => written,
             Err(error) => {
@@ -384,6 +388,11 @@ impl Store {
                 json!({"hostname": admitted.hostname}),
             )
             .await?;
+        }
+        if !batch.active.is_empty() {
+            // An app with a request in flight, or one since the last flush,
+            // is not idle: what stops an idle app reads this.
+            exec(tx,"UPDATE app_http SET last_activity=clock_timestamp() WHERE app_id IN (SELECT jsonb_array_elements_text($1))",args![json!(batch.active)]).await?;
         }
         self.write_leases(tx, &batch.leases).await
     }

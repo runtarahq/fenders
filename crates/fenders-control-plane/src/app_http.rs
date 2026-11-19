@@ -199,6 +199,10 @@ impl Store {
     }
 
     async fn drain_http(&self, tx: &mut Tx, binding: &Value) -> Result<bool> {
+        // The app is leaving service: from here its requests are admitted
+        // under the lock this transaction holds, and so after it.
+        let app = s(&binding["app_id"]);
+        self.gateway.gates.close(app);
         let pending=rows(tx,"SELECT e.*,($2::timestamptz<=now()) AS deadline FROM executions e WHERE deployment_id=$1 AND reserved",args![binding["deployment_id"],binding["drain_until"]]).await?;
         for e in &pending {
             if e["node_id"].is_null() {
@@ -208,13 +212,15 @@ impl Store {
             if e["desired"] == "stopped" {
                 continue;
             }
-            // An execution holds a reservation for each request it was
-            // given, until that request ends. One that holds none is idle,
-            // and admission is serialized with this, so it stays idle: it
-            // is stopped at once. A busy one is stopped at the deadline.
-            // An extra execution's requests are reserved under the app's
-            // first: what it holds is known to the exchange.
+            // The app's executions are busy while it has a request that
+            // was given one of them, which the gateway counts
+            // ([`crate::gate`]); one that waited for the app to start has a
+            // reservation for the execution it was given. With none they
+            // are idle, and admission is serialized with this, the gate
+            // being closed, so they stay idle: stopped at once. A busy one
+            // is stopped at the deadline.
             let busy = self.exchange.busy(s(&e["id"]))
+                || self.gateway.gates.serving(app) > 0
                 || optional(
                     tx,
                     "SELECT id FROM ingress_reservations WHERE execution_id=$1 LIMIT 1",
@@ -304,7 +310,10 @@ impl Store {
                 let taking=self.run_channel.is_none() || binding["state"]=="serving" || self.exchange.ready(s(&e["id"]));
                 if e["state"]=="running" && e["desired"]=="running" && e["reserved"]==true && e["healthy"]==true && taking {
                     if binding["state"]=="serving" && app["configuration"]["keep_warm"]==false
-                        && one(tx,"SELECT $1::timestamptz<now()-interval '60 seconds' AND NOT EXISTS(SELECT 1 FROM ingress_reservations WHERE execution_id=$2 OR app_id=$3) AS idle",args![binding["last_activity"],e["id"],app_id]).await?["idle"]==true {
+                        && one(tx,"SELECT $1::timestamptz<now()-interval '60 seconds' AND NOT EXISTS(SELECT 1 FROM ingress_reservations WHERE execution_id=$2 OR app_id=$3) AS idle",args![binding["last_activity"],e["id"],app_id]).await?["idle"]==true
+                        // And nothing of it in the gateway's memory that a
+                        // flush has yet to write: its gate closes with that.
+                        && self.gateway.gates.close_if_idle(app_id) {
                         // Idle teardown has no forced deadline: the execution is
                         // stopped once it holds no request.
                         exec(tx,"UPDATE app_http SET state='stopping',reason='idle-drain',idle_draining=true,drain_until=NULL,updated=now() WHERE app_id=$1",args![app_id]).await?;

@@ -77,11 +77,16 @@ pub struct Entered {
     /// Whether it has a reservation row, as one that waited for its app to
     /// start has.
     pub row: bool,
+    /// Whether it has an execution to go to: one that waits for its app to
+    /// start has none yet, and keeps no execution busy.
+    pub bound: bool,
 }
 
 #[derive(Default)]
 struct App {
     in_flight: usize,
+    /// Of those, the ones that have an execution to go to.
+    bound: usize,
     /// A request came in or ended since the last flush.
     touched: bool,
 }
@@ -196,10 +201,25 @@ impl Gates {
         if let Some(app) = &entered.app {
             let app = inner.apps.entry(app.clone()).or_default();
             app.in_flight += 1;
+            app.bound += usize::from(entered.bound);
             app.touched = true;
         }
         inner.flights.insert(id.to_owned(), entered);
         true
+    }
+
+    /// The request has an execution to go to.
+    pub fn bound(&self, id: &str) {
+        let mut inner = self.lock();
+        let inner = &mut *inner;
+        let Some(entered) = inner.flights.get_mut(id) else {
+            return;
+        };
+        if !std::mem::replace(&mut entered.bound, true)
+            && let Some(app) = entered.app.as_ref().and_then(|app| inner.apps.get_mut(app))
+        {
+            app.bound += 1;
+        }
     }
 
     /// The request is no longer in flight. What it was, the first time.
@@ -214,6 +234,7 @@ impl Gates {
         }
         if let Some(app) = entered.app.as_ref().and_then(|app| inner.apps.get_mut(app)) {
             app.in_flight = app.in_flight.saturating_sub(1);
+            app.bound = app.bound.saturating_sub(usize::from(entered.bound));
             app.touched = true;
         }
         Some(entered)
@@ -235,6 +256,12 @@ impl Gates {
     /// The app's requests in flight.
     pub fn in_flight(&self, app: &str) -> usize {
         self.lock().apps.get(app).map_or(0, |app| app.in_flight)
+    }
+
+    /// The app's requests in flight that have an execution to go to: while
+    /// there are any, its executions are not idle.
+    pub fn serving(&self, app: &str) -> usize {
+        self.lock().apps.get(app).map_or(0, |app| app.bound)
     }
 
     /// The workspace's requests in flight.
@@ -299,6 +326,7 @@ mod tests {
             tenant: "t".into(),
             app: Some(app.into()),
             row: false,
+            bound: true,
         }
     }
 
@@ -343,6 +371,20 @@ mod tests {
         assert!(gates.leave("1").is_none(), "left once");
         assert_eq!((gates.in_flight("a"), gates.in_flight_of("t")), (0, 1));
         assert!(gates.enter("3", entered("a"), 2));
+        // One that waits for its app to start keeps no execution busy until
+        // it has one to go to.
+        gates.leave("2");
+        let waiting = Entered {
+            bound: false,
+            ..entered("w")
+        };
+        assert!(gates.enter("4", waiting, 2));
+        assert_eq!((gates.in_flight("w"), gates.serving("w")), (1, 0));
+        gates.bound("4");
+        gates.bound("4");
+        assert_eq!(gates.serving("w"), 1);
+        gates.leave("4");
+        assert_eq!((gates.in_flight("w"), gates.serving("w")), (0, 0));
     }
 
     #[test]
