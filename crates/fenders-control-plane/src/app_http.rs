@@ -471,6 +471,7 @@ impl Store {
         // they have stopped. Each is made room for beside those before it,
         // so that two do not count on the same room; a workspace's first
         // that cannot be made room for ends its turn.
+        let mut found = crate::eviction::Found::default();
         let mut wanted: std::collections::HashMap<String, Option<crate::eviction::Room>> =
             std::collections::HashMap::new();
         for (tenant, need, app_id) in short_of_room {
@@ -480,7 +481,14 @@ impl Store {
             let Some(sum) = *before else { continue };
             let sum = sum.plus(need);
             if self
-                .make_room_in_allowance(tx, &tenant, sum, &seen, &json!({"app_id":app_id}))
+                .make_room_in_allowance(
+                    tx,
+                    &tenant,
+                    sum,
+                    &seen,
+                    &json!({"app_id":app_id}),
+                    &mut found,
+                )
                 .await?
             {
                 *before = Some(sum);

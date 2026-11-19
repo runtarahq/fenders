@@ -145,6 +145,23 @@ impl Idle {
     }
 }
 
+/// What of each workspace may give way, as found once in a scheduler
+/// pass: searched for again for each app waiting for room, a pass during
+/// a burst of wakes searched a hundred times, under the lock.
+#[derive(Default)]
+pub(crate) struct Found(std::collections::HashMap<String, Vec<Idle>>);
+
+impl Found {
+    /// Takes `chosen` (indices) out of `tenant`'s, to give way.
+    fn take(&mut self, tenant: &str, mut chosen: Vec<usize>) -> Vec<Idle> {
+        let Some(idle) = self.0.get_mut(tenant) else {
+            return Vec::new();
+        };
+        chosen.sort_unstable_by(|a, b| b.cmp(a));
+        chosen.into_iter().map(|index| idle.remove(index)).collect()
+    }
+}
+
 /// Executions of `tenant`, reserved: all of them, and those being given
 /// back.
 const RESERVED: &str = "SELECT COALESCE(sum(cpu_percent),0) cpu,COALESCE(sum(memory_mib),0) memory,count(*) instances,COALESCE(sum(cpu_percent) FILTER (WHERE desired='stopped'),0) coming_cpu,COALESCE(sum(memory_mib) FILTER (WHERE desired='stopped'),0) coming_memory,count(*) FILTER (WHERE desired='stopped') coming_instances FROM executions WHERE reserved AND ";
@@ -165,6 +182,22 @@ fn reserved(row: &Value) -> (Room, Room) {
 }
 
 impl Store {
+    /// What of `tenant` may give way, as `found` holds it, searched for
+    /// when it holds nothing of it yet.
+    async fn idle_found<'a>(
+        &self,
+        tx: &mut Tx,
+        tenant: &str,
+        seen: &Observed,
+        found: &'a mut Found,
+    ) -> Result<&'a Vec<Idle>> {
+        if !found.0.contains_key(tenant) {
+            let idle = self.idle_of(tx, tenant, seen).await?;
+            found.0.insert(tenant.to_owned(), idle);
+        }
+        Ok(&found.0[tenant])
+    }
+
     /// What of `tenant` may give way, the longest idle first.
     async fn idle_of(&self, tx: &mut Tx, tenant: &str, seen: &Observed) -> Result<Vec<Idle>> {
         // Where shims ask a run channel, its exchange says how long each
@@ -185,7 +218,7 @@ impl Store {
         let mut found = Vec::new();
         // One query for the workspace: each app that serves, with its
         // executions.
-        for binding in rows(tx,"SELECT h.*,a.tenant_id,a.configuration,(extract(epoch FROM now()-h.last_activity)*1000)::bigint AS quiet_ms,(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',e.id,'node_id',e.node_id,'cpu_percent',e.cpu_percent,'memory_mib',e.memory_mib,'state',e.state,'is_primary',e.id=h.execution_id) ORDER BY e.created,e.id),'[]'::jsonb) FROM executions e WHERE e.deployment_id=h.deployment_id AND e.reserved AND e.desired='running') AS executions FROM app_http h JOIN apps a ON a.id=h.app_id WHERE a.tenant_id=$1 AND h.state='serving' AND h.candidate_until IS NULL AND NOT h.blocked AND NOT h.idle_draining AND h.execution_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM ingress_reservations q WHERE q.app_id=h.app_id OR q.execution_id IN (SELECT id FROM executions e WHERE e.deployment_id=h.deployment_id)) ORDER BY h.last_activity,h.app_id",args![tenant]).await? {
+        for binding in rows(tx,"SELECT h.*,a.tenant_id,a.configuration,(extract(epoch FROM now()-h.last_activity)*1000)::bigint AS quiet_ms,(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',e.id,'node_id',e.node_id,'cpu_percent',e.cpu_percent,'memory_mib',e.memory_mib,'state',e.state,'is_primary',e.id=h.execution_id) ORDER BY e.created,e.id),'[]'::jsonb) FROM executions e WHERE e.deployment_id=h.deployment_id AND e.reserved AND e.desired='running') AS executions FROM app_http h JOIN apps a ON a.id=h.app_id WHERE a.tenant_id=$1 AND h.state='serving' AND h.candidate_until IS NULL AND NOT h.blocked AND NOT h.idle_draining AND h.execution_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM ingress_reservations q WHERE q.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM ingress_reservations q JOIN executions e ON e.id=q.execution_id WHERE e.deployment_id=h.deployment_id) ORDER BY h.last_activity,h.app_id",args![tenant]).await? {
             let app = s(&binding["app_id"]).to_owned();
             if self.gateway.gates.serving(&app) > 0 {
                 continue;
@@ -279,6 +312,7 @@ impl Store {
         need: Room,
         seen: &Observed,
         waiting: &Value,
+        found: &mut Found,
     ) -> Result<bool> {
         let limit = one(
             tx,
@@ -297,14 +331,14 @@ impl Store {
         if short.is_zero() {
             return Ok(true);
         }
-        let idle = self.idle_of(tx, tenant, seen).await?;
+        let idle = self.idle_found(tx, tenant, seen, found).await?;
         let freed: Vec<Room> = idle.iter().map(|i| i.frees(None)).collect();
         let Some(chosen) = choose(&freed, short) else {
             return Ok(false);
         };
         let mut stopped = true;
-        for index in chosen {
-            stopped &= self.give_way(tx, &idle[index], seen, waiting).await?;
+        for victim in found.take(tenant, chosen) {
+            stopped &= self.give_way(tx, &victim, seen, waiting).await?;
         }
         Ok(stopped)
     }
@@ -318,13 +352,13 @@ impl Store {
         execution: &Value,
         full: &[Value],
         seen: &Observed,
+        found: &mut Found,
     ) -> Result<bool> {
         if full.is_empty() {
             return Ok(false);
         }
         let need = Room::of(execution);
         let tenant = s(&execution["tenant_id"]);
-        let mut idle: Option<Vec<Idle>> = None;
         for node in full {
             let limit = Room {
                 cpu: n(&node["cpu_percent"]),
@@ -337,18 +371,15 @@ impl Store {
             if short.is_zero() {
                 return Ok(true);
             }
-            if idle.is_none() {
-                idle = Some(self.idle_of(tx, tenant, seen).await?);
-            }
-            let idle = idle.as_ref().unwrap();
+            let idle = self.idle_found(tx, tenant, seen, found).await?;
             let freed: Vec<Room> = idle.iter().map(|i| i.frees(node["id"].as_str())).collect();
             if let Some(chosen) = choose(&freed, short) {
                 let mut stopped = true;
-                for index in chosen {
+                for victim in found.take(tenant, chosen) {
                     stopped &= self
                         .give_way(
                             tx,
-                            &idle[index],
+                            &victim,
                             seen,
                             &json!({"execution_id":execution["id"],"node_id":node["id"]}),
                         )
