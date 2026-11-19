@@ -24,6 +24,7 @@ pub mod egress_budget;
 pub mod egress_periods;
 pub mod egress_usage;
 pub mod error;
+pub mod eviction;
 mod execution_input_retention;
 pub mod execution_logs;
 pub mod external_endpoints;
