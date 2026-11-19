@@ -61,7 +61,7 @@ pub const RESERVED: &str = "/_fenders/";
 pub const MAX_MESSAGE: usize = 1024 * 1024;
 /// Connections one app and one workspace may have open.
 const MAX_PER_APP: usize = 1000;
-const MAX_PER_WORKSPACE: usize = 4000;
+pub(crate) const MAX_PER_WORKSPACE: usize = 4000;
 /// Messages a connection may send in one second.
 const MAX_PER_SECOND: u32 = 20;
 /// How often a quiet connection is pinged, and how long one may send
@@ -123,9 +123,22 @@ impl Sockets {
         tenant: &str,
         project: &str,
     ) -> Option<mpsc::Receiver<Push>> {
+        self.open_within(id, app, tenant, project, MAX_PER_WORKSPACE as i64)
+    }
+
+    /// As [`open`](Self::open), with this process's share of the
+    /// workspace's connections ([`crate::shares`]).
+    pub(crate) fn open_within(
+        &self,
+        id: &str,
+        app: &str,
+        tenant: &str,
+        project: &str,
+        workspace: i64,
+    ) -> Option<mpsc::Receiver<Push>> {
         let mut open = self.lock();
         if open.values().filter(|c| c.app == app).count() >= MAX_PER_APP
-            || open.values().filter(|c| c.tenant == tenant).count() >= MAX_PER_WORKSPACE
+            || open.values().filter(|c| c.tenant == tenant).count() as i64 >= workspace
         {
             return None;
         }
@@ -141,6 +154,11 @@ impl Sockets {
             },
         );
         Some(pushed)
+    }
+
+    /// The workspace's connections this process holds.
+    pub fn count(&self, tenant: &str) -> i64 {
+        self.lock().values().filter(|c| c.tenant == tenant).count() as i64
     }
 
     fn closed(&self, id: &str) {
@@ -300,7 +318,15 @@ pub async fn accept(state: ApiState, host: String, request: Request) -> Result<R
             .await?;
         return Ok(status.into_response());
     }
-    let Some(pushed) = state.store.sockets.open(&id, &app.0, &app.1, &app.2) else {
+    let workspace = match state.store.gateway.shares.of(&app.1) {
+        Some(share) => share.connections,
+        None => MAX_PER_WORKSPACE as i64,
+    };
+    let Some(pushed) = state
+        .store
+        .sockets
+        .open_within(&id, &app.0, &app.1, &app.2, workspace)
+    else {
         let _ = event(&state, &host, &id, "disconnect", None, None, Bytes::new()).await;
         return Err(Error::new(
             StatusCode::TOO_MANY_REQUESTS,

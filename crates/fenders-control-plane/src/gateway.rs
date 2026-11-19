@@ -132,6 +132,8 @@ struct Batch {
 /// has committed.
 #[derive(Default)]
 struct Written {
+    /// Shares of workspaces' limits brought to their size, or given back.
+    shares: Vec<(String, Option<crate::shares::Limits>)>,
     /// Leases that were not there to be taken from.
     lost: Vec<crate::lease::Key>,
     /// What each lease asked for was granted: the key, the bytes granted
@@ -155,6 +157,8 @@ pub struct Gateway {
     extending: tokio::sync::Mutex<()>,
     /// Whether the database can be reached ([`crate::outage`]).
     pub outage: crate::outage::Outage,
+    /// Its shares of workspaces' limits ([`crate::shares`]).
+    pub shares: crate::shares::Shares,
 }
 
 impl Default for Gateway {
@@ -167,6 +171,7 @@ impl Default for Gateway {
             launches: Default::default(),
             renewals: Default::default(),
             outage: Default::default(),
+            shares: Default::default(),
             extending: Default::default(),
         }
     }
@@ -378,6 +383,12 @@ impl Store {
         for (key, granted, asked) in &written.granted {
             budgets.granted(key, &period, *granted, *asked);
         }
+        for (tenant, share) in &written.shares {
+            match share {
+                Some(share) => self.gateway.shares.set(tenant, *share),
+                None => self.gateway.shares.drop_share(tenant),
+            }
+        }
         self.gateway.flushed();
         Ok(())
     }
@@ -509,7 +520,144 @@ impl Store {
             // is not idle: what stops an idle app reads this.
             exec(tx,"UPDATE app_http SET last_activity=clock_timestamp() WHERE app_id IN (SELECT jsonb_array_elements_text($1))",args![json!(batch.active)]).await?;
         }
-        self.write_leases(tx, &batch.leases).await
+        let mut written = self.write_leases(tx, &batch.leases).await?;
+        written.shares = self.write_shares(tx, closing).await?;
+        Ok(written)
+    }
+
+    /// What this process uses of `tenant`'s limits now.
+    fn share_used(&self, tenant: &str) -> crate::shares::Limits {
+        crate::shares::Limits {
+            concurrent: self.gateway.gates.in_flight_of(tenant) as i64,
+            per_minute: self.http_rates.count(tenant),
+            connections: self.sockets.count(tenant),
+        }
+    }
+
+    /// Takes, or brings to its size, this process's share of `tenant`'s
+    /// limits ([`crate::shares::fair`]), in `tx`, which holds the lock.
+    pub(crate) async fn take_share(
+        &self,
+        tx: &mut Tx,
+        tenant: &str,
+        concurrent: i64,
+        per_minute: i64,
+    ) -> Result<crate::shares::Limits> {
+        use crate::{
+            db::{n, one},
+            shares::{Limits, fair},
+        };
+        let session = self.gateway.session();
+        let others = one(tx,&format!("SELECT COALESCE(sum(s.concurrent),0)::bigint AS concurrent,COALESCE(sum(s.per_minute),0)::bigint AS per_minute,COALESCE(sum(s.connections),0)::bigint AS connections,
+            COALESCE(sum(s.used_concurrent),0)::bigint AS used_concurrent,COALESCE(sum(s.used_per_minute),0)::bigint AS used_per_minute,COALESCE(sum(s.used_connections),0)::bigint AS used_connections,count(*) AS holders
+            FROM edge_limit_shares s JOIN gateway_sessions g ON g.id=s.session_id AND g.seen>clock_timestamp()-interval '{SESSION_DEAD}' WHERE s.tenant_id=$1 AND s.session_id<>$2"),args![tenant,session]).await?;
+        let limit = Limits {
+            concurrent,
+            per_minute,
+            connections: crate::websocket::MAX_PER_WORKSPACE as i64,
+        };
+        let used = self.share_used(tenant);
+        let hold = Limits {
+            concurrent: n(&others["concurrent"]),
+            per_minute: n(&others["per_minute"]),
+            connections: n(&others["connections"]),
+        };
+        let others_use = Limits {
+            concurrent: n(&others["used_concurrent"]),
+            per_minute: n(&others["used_per_minute"]),
+            connections: n(&others["used_connections"]),
+        };
+        let share = fair(limit, used, hold, others_use, n(&others["holders"]) + 1);
+        exec(
+            tx,
+            "INSERT INTO gateway_sessions(id) VALUES($1) ON CONFLICT(id) DO NOTHING",
+            args![session],
+        )
+        .await?;
+        exec(tx,"INSERT INTO edge_limit_shares(session_id,tenant_id,concurrent,per_minute,connections,used_concurrent,used_per_minute,used_connections) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+            ON CONFLICT(session_id,tenant_id) DO UPDATE SET concurrent=excluded.concurrent,per_minute=excluded.per_minute,connections=excluded.connections,used_concurrent=excluded.used_concurrent,used_per_minute=excluded.used_per_minute,used_connections=excluded.used_connections,updated=clock_timestamp()",
+            args![session,tenant,share.concurrent,share.per_minute,share.connections,used.concurrent,used.per_minute,used.connections]).await?;
+        Ok(share)
+    }
+
+    /// This process's share of `tenant`'s limits, taken now if it holds
+    /// none: in a transaction under the lock, which the workspace's first
+    /// request here makes.
+    pub(crate) async fn share(
+        &self,
+        tenant: &str,
+        concurrent: i64,
+        per_minute: i64,
+    ) -> Result<crate::shares::Limits> {
+        if let Some(share) = self.gateway.shares.of(tenant) {
+            return Ok(share);
+        }
+        if self.gateway.outage.down_for().is_some() {
+            return Err(crate::error::Error::database_unavailable());
+        }
+        let taken = crate::outage::within(crate::outage::READ_WITHIN, async {
+            let mut tx = self.gateway_transaction().await?;
+            let share = self
+                .take_share(&mut tx, tenant, concurrent, per_minute)
+                .await?;
+            tx.commit().await?;
+            Ok(share)
+        })
+        .await;
+        match taken {
+            Ok(share) => {
+                self.gateway.shares.set(tenant, share);
+                Ok(share)
+            }
+            Err(error) => {
+                self.gateway.outage.failed(&error);
+                Err(error)
+            }
+        }
+    }
+
+    /// Brings each share to its size, or gives back one nothing has used
+    /// for a while, or every one when closing.
+    async fn write_shares(
+        &self,
+        tx: &mut Tx,
+        closing: bool,
+    ) -> Result<Vec<(String, Option<crate::shares::Limits>)>> {
+        use crate::db::{n, optional};
+        let mut written = Vec::new();
+        for (tenant, idle) in self.gateway.shares.held(std::time::Duration::from_secs(30)) {
+            let used = self.share_used(&tenant);
+            if closing || idle && used.is_zero() {
+                exec(
+                    tx,
+                    "DELETE FROM edge_limit_shares WHERE session_id=$1 AND tenant_id=$2",
+                    args![self.gateway.session(), tenant],
+                )
+                .await?;
+                written.push((tenant, None));
+                continue;
+            }
+            let Some(limits) = optional(
+                tx,
+                "SELECT http_concurrent_requests,http_requests_per_minute FROM tenants WHERE id=$1",
+                args![tenant],
+            )
+            .await?
+            else {
+                written.push((tenant, None));
+                continue;
+            };
+            let share = self
+                .take_share(
+                    tx,
+                    &tenant,
+                    n(&limits["http_concurrent_requests"]),
+                    n(&limits["http_requests_per_minute"]),
+                )
+                .await?;
+            written.push((tenant, Some(share)));
+        }
+        Ok(written)
     }
 
     /// What was used is recorded and comes off the leases; what is given
@@ -650,7 +798,8 @@ impl Store {
         exec(
             tx,
             &format!(
-                "WITH gone AS (DELETE FROM gateway_sessions WHERE seen<clock_timestamp()-interval '{SESSION_DEAD}' RETURNING id)
+                "WITH gone AS (DELETE FROM gateway_sessions WHERE seen<clock_timestamp()-interval '{SESSION_DEAD}' RETURNING id),
+                shares AS (DELETE FROM edge_limit_shares WHERE session_id IN (SELECT id FROM gone) OR NOT EXISTS(SELECT 1 FROM gateway_sessions s WHERE s.id=edge_limit_shares.session_id))
                 DELETE FROM gateway_observations WHERE session_id IN (SELECT id FROM gone) OR NOT EXISTS(SELECT 1 FROM gateway_sessions s WHERE s.id=gateway_observations.session_id)"
             ),
             args![],

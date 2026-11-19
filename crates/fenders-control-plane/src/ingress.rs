@@ -125,6 +125,23 @@ impl Rates {
             .map_or(1, |(second, _)| (second + 60).saturating_sub(now).max(1))
     }
 
+    /// How many requests of `tenant` were admitted in the last minute.
+    pub fn count(&self, tenant: &str) -> i64 {
+        let inner = self.lock_inner();
+        let now = Self::now(&inner);
+        inner.admitted.get(tenant).map_or(0, |seconds| {
+            seconds
+                .iter()
+                .filter(|(second, _)| second + 60 > now)
+                .map(|(_, count)| *count as i64)
+                .sum()
+        })
+    }
+
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, RatesInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Whether `limit` requests of `tenant` were admitted in the last minute:
     /// what [`admit`](Self::admit) would answer, without admitting one.
     pub fn exhausted(&self, tenant: &str, limit: i64) -> bool {
@@ -479,6 +496,10 @@ impl Store {
             }
             return Err(quota("transfer allowance exhausted"));
         }
+        // This process's share of the workspace's limits ([`crate::shares`]).
+        let share = self
+            .share(&gate.tenant, gate.concurrent, gate.per_minute)
+            .await?;
         let reservation = uid();
         let entered = crate::gate::Entered {
             tenant: gate.tenant.clone(),
@@ -486,10 +507,10 @@ impl Store {
             row: false,
             bound: true,
         };
-        if !gates.enter(&reservation, entered, gate.concurrent) {
+        if !gates.enter(&reservation, entered, share.concurrent) {
             return Err(quota("ingress allowance exhausted"));
         }
-        if !self.http_rates.admit(&gate.tenant, gate.per_minute) {
+        if !self.http_rates.admit(&gate.tenant, share.per_minute) {
             gates.leave(&reservation);
             return Err(quota("ingress allowance exhausted"));
         }
@@ -575,10 +596,23 @@ impl Store {
             row: route.is_none(),
             bound: route.is_some(),
         };
+        let (share, taken) = match self.gateway.shares.of(s(tenant)) {
+            Some(share) => (share, false),
+            None => (
+                self.take_share(
+                    &mut tx,
+                    s(tenant),
+                    n(&limits["http_concurrent_requests"]),
+                    n(&limits["http_requests_per_minute"]),
+                )
+                .await?,
+                true,
+            ),
+        };
         if !self
             .gateway
             .gates
-            .enter(reservation, entered, n(&limits["http_concurrent_requests"]))
+            .enter(reservation, entered, share.concurrent)
         {
             return Err(quota("ingress allowance exhausted"));
         }
@@ -604,10 +638,7 @@ impl Store {
             }
             None => None,
         };
-        if !self
-            .http_rates
-            .admit(s(tenant), n(&limits["http_requests_per_minute"]))
-        {
+        if !self.http_rates.admit(s(tenant), share.per_minute) {
             return Err(quota("ingress allowance exhausted"));
         }
         // What was read here, under the lock, is what the gateway now
@@ -652,6 +683,9 @@ impl Store {
             Self::wake_http(&mut tx, s(&app["id"])).await?;
         }
         tx.commit().await?;
+        if taken {
+            self.gateway.shares.set(s(tenant), share);
+        }
         self.ingress_expired(&expired);
         if let Some(gate) = gate {
             self.gateway.gates.open(hostname, gate, epoch);
@@ -839,8 +873,11 @@ impl Store {
             .await?;
         }
         tx.commit().await?;
-        // The limits the gateway holds for the workspace are the old ones.
+        // The limits the gateway holds for the workspace are the old ones,
+        // and so is this process's share of them: taken again at the next
+        // request. Another process's is brought to them by its next flush.
         self.gateway.gates.forget_all();
+        self.gateway.shares.drop_share(tenant);
         Ok(row)
     }
     pub async fn ingress_finish(&self, reservation: &str, used: Option<i64>) -> Result<()> {

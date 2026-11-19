@@ -291,3 +291,82 @@ async fn an_edge_sweeps_only_its_own_and_dead_sessions_websocket_rows() {
     assert!(finished(gone).await, "a session that is gone");
     l.finish().await;
 }
+
+/// Two edges serve one workspace: each admits against its share of the
+/// workspace's limits, the shares follow what each uses, and together they
+/// never admit more than the limit.
+#[tokio::test]
+async fn two_edges_hold_a_workspaces_limits_between_them() {
+    let l = Lab::new().await;
+    let edge = || {
+        Store::from_pool(l.store.pool.clone(), l.root.path())
+            .unwrap()
+            .serving(Serves::Edge)
+    };
+    let (a, b) = (edge(), edge());
+    let node = l.node("share-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    l.store
+        .update_http_limits(
+            &l.operator,
+            &l.tenant,
+            json!({"concurrent_requests":4,"requests_per_minute":1000}),
+        )
+        .await
+        .unwrap();
+    let host = s(&route["hostname"]);
+    let share = |edge: &Store| edge.gateway.shares.of(&l.tenant).map(|s| s.concurrent);
+    // Alone, the first edge takes the whole limit.
+    let mut held_a = Vec::new();
+    for _ in 0..2 {
+        held_a.push(a.ingress_start(host, 0).await.unwrap().1);
+    }
+    assert_eq!(share(&a), Some(4));
+    // The second finds nothing left, and is refused.
+    assert_eq!(
+        b.ingress_start(host, 0).await.unwrap_err().status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(share(&b), Some(0));
+    // At their flushes they share what is not used: the first keeps its two
+    // and half of the two left, the second the other.
+    a.flush_gateway().await.unwrap();
+    assert_eq!(share(&a), Some(3));
+    b.flush_gateway().await.unwrap();
+    assert_eq!(share(&b), Some(1));
+    let held_b = b.ingress_start(host, 0).await.unwrap().1;
+    assert_eq!(
+        b.ingress_start(host, 0).await.unwrap_err().status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    held_a.push(a.ingress_start(host, 0).await.unwrap().1);
+    assert_eq!(
+        a.ingress_start(host, 0).await.unwrap_err().status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // Four in flight between them, and no more.
+    let shares: i64 = sqlx::query_scalar(
+        "SELECT sum(concurrent)::bigint FROM edge_limit_shares WHERE tenant_id=$1",
+    )
+    .bind(&l.tenant)
+    .fetch_one(&l.store.pool)
+    .await
+    .unwrap();
+    assert!(shares <= 4);
+    // One edge goes away: its share is freed, and the other takes it.
+    for request in held_a {
+        a.ingress_finish(&request, Some(0)).await.unwrap();
+    }
+    a.close_gateway().await.unwrap();
+    b.flush_gateway().await.unwrap();
+    assert_eq!(share(&b), Some(4));
+    b.ingress_finish(&held_b, Some(0)).await.unwrap();
+    l.finish().await;
+}

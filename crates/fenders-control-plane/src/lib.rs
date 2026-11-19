@@ -50,6 +50,7 @@ pub mod schedule;
 mod schema_migrations;
 mod secret_binding;
 pub mod server;
+pub mod shares;
 pub mod store;
 pub mod stream_listener;
 pub mod supervision;
