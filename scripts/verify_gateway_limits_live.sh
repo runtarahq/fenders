@@ -16,7 +16,7 @@
 # Leaves the app and its records in the project; stops its execution.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-state=$repo/run/local
+state=${LOCAL_STATE:-$repo/run/local}
 out=${1:-$repo/run/gateway-limits-live-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$out"
 manage=https://127.0.0.1:19090

@@ -19,7 +19,7 @@
 # Leaves the apps, the registered connection and the runs in the project.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-state=$repo/run/local
+state=${LOCAL_STATE:-$repo/run/local}
 out=${1:-$repo/run/egress-limit-live-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$out"
 manage=https://127.0.0.1:19090
