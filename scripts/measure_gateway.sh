@@ -6,8 +6,9 @@
 #   bash scripts/measure_gateway.sh [OUTPUT_DIR]
 #
 # Makes WORKSPACES workspaces (4 unless said), each with one HTTP app of the
-# example component serving CONCURRENCY requests at once (16), with limits
-# and an allowance no run here reaches. Then, for SECONDS seconds each (15),
+# example component on EXECUTIONS executions (2), each serving two requests
+# at once, which is what the smallest size has memory for; with limits and
+# an allowance no run here reaches. The local node runs eight executions. Then, for SECONDS seconds each (15),
 # with CLIENTS clients (32):
 #   one-app         GET /hello of one app
 #   many-workspaces GET /hello of every app in turn
@@ -27,7 +28,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 state=${LOCAL_STATE:-$repo/run/local}
 out=${1:-$repo/run/measure-gateway-$(date +%Y%m%d-%H%M%S)}
 load=${LOCAL_BIN:-$repo/target/release}/fenders-load
-workspaces=${WORKSPACES:-4} concurrency=${CONCURRENCY:-16}
+workspaces=${WORKSPACES:-4} executions=${EXECUTIONS:-2}
 seconds=${SECONDS_EACH:-15} clients=${CLIENTS:-32}
 manage=https://127.0.0.1:19090
 gateway_port=19092
@@ -58,7 +59,7 @@ trap remove EXIT
 urls=() large=
 for index in $(seq "$workspaces"); do
   tenant=$(api POST /workspaces "$(jq -n --arg n "measure-$tag-$index" \
-    '{name:$n,allowance:{cpu_percent:100,memory_mib:1024,storage_bytes:1073741824,instances:1,transfer_bytes:1099511627776}}')" | jq -er .id)
+    '{name:$n,allowance:{cpu_percent:200,memory_mib:2048,storage_bytes:1073741824,instances:8,transfer_bytes:1099511627776}}')" | jq -er .id)
   made+=("$tenant")
   api PATCH "/workspaces/$tenant/http-limits" '{"concurrent_requests":10000,"requests_per_minute":10000000}' >/dev/null
   scope=/workspaces/$tenant/projects/$(api GET "/workspaces/$tenant/projects" | jq -er '.items[0].id')
@@ -70,11 +71,11 @@ for index in $(seq "$workspaces"); do
     [[ $(api GET "$scope/artifacts/$artifact/inspection" | jq -r '.state // empty') == valid ]] && break
     sleep 1
   done
-  app=$(api POST "$scope/apps/deploy" "$(jq -n --arg a "$artifact" --argjson c "$concurrency" \
-    '{name:"measured",artifact_id:$a,triggers:{http:true,manual:false},configuration:{concurrency:$c}}')" |
+  app=$(api POST "$scope/apps/deploy" "$(jq -n --arg a "$artifact" --argjson e "$executions" \
+    '{name:"measured",artifact_id:$a,triggers:{http:true,manual:false},configuration:{concurrency:2,scale:{min:$e,max:$e}}}')" |
     jq -er '.app.id // .app_id // .resource_id // .id')
   for _ in $(seq 90); do
-    [[ $(api GET "$scope/apps/$app/http" | jq -r .state) == serving ]] && break
+    [[ $(api GET "$scope/apps/$app/http" | jq -r '"\(.state) \(.executions)"') == "serving $executions" ]] && break
     sleep 1
   done
   url=$(api GET "$scope/apps/$app/http" | jq -er .url)
@@ -109,7 +110,7 @@ measure one-app "$clients" "${urls[0]}/hello"
 measure many-workspaces "$clients" "${urls[@]/%//hello}"
 measure large-bodies 4 "${urls[0]}/bytes/16777216"
 
-jq -n --argjson seconds "$seconds" --argjson workspaces "$workspaces" --argjson concurrency "$concurrency" \
+jq -n --argjson seconds "$seconds" --argjson workspaces "$workspaces" --argjson executions "$executions" \
   --arg commit "$(git -C "$repo" rev-parse --short HEAD)" \
   --slurpfile idle "$out/idle.json" --slurpfile one "$out/one-app.json" \
   --slurpfile many "$out/many-workspaces.json" --slurpfile large "$out/large-bodies.json" '
@@ -117,6 +118,6 @@ jq -n --argjson seconds "$seconds" --argjson workspaces "$workspaces" --argjson 
     {requests_a_second: $r.load.requests_a_second, latency_ms: $r.load.latency_ms, statuses: $r.load.statuses,
      locked_transactions_a_request: (if $r.load.requests > 0 then ($locked / $r.load.requests * 100 | round / 100) else null end),
      lock_wait_ms_a_request: (if $r.load.requests > 0 then ($r.lock_wait_ms / $r.load.requests * 100 | round / 100) else null end)};
-  {commit: $commit, seconds_each: $seconds, workspaces: $workspaces, concurrency: $concurrency,
+  {commit: $commit, seconds_each: $seconds, workspaces: $workspaces, executions_an_app: $executions,
    idle_locked_transactions: $idle[0].locked_transactions,
    one_app: ($one[0] | row), many_workspaces: ($many[0] | row), large_bodies: ($large[0] | row)}' | tee "$out/summary.json"

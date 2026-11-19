@@ -176,6 +176,26 @@ the next.
 Done when the numbers are in this file. They are what stage 4 is compared
 with, and they decide whether D4 and D5 are right.
 
+Done on 19 November 2026, at `b0b8a3e`, with `scripts/measure_gateway.sh`
+on one machine (12 logical CPUs) that was control plane, PostgreSQL in a
+container and node at once: four workspaces, one app each on two executions
+of the smallest size, 15 seconds a run.
+
+| Run | Clients | Requests a second | Median | 99th percentile | Locked transactions a request | Wait for the lock a request |
+|---|---|---|---|---|---|---|
+| One app, `GET /hello` | 32 | 78 | 392 ms | 809 ms | 2.7 | 175 ms |
+| Four workspaces in turn | 32 | 88 | 358 ms | 498 ms | 2.9 | 155 ms |
+| One app, 16 MiB responses | 4 | 4 | 999 ms | 1410 ms | 18.6 | 368 ms |
+
+With no client the process made 40 locked transactions a second: the
+scheduler, the node's heartbeats and the eight executions' own.
+
+What they say: a request spends nearly half its time waiting for the lock,
+and four workspaces are served no faster than one. The bound is the lock,
+at about 250 locked transactions a second on this machine, and it is
+shared. The executions were not what was slow: each is a quarter of a CPU,
+and the rate did not change with which of them were asked.
+
 ### 1. Sessions, the flusher and the request log
 
 - Migration: `gateway_sessions`.
