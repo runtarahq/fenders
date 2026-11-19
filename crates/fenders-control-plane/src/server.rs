@@ -1,7 +1,7 @@
 //! The `fenders-control-plane` program, as a function a wrapping binary can call.
 use crate::{
     api,
-    store::Store,
+    store::{Serves, Store},
     supervision::{Background, Component, shutdown_signal},
     transport,
 };
@@ -56,6 +56,12 @@ struct Args {
     /// Operator-approved IPv4 ranges for customer-owned external databases.
     #[arg(long)]
     external_network: Option<PathBuf>,
+    /// What this process serves: everything (`all`), the management API,
+    /// the scheduler and the nodes' peer (`control`), or the gateway and
+    /// the run channel (`edge`, with `--state` holding what `fenders-keys
+    /// edge` wrote).
+    #[arg(long, value_enum, default_value = "all")]
+    role: Role,
     /// Resolve and validate an origin, then exit without serving or assigning work.
     #[arg(long)]
     check_public_egress: Vec<String>,
@@ -108,7 +114,22 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
     let dsn = database_url(args.database_url_file.as_deref())?;
-    let mut store = Store::connect(&dsn, &args.state).await?;
+    let role = args.role;
+    let serves = |part: Part| part.served_by(role);
+    let mut store = if role == Role::Edge {
+        if tls.is_none() {
+            return Err("an edge serves over TLS: --ca, --cert and --key are required".into());
+        }
+        Store::connect_edge(&dsn, &args.state).await?
+    } else {
+        Store::connect(&dsn, &args.state)
+            .await?
+            .serving(if role == Role::Control {
+                Serves::Control
+            } else {
+                Serves::All
+            })
+    };
     if let Some(endpoint) = &args.run_channel_endpoint {
         let tls = tls
             .as_ref()
@@ -118,6 +139,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::read_to_string(&tls.ca)?,
             args.run_channel_server_name.clone(),
         )?);
+    } else if role == Role::Control {
+        return Err(
+            "a control process names the edges' run channel: --run-channel-endpoint".into(),
+        );
     }
     if let Some(path) = args.external_network {
         store = store.with_external_network(
@@ -127,50 +152,78 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(config) = public_egress {
         store = store.with_public_egress(config)?;
     }
-    store.migrate().await?;
-    let credential = store.bootstrap().await?;
+    // A control process migrates the schema; an edge only checks that it is
+    // the one it was built for, and is started after.
+    let credential = if role == Role::Edge {
+        store.check_schema().await?;
+        None
+    } else {
+        store.migrate().await?;
+        Some(store.bootstrap().await?)
+    };
     let listener = tokio::net::TcpListener::bind((args.host, args.port)).await?;
-    eprintln!(
-        "Fenders Rust management API: {}://{}; credential file: {}",
-        if args.dev_http { "http" } else { "https" },
-        listener.local_addr()?,
-        credential.display()
-    );
+    match &credential {
+        Some(credential) => eprintln!(
+            "Fenders Rust management API: {}://{}; credential file: {}",
+            if args.dev_http { "http" } else { "https" },
+            listener.local_addr()?,
+            credential.display()
+        ),
+        None => eprintln!(
+            "Fenders edge: probes and status on https://{}, gateway on {}, run channel on {}",
+            listener.local_addr()?,
+            args.gateway_port,
+            args.run_channel_port
+        ),
+    }
     let mut background = Background::new(store.background_monitor());
     let delay = std::time::Duration::from_secs(1);
-    let scheduler = store.clone();
-    // Work to place wakes the scheduler at commit; the interval still sweeps.
-    background.periodic_woken(
-        Component::Scheduler,
-        delay,
-        delay,
-        Some(store.pickup()),
-        move || {
-            let scheduler = scheduler.clone();
-            async move { scheduler.schedule().await }
-        },
-    )?;
-    let pickup = store.clone();
-    background.periodic(
-        Component::PickupListener,
-        std::time::Duration::ZERO,
-        delay,
-        move || {
-            let pickup = pickup.clone();
-            async move { pickup.listen_for_pickup().await }
-        },
-    )?;
-    // What the gateway holds in memory is written once a second.
-    let flusher = store.clone();
-    background.periodic(
-        Component::GatewayFlusher,
-        crate::gateway::FLUSH_EVERY,
-        crate::gateway::FLUSH_EVERY,
-        move || {
-            let flusher = flusher.clone();
-            async move { flusher.flush_gateway().await }
-        },
-    )?;
+    if serves(Part::Scheduler) {
+        let scheduler = store.clone();
+        // Work to place wakes the scheduler at commit; the interval still sweeps.
+        background.periodic_woken(
+            Component::Scheduler,
+            delay,
+            delay,
+            Some(store.pickup()),
+            move || {
+                let scheduler = scheduler.clone();
+                async move { scheduler.schedule().await }
+            },
+        )?;
+        let pickup = store.clone();
+        background.periodic(
+            Component::PickupListener,
+            std::time::Duration::ZERO,
+            delay,
+            move || {
+                let pickup = pickup.clone();
+                async move { pickup.listen_for_pickup().await }
+            },
+        )?;
+    }
+    if serves(Part::Gateway) {
+        // What the gateway holds in memory is written once a second.
+        let flusher = store.clone();
+        background.periodic(
+            Component::GatewayFlusher,
+            crate::gateway::FLUSH_EVERY,
+            crate::gateway::FLUSH_EVERY,
+            move || {
+                let flusher = flusher.clone();
+                async move { flusher.flush_gateway().await }
+            },
+        )?;
+    }
+    if role == Role::Edge {
+        // The scheduler sweeps WebSocket connections where it holds them; an
+        // edge holds them without a scheduler.
+        let sweeper = store.clone();
+        background.periodic(Component::WebSocketSweep, delay, delay, move || {
+            let sweeper = sweeper.clone();
+            async move { sweeper.websocket_sweep().await }
+        })?;
+    }
     let state = api::ApiState {
         store: store.clone(),
         domain: args.domain,
@@ -184,26 +237,41 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             args.gateway_key.as_deref().unwrap_or(&tls.key),
             None,
         )?;
-        let internal_listener =
-            tokio::net::TcpListener::bind((args.host, args.internal_port)).await?;
-        let gateway_listener =
-            tokio::net::TcpListener::bind((args.host, args.gateway_port)).await?;
         let (shutdown, _) = tokio::sync::watch::channel(false);
         let mut servers = tokio::task::JoinSet::new();
-        let listeners = vec![
-            (listener, management.clone(), api::management(state.clone())),
-            (internal_listener, internal, api::internal(store.clone())),
-        ];
+        let mut listeners = vec![(
+            listener,
+            management.clone(),
+            if role == Role::Edge {
+                api::edge(store.clone())
+            } else {
+                api::management(state.clone())
+            },
+        )];
+        if serves(Part::NodePeer) {
+            listeners.push((
+                tokio::net::TcpListener::bind((args.host, args.internal_port)).await?,
+                internal,
+                api::internal(store.clone()),
+            ));
+        }
         // The gateway and the run channel carry bodies that last as long as
         // a response may: HTTP/2 as well, and no connection lifetime.
-        let mut streaming = vec![(gateway_listener, gateway, api::gateway(state))];
-        if args.run_channel_endpoint.is_some() {
-            // The management configuration: this certificate, no client one.
+        let mut streaming = Vec::new();
+        if serves(Part::Gateway) {
             streaming.push((
-                tokio::net::TcpListener::bind((args.host, args.run_channel_port)).await?,
-                management,
-                crate::run_channel::router(store.clone()),
+                tokio::net::TcpListener::bind((args.host, args.gateway_port)).await?,
+                gateway,
+                api::gateway(state),
             ));
+            if role == Role::Edge || args.run_channel_endpoint.is_some() {
+                // The management configuration: this certificate, no client one.
+                streaming.push((
+                    tokio::net::TcpListener::bind((args.host, args.run_channel_port)).await?,
+                    management,
+                    crate::run_channel::router(store.clone()),
+                ));
+            }
         }
         for (listener, config, router) in listeners {
             let mut stopping = shutdown.subscribe();
@@ -237,7 +305,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             },
         };
         shutdown.send_replace(true);
-        // Drain all three listeners together. An idle listener finishing must
+        // Drain every listener together. An idle listener finishing must
         // not cancel requests on another; background work stays alive until
         // the existing bounded connection deadlines finish.
         while let Some(finished) = servers.join_next().await {
@@ -250,7 +318,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         // The listeners have drained: what their last requests left in
         // memory is written before the process ends.
-        if let Err(error) = store.close_gateway().await {
+        if serves(Part::Gateway)
+            && let Err(error) = store.close_gateway().await
+        {
             eprintln!("the gateway's last flush failed: {}", error.message);
         }
         result?;
@@ -263,6 +333,36 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     drop(background);
     Ok(())
+}
+
+/// What a process serves, by `--role`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Role {
+    /// Everything, in one process.
+    All,
+    /// The management API, the scheduler and the nodes' peer.
+    Control,
+    /// The gateway and the run channel.
+    Edge,
+}
+
+/// The parts of the control plane a role serves.
+#[derive(Clone, Copy)]
+enum Part {
+    Scheduler,
+    NodePeer,
+    Gateway,
+}
+
+impl Part {
+    fn served_by(self, role: Role) -> bool {
+        matches!(
+            (self, role),
+            (_, Role::All)
+                | (Self::Scheduler | Self::NodePeer, Role::Control)
+                | (Self::Gateway, Role::Edge)
+        )
+    }
 }
 
 fn database_url(path: Option<&std::path::Path>) -> Result<String, &'static str> {

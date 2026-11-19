@@ -120,7 +120,7 @@ impl Store {
         }
         Self::metadata_limit(&mut tx, tenant, "secrets", crate::store::MAX_SECRETS).await?;
         let resource = uid();
-        let row=one(&mut tx,"INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext,bound) VALUES($1,$2,$3,$4,convert_to($5,'UTF8'),true) RETURNING id,name,created",args![resource,tenant,project,value["name"],crate::secret_binding::seal(&self.cipher,tenant,project,&resource,plain.as_bytes())]).await?;
+        let row=one(&mut tx,"INSERT INTO secrets(id,tenant_id,project_id,name,ciphertext,bound) VALUES($1,$2,$3,$4,convert_to($5,'UTF8'),true) RETURNING id,name,created",args![resource,tenant,project,value["name"],crate::secret_binding::seal(self.cipher()?,tenant,project,&resource,plain.as_bytes())]).await?;
         Self::audit(&mut tx, p, "secret.create", &resource, tenant, json!({})).await?;
         if let Some(key) = key {
             crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
@@ -158,7 +158,7 @@ impl Store {
         if let Some(row) = crate::customer_api::receipt(&mut tx, tenant, key, &request).await? {
             return Ok(row);
         }
-        let row = optional(&mut tx,"UPDATE secrets SET ciphertext=convert_to($4,'UTF8'),bound=true WHERE tenant_id=$1 AND project_id=$2 AND id=$3 RETURNING id,name,created",args![tenant,project,secret,crate::secret_binding::seal(&self.cipher,tenant,project,secret,plain.as_bytes())]).await?.ok_or_else(Error::missing)?;
+        let row = optional(&mut tx,"UPDATE secrets SET ciphertext=convert_to($4,'UTF8'),bound=true WHERE tenant_id=$1 AND project_id=$2 AND id=$3 RETURNING id,name,created",args![tenant,project,secret,crate::secret_binding::seal(self.cipher()?,tenant,project,secret,plain.as_bytes())]).await?.ok_or_else(Error::missing)?;
         Self::audit(&mut tx, p, "secret.rotate", secret, tenant, json!({})).await?;
         crate::customer_api::save_receipt(&mut tx, tenant, key, &request, &row).await?;
         tx.commit().await?;
@@ -234,7 +234,7 @@ impl Store {
         for (key, secret) in spec["secret_env"].as_object().unwrap() {
             let row=one(tx,"SELECT convert_from(ciphertext,'UTF8') token FROM secrets WHERE tenant_id=$1 AND project_id=$2 AND id=$3 AND bound",args![tenant,project,secret]).await?;
             size += crate::secret_binding::open(
-                &self.cipher,
+                self.cipher()?,
                 tenant,
                 project,
                 s(secret),
@@ -432,7 +432,11 @@ impl Store {
         self.ingress_expired(&expired);
         self.reclaim_artifact_blobs().await?;
         self.reclaim_orphan_uploads().await?;
-        self.websocket_sweep().await?;
+        // WebSocket connections are held where the gateway is: a control
+        // process holds none, and the edges sweep their own.
+        if self.serves != crate::store::Serves::Control {
+            self.websocket_sweep().await?;
+        }
         Ok(())
     }
 }

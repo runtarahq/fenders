@@ -67,6 +67,51 @@ async fn management_headers(mut response: Response) -> Response {
     }
     response
 }
+/// What an edge answers on its management port: whether it is up and can
+/// serve, for whatever watches it, and this process's status, for the
+/// operator. Nothing else: the management API is the control process's.
+pub fn edge(store: Store) -> Router {
+    Router::new()
+        .fallback(edge_dispatch)
+        .with_state(store)
+        .layer(axum::middleware::map_response(management_headers))
+}
+
+async fn edge_dispatch(State(store): State<Store>, req: Request) -> Result<Response> {
+    let (parts, _) = req.into_parts();
+    let method = match parts.method.as_str() {
+        "HEAD" => "GET",
+        method => method,
+    };
+    match (method, parts.uri.path()) {
+        ("GET", "/healthz") => Ok(Json(json!({"status":"ok"})).into_response()),
+        ("GET", "/readyz") => Ok(if store.ready().await {
+            Json(json!({"status":"ready"})).into_response()
+        } else {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"status":"unavailable"})),
+            )
+                .into_response()
+        }),
+        ("GET", "/v1/control-plane/status") => {
+            let token = parts
+                .headers
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .ok_or_else(Error::unauthorized)?;
+            let p = store.authenticate(token).await?;
+            Ok((
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(store.background_status(&p)?),
+            )
+                .into_response())
+        }
+        _ => Err(Error::missing()),
+    }
+}
+
 pub fn internal(store: Store) -> Router {
     Router::new().fallback(internal_dispatch).with_state(store)
 }

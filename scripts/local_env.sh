@@ -28,6 +28,10 @@
 # binaries: LOCAL_BIN (the directory with fenders-control-plane and
 # fenders-pki), LOCAL_BUILD (the node bundle), LOCAL_STATE (instead of
 # run/local) and LOCAL_CONTROL_ARGS (further control-plane options).
+# LOCAL_SPLIT=1 on `up` runs the control plane as two processes: one in role
+# control (management API on 19090, nodes' peer on 19091) and an edge
+# (gateway on 19092, run channel on 19093, probes and status on 19095), the
+# edge with its own state directory and only the key fenders-keys derives.
 # LOCAL_PG names the PostgreSQL container and its volume, for a second
 # environment whose database is not the first's; with it, give LOCAL_STATE
 # too, since a state directory and its database go together.
@@ -42,6 +46,7 @@ stage=/var/lib/fenders-local
 cgroup=/sys/fs/cgroup/fenders-local
 pg=${LOCAL_PG:-fenders-local-pg}
 manage_port=19090 internal_port=19091 gateway_port=19092 channel_port=19093 node_port=19094 pg_port=19099
+edge_port=19095
 manage=https://127.0.0.1:$manage_port
 
 running() { [[ -s $1 ]] && sudo kill -0 "$(cat "$1")" 2>/dev/null; }
@@ -54,6 +59,9 @@ api() { # METHOD PATH [JSON]
 
 start_control() {
   if running "$state/control.pid"; then kill "$(cat "$state/control.pid")"; sleep 1; fi
+  if running "$state/edge.pid"; then kill "$(cat "$state/edge.pid")"; sleep 1; fi
+  local role=all
+  [[ ${LOCAL_SPLIT:-0} == 1 ]] && role=control
   # What an app's connections may name. The shipped policy for a public
   # deployment (deploy/systemd/external-network-public.json) with Docker's
   # bridge range left out of what is denied.
@@ -69,12 +77,27 @@ start_control() {
     --run-channel-port $channel_port --run-channel-endpoint "https://127.0.0.1:$channel_port" \
     --ca "$state/pki/ca.pem" --cert "$state/pki/control.pem" --key "$state/pki/control.key" \
     --external-network "$state/external-network.json" --public-egress "$state/public-egress.json" \
-    ${LOCAL_CONTROL_ARGS:-} >> "$state/control.log" 2>&1 < /dev/null &
+    --role "$role" ${LOCAL_CONTROL_ARGS:-} >> "$state/control.log" 2>&1 < /dev/null &
   echo $! > "$state/control.pid"
   until [[ -s $state/control/operator.token ]] && curl -s --cacert "$state/pki/ca.pem" -o /dev/null "$manage/"; do
     running "$state/control.pid" || { tail -5 "$state/control.log" >&2; exit 1; }
     sleep 1
   done
+  if [[ $role == control ]]; then
+    # The edge's state holds what it is given of the key, and nothing else.
+    mkdir -p "$state/edge" && chmod 700 "$state/edge"
+    [[ -f $state/edge/edge.key ]] || "$bin/fenders-keys" edge --state "$state/control" --output "$state/edge/edge.key" >/dev/null
+    FENDERS_DATABASE_URL=postgresql://postgres:local@127.0.0.1:$pg_port/fenders \
+      setsid nohup "$bin/fenders-control-plane" --role edge --state "$state/edge" --host 127.0.0.1 \
+      --port $edge_port --gateway-port $gateway_port --run-channel-port $channel_port \
+      --ca "$state/pki/ca.pem" --cert "$state/pki/control.pem" --key "$state/pki/control.key" \
+      ${LOCAL_EDGE_ARGS:-} >> "$state/edge.log" 2>&1 < /dev/null &
+    echo $! > "$state/edge.pid"
+    until curl -s --cacert "$state/pki/ca.pem" -o /dev/null "https://127.0.0.1:$edge_port/healthz"; do
+      running "$state/edge.pid" || { tail -5 "$state/edge.log" >&2; exit 1; }
+      sleep 1
+    done
+  fi
   # Public HTTPS is used only under the resolver configuration the operator
   # activated: here, whichever this control plane was started with.
   local policy
@@ -87,6 +110,7 @@ start_control() {
 down() {
   if running "$state/node.pid"; then sudo kill "$(cat "$state/node.pid")" || true; fi
   if running "$state/control.pid"; then kill "$(cat "$state/control.pid")" || true; fi
+  if running "$state/edge.pid"; then kill "$(cat "$state/edge.pid")" || true; fi
   sleep 1
   if [[ -d $cgroup ]]; then
     echo 1 | sudo tee "$cgroup/cgroup.kill" >/dev/null 2>&1 || true
@@ -94,7 +118,7 @@ down() {
     sudo find "$cgroup" -depth -type d -exec rmdir {} + 2>/dev/null || true
   fi
   docker stop "$pg" >/dev/null 2>&1 || true
-  rm -f "$state/node.pid" "$state/control.pid"
+  rm -f "$state/node.pid" "$state/control.pid" "$state/edge.pid"
 }
 
 up() {
@@ -159,6 +183,7 @@ up() {
 }
 
 status() {
+  running "$state/edge.pid" && echo "edge           running  https://127.0.0.1:$edge_port  (log: $state/edge.log)"
   running "$state/control.pid" && echo "control plane  running  $manage  (log: $state/control.log)" \
     || echo "control plane  stopped"
   running "$state/node.pid" && echo "node           running  https://127.0.0.1:$node_port  (log: $state/node.log)" \

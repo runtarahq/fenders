@@ -135,3 +135,61 @@ async fn the_control_process_decides_from_what_the_edge_writes_of_its_exchange()
     assert_eq!(left, 0);
     l.finish().await;
 }
+
+/// The operator lowers a workspace's allowance below what an edge leases
+/// of it: the control process recalls the lease, the edge gives back what
+/// is unreserved at its next flush, and the lowering is made.
+#[tokio::test]
+async fn an_allowance_is_lowered_below_an_edges_lease_once_the_edge_gives_it_back() {
+    use fenders_control_plane::lease::{BLOCK, LEAST};
+    let l = Lab::new().await;
+    let edge = Store::from_pool(l.store.pool.clone(), l.root.path())
+        .unwrap()
+        .serving(Serves::Edge);
+    let node = l.node("lease-worker").await;
+    let route = l.web_app("web", "apps.test").await;
+    l.store.schedule().await.unwrap();
+    let all = l
+        .store
+        .resources(&l.operator, &l.tenant, &l.project, "executions", None)
+        .await
+        .unwrap();
+    l.report(&node, &all[0], "running", 1).await;
+    let host = s(&route["hostname"]);
+    // The edge takes a lease with its first request, and keeps a request
+    // in flight.
+    let (_, flying) = edge.ingress_start(host, 0).await.unwrap();
+    edge.flush_gateway().await.unwrap();
+    let leased = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(sum(held_bytes),0)::bigint FROM gateway_transfer_leases",
+        )
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(leased().await, LEAST);
+    // The edge flushes as it does, every 100 ms here.
+    let flushing = {
+        let edge = edge.clone();
+        tokio::spawn(async move {
+            loop {
+                edge.flush_gateway().await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+    };
+    l.store
+        .update_allowance(
+            &l.operator,
+            &l.tenant,
+            serde_json::from_value(json!({"allowance":{"cpu_percent":400,"memory_mib":4096,"instances":4,"storage_bytes":20000000000_i64,"transfer_bytes":BLOCK + 100}})).unwrap(),
+        )
+        .await
+        .unwrap();
+    flushing.abort();
+    // What the request in flight reserved is still held; nothing else.
+    assert_eq!(leased().await, BLOCK);
+    edge.ingress_finish(&flying, Some(10)).await.unwrap();
+    l.finish().await;
+}

@@ -15,6 +15,16 @@ enum Action {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Writes what an edge is given of the control plane's encryption key:
+    /// the run channel's derived key and which key it is from, not the key.
+    Edge {
+        /// The control plane's state directory, which holds the key.
+        #[arg(long)]
+        state: PathBuf,
+        /// The file to write: the edge's `STATE/edge.key`.
+        #[arg(long)]
+        output: PathBuf,
+    },
     Rotate {
         #[arg(long)]
         state: PathBuf,
@@ -41,6 +51,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Action::Generate { output } => {
             key_rotation::generate(&output)?;
             serde_json::json!({"key_file":output})
+        }
+        Action::Edge { state, output } => {
+            fenders_control_plane::store::write_edge_key(&state, &output)?
         }
         Action::Rotate {
             state,

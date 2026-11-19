@@ -23,6 +23,7 @@ pub enum Component {
     Scheduler,
     PickupListener,
     GatewayFlusher,
+    WebSocketSweep,
 }
 impl Component {
     fn name(self) -> &'static str {
@@ -30,6 +31,7 @@ impl Component {
             Self::Scheduler => "scheduler",
             Self::PickupListener => "pickup_listener",
             Self::GatewayFlusher => "gateway_flusher",
+            Self::WebSocketSweep => "websocket_sweep",
         }
     }
 }

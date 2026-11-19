@@ -332,6 +332,8 @@ impl Store {
         let period: String = sqlx::query_scalar(&format!("SELECT {PERIOD}::text"))
             .fetch_one(&mut *tx)
             .await?;
+        // Leases the operator recalled give back what is not reserved.
+        let recalled = self.answer_recalls(&mut tx).await?;
         // Taken once the lock is held: a record's times are written as how
         // long ago they were, by the database's clock.
         let mut batch = self.gateway.take();
@@ -345,11 +347,13 @@ impl Store {
             Ok(written) => written,
             Err(error) => {
                 self.gateway.restore(batch);
+                self.gateway.budgets.give_back(recalled);
                 return Err(error);
             }
         };
         if let Err(error) = tx.commit().await {
             self.gateway.restore(batch);
+            self.gateway.budgets.give_back(recalled);
             return Err(error.into());
         }
         let budgets = &self.gateway.budgets;
@@ -360,6 +364,57 @@ impl Store {
             budgets.granted(key, &period, *granted, *asked);
         }
         self.gateway.flushed();
+        Ok(())
+    }
+
+    /// Gives back what this session's recalled leases hold unreserved, in
+    /// memory and in `tx`. What was taken, to be put back if `tx` is not
+    /// committed.
+    async fn answer_recalls(&self, tx: &mut Tx) -> Result<Vec<(crate::lease::Key, String, i64)>> {
+        use crate::db::rows;
+        let mut tenants: Vec<String> = rows(tx,"UPDATE gateway_transfer_leases SET recalled=false WHERE session_id=$1 AND recalled RETURNING tenant_id",args![self.gateway.session()]).await?
+            .iter()
+            .filter_map(|row| row["tenant_id"].as_str().map(str::to_owned))
+            .collect();
+        tenants.sort();
+        tenants.dedup();
+        let withheld: Vec<_> = tenants
+            .iter()
+            .flat_map(|tenant| self.gateway.budgets.withhold(tenant))
+            .collect();
+        for (key, period, bytes) in &withheld {
+            if let Err(error) = exec(tx,"UPDATE gateway_transfer_leases SET held_bytes=GREATEST(0,held_bytes-$5),updated=clock_timestamp() WHERE session_id=$1 AND tenant_id=$2 AND project_id=$3 AND period=$4::date",args![self.gateway.session(),key.0,key.1,period,bytes]).await {
+                self.gateway.budgets.give_back(withheld);
+                return Err(error);
+            }
+        }
+        Ok(withheld)
+    }
+
+    /// Recalls the leases other processes hold of `tenant`'s transfer
+    /// allowance, and waits, up to three seconds, for them to give back
+    /// what they hold unreserved: for the operator to change the
+    /// allowance, which the leases would otherwise keep from being lowered.
+    pub(crate) async fn recall_leases(&self, tenant: &str) -> Result<()> {
+        let mut tx = self.gateway_transaction().await?;
+        let recalled = exec(&mut tx,"UPDATE gateway_transfer_leases SET recalled=true WHERE tenant_id=$1 AND session_id<>$2 AND held_bytes>0",args![tenant,self.gateway.session()]).await?;
+        tx.commit().await?;
+        if recalled == 0 {
+            return Ok(());
+        }
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < until {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM gateway_transfer_leases WHERE tenant_id=$1 AND recalled)",
+            )
+            .bind(tenant)
+            .fetch_one(&self.pool)
+            .await?;
+            if !waiting {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         Ok(())
     }
 

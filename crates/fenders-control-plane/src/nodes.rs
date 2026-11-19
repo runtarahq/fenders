@@ -564,7 +564,7 @@ impl Store {
             // and project that it names: a ciphertext moved here from
             // another row does not open.
             let plain = crate::secret_binding::open(
-                &self.cipher,
+                self.cipher()?,
                 s(&e["tenant_id"]),
                 s(&e["project_id"]),
                 s(&secret),

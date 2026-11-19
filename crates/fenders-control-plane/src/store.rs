@@ -51,7 +51,9 @@ where
 pub struct Store {
     pub pool: PgPool,
     pub(crate) state: PathBuf,
-    pub(crate) cipher: fernet::Fernet,
+    /// The master encryption key's cipher: tenants' secrets. An edge has
+    /// none ([`Store::edge_from_pool`]).
+    cipher: Option<fernet::Fernet>,
     /// For run-channel credentials alone, under a key of its own: nothing
     /// encrypted with `cipher`, a tenant's secret among it, is one.
     pub(crate) channel_cipher: fernet::Fernet,
@@ -207,6 +209,12 @@ pub(crate) const MAX_CREDENTIALS: i64 = 1024;
 /// `key`: what it encrypts is nothing to the encryption key's own cipher or
 /// to another purpose's, and the reverse.
 pub(crate) fn purpose_cipher(key: &str, purpose: &str) -> Result<fernet::Fernet> {
+    fernet::Fernet::new(&purpose_key(key, purpose)?)
+        .ok_or_else(|| Error::invalid("invalid encryption key"))
+}
+
+/// The key derived from the encryption key `key` for one `purpose`.
+fn purpose_key(key: &str, purpose: &str) -> Result<String> {
     use base64::Engine;
     let invalid = || Error::invalid("invalid encryption key");
     let engine = base64::engine::general_purpose::URL_SAFE;
@@ -215,9 +223,23 @@ pub(crate) fn purpose_cipher(key: &str, purpose: &str) -> Result<fernet::Fernet>
     hkdf::Hkdf::<sha2::Sha256>::new(Some(b"fenders-purpose-key-v1"), &secret)
         .expand(purpose.as_bytes(), &mut derived)
         .map_err(|_| invalid())?;
-    let cipher = fernet::Fernet::new(&engine.encode(derived)).ok_or_else(invalid);
+    let key = engine.encode(derived);
     derived.fill(0);
-    cipher
+    Ok(key)
+}
+
+/// What an edge is given of the control plane's encryption key: the key
+/// of the run channel's credentials, derived from it, and which key that
+/// is, for the database to be known as the one it is for. Not the key: an
+/// edge serves no tenant's secret.
+pub fn write_edge_key(control_state: &Path, output: &Path) -> Result<Value> {
+    let key = crate::key_rotation::read_key(&control_state.join("encryption.key"))?;
+    let edge = json!({
+        "key_id": digest(&key),
+        "run_channel_key": purpose_key(&key, crate::run_channel::PURPOSE)?,
+    });
+    private_file(output, edge.to_string().as_bytes())?;
+    Ok(json!({"edge_key_file": output, "key_id": edge["key_id"]}))
 }
 
 impl Store {
@@ -244,12 +266,59 @@ impl Store {
         let key = crate::key_rotation::read_key(&key)?;
         let cipher =
             fernet::Fernet::new(&key).ok_or_else(|| Error::invalid("invalid encryption key"))?;
+        Self::assemble(
+            pool,
+            state,
+            Some(cipher),
+            purpose_cipher(&key, crate::run_channel::PURPOSE)?,
+            digest(&key),
+        )
+    }
+    /// A store for an edge: no master key, only what `fenders-keys edge`
+    /// derived of it (`STATE/edge.key`). It serves the gateway and the run
+    /// channel, and refuses what needs a tenant's secret.
+    pub fn edge_from_pool(pool: PgPool, state: &Path) -> Result<Self> {
+        private_directory(state)?;
+        let file = state.join("edge.key");
+        if fs::symlink_metadata(&file)?.permissions().mode() & 0o077 != 0 {
+            return Err(Error::invalid(
+                "edge key file must not be readable by others",
+            ));
+        }
+        let edge: Value = serde_json::from_slice(&fs::read(&file)?)
+            .map_err(|_| Error::invalid("invalid edge key file"))?;
+        let (Some(key_id), Some(channel)) =
+            (edge["key_id"].as_str(), edge["run_channel_key"].as_str())
+        else {
+            return Err(Error::invalid("invalid edge key file"));
+        };
+        let channel =
+            fernet::Fernet::new(channel).ok_or_else(|| Error::invalid("invalid edge key file"))?;
+        Self::assemble(pool, state, None, channel, key_id.to_owned())
+            .map(|store| store.serving(Serves::Edge))
+    }
+    pub async fn connect_edge(dsn: &str, state: &Path) -> Result<Self> {
+        crate::db::database_url(dsn)?;
+        let pool = PgPoolOptions::new()
+            .max_connections(16)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(dsn)
+            .await?;
+        Self::edge_from_pool(pool, state)
+    }
+    fn assemble(
+        pool: PgPool,
+        state: &Path,
+        cipher: Option<fernet::Fernet>,
+        channel_cipher: fernet::Fernet,
+        encryption_key_id: String,
+    ) -> Result<Self> {
         Ok(Self {
             pool,
             state: state.canonicalize()?,
             cipher,
-            channel_cipher: purpose_cipher(&key, crate::run_channel::PURPOSE)?,
-            encryption_key_id: digest(&key),
+            channel_cipher,
+            encryption_key_id,
             public_egress: None,
             external_network: None,
             orphan_upload_scan: Default::default(),
@@ -312,6 +381,21 @@ impl Store {
             .fetch_one(&mut *tx)
             .await
             .unwrap_or(false)
+    }
+    /// The master key's cipher, which an edge does not have.
+    pub(crate) fn cipher(&self) -> Result<&fernet::Fernet> {
+        self.cipher.as_ref().ok_or_else(|| {
+            Error::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this process holds no encryption key: ask the control plane",
+            )
+        })
+    }
+    /// Whether the database's schema is the one this binary was built for,
+    /// for a process that does not migrate it: an edge.
+    pub async fn check_schema(&self) -> Result<()> {
+        let mut tx = self.transaction(false, false).await?;
+        crate::schema_migrations::verify(&mut tx).await
     }
     pub fn serving(mut self, serves: Serves) -> Self {
         self.serves = serves;
@@ -416,14 +500,14 @@ impl Store {
         }
         crate::schema_migrations::apply(&mut tx).await?;
         // Secrets stored before their ciphertexts named their rows.
-        crate::secret_binding::bind_stored(&mut tx, &self.cipher).await?;
+        crate::secret_binding::bind_stored(&mut tx, self.cipher()?).await?;
         let unbound: bool = sqlx::query_scalar(
             "SELECT encryption_key_id IS NULL FROM recovery_barrier WHERE singleton",
         )
         .fetch_one(&mut *tx)
         .await?;
         if unbound {
-            crate::key_rotation::validate_or_reencrypt(&mut tx, &self.cipher, None).await?;
+            crate::key_rotation::validate_or_reencrypt(&mut tx, self.cipher()?, None).await?;
         }
         sqlx::query("UPDATE recovery_barrier SET encryption_key_id=$1 WHERE singleton AND encryption_key_id IS NULL")
             .bind(&self.encryption_key_id).execute(&mut *tx).await?;
@@ -678,6 +762,11 @@ impl Store {
             && !matches!(size.as_str(), "small" | "medium" | "large")
         {
             return Err(Error::invalid("default app size is small, medium or large"));
+        }
+        // What another process leases of the allowance is recalled first:
+        // a lease must not keep it from being lowered.
+        if value.allowance.is_some() {
+            self.recall_leases(tenant).await?;
         }
         let mut request = json!({"kind":"tenant.update","tenant":tenant,"allowance":value.allowance,"default_app_size":value.default_app_size});
         // Named only when given, so that a retry made before this could be
