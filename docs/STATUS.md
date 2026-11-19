@@ -243,6 +243,17 @@ a workspace.
   connection limits (1000 an app, 4000 a tenant), are constants.
 - Scale-out reacts in seconds and by one execution at a time; a burst beyond
   the queue (64 requests an app) is answered 503.
+- An app's executions that have handled no request for 5 seconds give way
+  to work of the same workspace waiting for room: an app waking, or a run or
+  an app not placed because the nodes it fits on are full ([eviction](../crates/fenders-control-plane/src/eviction.rs)).
+  The longest idle go first, and no more of them than the room needed; an
+  app stopped so (`evicted`) wakes on its next request, about 0.3 seconds
+  on one machine. `keep_warm` keeps an app warm only while nothing of its
+  workspace needs the room. An extra execution gives way down to what
+  `scale.min` keeps; an app scaling out evicts nothing, and nothing of
+  another workspace is ever stopped. A command run refused by the
+  allowance (429) evicts nothing: it is not waited for. Idleness is read
+  from the gateway's flush, up to a second old.
 - The rate limit, and a workspace's requests in flight and WebSocket
   connections, are counted in memory, each process against its share of the
   workspace's limits (`edge_limit_shares`): a restart forgets the last minute,

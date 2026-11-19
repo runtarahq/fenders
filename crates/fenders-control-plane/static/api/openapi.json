@@ -4891,7 +4891,8 @@
             }
           },
           "keep_warm": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether the app keeps its execution while it has no request (true unless said). One that does not is stopped after 60 seconds without a request and wakes on its next one. Either way, an app whose executions have handled no request for 5 seconds is stopped (reason `evicted`) when another app or a run of its workspace waits for room in the workspace's allowance or on a worker, and wakes on its next request."
           },
           "concurrency": {
             "type": "integer",
