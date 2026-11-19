@@ -3,6 +3,10 @@
   "info": {
     "title": "Fenders management API",
     "version": "0.1.0",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
     "description": "The workspace API, which a workspace's key is given, and the operator's routes, which no key is. Deployment/start never invokes a command. Same-key retries return the original operation; command outcomes are observed separately. A key is issued, listed and revoked with the operator credential (/workspaces/{workspace}/api-keys), never with a key; it may carry a label, which GET /me returns and the audit trail records. A change that answers with an operation is 202 while the operation is pending and 200 or 201 once it is not; nothing else is ever 202. HEAD is answered wherever GET is. A route asked with a method it does not take is 405 with Allow. Every list answers {items, next}, newest first, and takes limit (1 to 100) and before; a run's output alone is read forwards, with after. A change names the revision it was decided on as expected_revision, and is 409 revision_conflict if the thing has changed since: an app's revision for the app, its versions, releases, connections and deletion; the triggers' own for the triggers; a workspace's lifecycle_revision and allowance_revision for the operator's changes to it."
   },
   "servers": [
