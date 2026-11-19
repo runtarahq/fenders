@@ -53,9 +53,17 @@ where
     .map_err(|_| Error::internal())
 }
 
+/// Transactions of a process that wait for the mutation lock at once, of
+/// its pool's 16 connections.
+pub const LOCK_WAITERS: usize = 4;
+
 #[derive(Clone)]
 pub struct Store {
     pub pool: PgPool,
+    /// Transactions of this process waiting for the mutation lock, at most
+    /// [`LOCK_WAITERS`] at once: each waits on one of the pool's
+    /// connections, and those left are for the work that takes no lock.
+    lock_waiters: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) state: PathBuf,
     /// The master encryption key's cipher: tenants' secrets. An edge has
     /// none ([`Store::edge_from_pool`]).
@@ -331,6 +339,7 @@ impl Store {
     ) -> Result<Self> {
         Ok(Self {
             pool,
+            lock_waiters: std::sync::Arc::new(tokio::sync::Semaphore::new(LOCK_WAITERS)),
             state: state.canonicalize()?,
             cipher,
             channel_cipher,
@@ -537,6 +546,21 @@ impl Store {
         snapshot: bool,
         changes_gates: bool,
     ) -> Result<Tx> {
+        // A transaction that is to wait for the lock waits first, without a
+        // connection, for its turn to: a burst of them would otherwise hold
+        // every connection while they wait, and a read that takes no lock
+        // would wait for one long enough to take the database for gone.
+        let turn = if mutate {
+            Some(
+                self.lock_waiters
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| Error::internal())?,
+            )
+        } else {
+            None
+        };
         let mut tx = self.pool.begin().await?;
         if snapshot {
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -555,6 +579,7 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
             self.load.locked(asked.elapsed());
+            drop(turn);
             if changes_gates {
                 self.gateway.gates.changed();
             }
