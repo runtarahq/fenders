@@ -6084,7 +6084,7 @@
           },
           "gateway": {
             "type": "object",
-            "description": "Requests for HTTP apps the gateway admitted and refused; of those, the ones that took the cold path, admission in a transaction under the lock all changes share, as a request to an app that is not serving does; and the request records it dropped because the database did not take them in time.",
+            "description": "Requests for HTTP apps the gateway admitted and refused; of those, the ones that took the cold path, admission in a transaction under the lock all changes share, as a request to an app that is not serving does; and the request records it dropped because the database did not take them in time. in_flight is the requests it has in flight now.",
             "properties": {
               "admitted": {
                 "type": "integer"
@@ -6097,13 +6097,17 @@
               },
               "cold": {
                 "type": "integer"
+              },
+              "in_flight": {
+                "type": "integer"
               }
             },
             "required": [
               "admitted",
               "refused",
               "records_dropped",
-              "cold"
+              "cold",
+              "in_flight"
             ]
           }
         },
@@ -6768,6 +6772,10 @@
               "gateway_conservative_bytes": {
                 "type": "integer",
                 "description": "Of bytes, what was charged for the lease of a gateway that stopped without saying what it had passed."
+              },
+              "gateway_leased_bytes": {
+                "type": "integer",
+                "description": "Of reserved_bytes, what gateways hold as leases of the allowance: passed to no one yet, and given back when the workspace has had no traffic for 30 seconds or its allowance is changed."
               }
             }
           }

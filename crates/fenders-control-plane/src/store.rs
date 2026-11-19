@@ -284,6 +284,7 @@ impl Store {
         {
             status.extend(load);
             status["gateway"]["records_dropped"] = json!(self.gateway.dropped());
+            status["gateway"]["in_flight"] = json!(self.gateway.gates.in_flight_total());
         }
         Ok(status)
     }

@@ -38,7 +38,7 @@ impl Store {
             "storage_bytes":totals["storage_bytes"],"artifact_bytes":totals["artifact_bytes"],"cpu_usec":totals["cpu_usec"],
             "paused_memory_is_reserved":true,
             "ingress_month":{"bytes":totals["ingress_bytes"],"requests":totals["ingress_requests"]},
-            "transfer_allowance":{"period_basis":"UTC admission month","bytes":totals["transfer_accounted_bytes"],"reserved_bytes":totals["transfer_reserved_bytes"],"outbound_conservative_bytes":totals["outbound_conservative_bytes"],"gateway_conservative_bytes":totals["gateway_conservative_bytes"],"outbound_fleet_enforcement":false}
+            "transfer_allowance":{"period_basis":"UTC admission month","bytes":totals["transfer_accounted_bytes"],"reserved_bytes":totals["transfer_reserved_bytes"],"outbound_conservative_bytes":totals["outbound_conservative_bytes"],"gateway_conservative_bytes":totals["gateway_conservative_bytes"],"gateway_leased_bytes":totals["gateway_leased_bytes"],"outbound_fleet_enforcement":false}
         }))
     }
 }
@@ -72,6 +72,7 @@ fn aggregate(projects: &[Value]) -> Result<Value> {
         "transfer_reserved_bytes",
         "outbound_conservative_bytes",
         "gateway_conservative_bytes",
+        "gateway_leased_bytes",
         "executions",
         "measured_executions",
         "memory_expected",

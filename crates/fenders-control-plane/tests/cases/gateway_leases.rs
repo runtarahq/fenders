@@ -60,6 +60,10 @@ async fn a_lease_is_taken_with_the_first_request_and_given_back_when_idle() {
     let usage = l.store.usage(&l.operator, &l.tenant, None).await.unwrap();
     assert_eq!(usage["transfer_allowance"]["bytes"], 1000);
     assert_eq!(usage["transfer_allowance"]["reserved_bytes"], LEAST - 1000);
+    assert_eq!(
+        usage["transfer_allowance"]["gateway_leased_bytes"],
+        LEAST - 1000
+    );
     // No request for a while: the lease is given back whole, and the flush
     // after that has forgotten the project.
     l.store.gateway.budgets.rewind(IDLE);
@@ -85,6 +89,8 @@ async fn a_gateway_that_stops_gives_every_lease_back_and_forgets_its_session() {
     };
     assert_eq!(sessions().await, 1);
     assert_eq!(written(&l).await, (LEAST - 40, 40, 1));
+    let status = l.store.background_status(&l.operator).unwrap();
+    assert_eq!(status["gateway"]["in_flight"], 0);
     l.store.close_gateway().await.unwrap();
     assert_eq!(written(&l).await, (0, 40, 1));
     assert_eq!(sessions().await, 0);

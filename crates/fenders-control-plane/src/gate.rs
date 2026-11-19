@@ -287,6 +287,11 @@ impl Gates {
         self.lock().apps.get(app).map_or(0, |app| app.bound)
     }
 
+    /// Every request in flight.
+    pub fn in_flight_total(&self) -> usize {
+        self.lock().flights.len()
+    }
+
     /// The workspace's requests in flight.
     pub fn in_flight_of(&self, tenant: &str) -> usize {
         self.lock().tenants.get(tenant).copied().unwrap_or(0)
