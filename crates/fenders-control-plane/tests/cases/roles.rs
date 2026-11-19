@@ -816,3 +816,74 @@ async fn a_cold_request_waits_for_a_share_the_workspace_has_room_for() {
     a.ingress_finish(&held, Some(0)).await.unwrap();
     l.finish().await;
 }
+
+/// Apps given to one edge while the other was away go back, the idle
+/// ones, some at a time; and an edge that closes, as one restarting does,
+/// keeps its apps for as long as a silent one would be believed.
+#[tokio::test]
+async fn idle_apps_go_back_to_an_edge_and_one_restarting_keeps_its_apps() {
+    let l = Lab::new().await;
+    let register = |name: &'static str, pin: char| {
+        let (store, operator) = (l.store.clone(), l.operator.clone());
+        async move {
+            store
+                .register_edge_keyed(
+                    &operator,
+                    json!({"name":name,"cert_sha256":pin.to_string().repeat(64),"endpoint":format!("https://{name}.internal:9444")}),
+                    None,
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let (first, second) = (register("edge-a", 'a').await, register("edge-b", 'b').await);
+    let edge = |row: &Value| {
+        Store::from_pool(l.store.pool.clone(), l.root.path())
+            .unwrap()
+            .serving(Serves::Edge)
+            .as_edge(s(&row["id"]).to_owned())
+    };
+    let (a, b) = (edge(&first), edge(&second));
+    for name in ["one", "two", "three", "four"] {
+        l.web_app(name, "apps.test").await;
+    }
+    let owned = |edge: &Value| {
+        let id = s(&edge["id"]).to_owned();
+        let pool = l.store.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM app_edges WHERE edge_id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    // Only the first is heard from: it is given every app.
+    a.flush_gateway().await.unwrap();
+    l.store.schedule().await.unwrap();
+    assert_eq!(owned(&first).await, 4);
+    // The second comes. Apps that serve or start stay where they are;
+    // idle ones go to it until the two are even.
+    b.flush_gateway().await.unwrap();
+    l.store.schedule().await.unwrap();
+    assert_eq!(owned(&second).await, 0, "none is idle yet");
+    sqlx::query("UPDATE app_http SET state='idle',execution_id=NULL")
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    l.store.schedule().await.unwrap();
+    assert_eq!((owned(&first).await, owned(&second).await), (2, 2));
+    // The second closes, as it does to restart: its apps stay its own.
+    b.close_gateway().await.unwrap();
+    l.store.schedule().await.unwrap();
+    assert_eq!(owned(&second).await, 2);
+    // Silent past what a session is believed for, it is taken for gone.
+    sqlx::query("UPDATE edges SET seen=now()-interval '16 seconds' WHERE id=$1")
+        .bind(s(&second["id"]))
+        .execute(&l.store.pool)
+        .await
+        .unwrap();
+    l.store.schedule().await.unwrap();
+    assert_eq!((owned(&first).await, owned(&second).await), (4, 0));
+    l.finish().await;
+}

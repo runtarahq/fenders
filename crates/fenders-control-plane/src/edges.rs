@@ -21,6 +21,9 @@ use crate::{
 };
 use serde_json::{Value, json};
 
+/// How many idle apps a scheduler pass moves between edges at most.
+const REBALANCE_PER_PASS: i64 = 64;
+
 pub(crate) const MIGRATION: &str = "CREATE TABLE IF NOT EXISTS edges (
     id text PRIMARY KEY CHECK(id ~ '^[a-f0-9]{32}$'),
     name text NOT NULL, cert_sha256 text NOT NULL, endpoint text NOT NULL,
@@ -255,7 +258,7 @@ impl Store {
     /// the fewest. Nothing, while no registered edge is live.
     pub(crate) async fn place_apps(tx: &mut Tx) -> Result<()> {
         let live = rows(tx,&format!("SELECT e.id,(SELECT count(*) FROM app_edges a WHERE a.edge_id=e.id) AS apps FROM edges e
-            WHERE NOT e.deleted AND NOT e.draining AND EXISTS(SELECT 1 FROM gateway_sessions g WHERE g.edge_id=e.id AND g.seen>clock_timestamp()-interval '{}')
+            WHERE NOT e.deleted AND NOT e.draining AND (e.seen>clock_timestamp()-interval '{0}' OR EXISTS(SELECT 1 FROM gateway_sessions g WHERE g.edge_id=e.id AND g.seen>clock_timestamp()-interval '{0}'))
             ORDER BY e.id",crate::gateway::SESSION_DEAD),args![]).await?;
         if live.is_empty() {
             return Ok(());
@@ -274,6 +277,39 @@ impl Store {
                 .expect("a live edge");
             exec(tx,"INSERT INTO app_edges(app_id,edge_id) VALUES($1,$2) ON CONFLICT(app_id) DO UPDATE SET edge_id=excluded.edge_id,revision=app_edges.revision+1,updated=clock_timestamp()",args![app["app_id"],edge]).await?;
             *apps += 1;
+        }
+        // Apps placed while an edge was away stay where they went: idle
+        // ones, which hold nothing on their edge, move back toward the
+        // edge with the fewest, some at a time.
+        let mut moves = REBALANCE_PER_PASS;
+        while moves > 0 {
+            let most = load
+                .iter()
+                .max_by_key(|(id, apps)| (*apps, std::cmp::Reverse(id.clone())))
+                .cloned()
+                .expect("a live edge");
+            let least = load
+                .iter()
+                .min_by_key(|(id, apps)| (*apps, id.clone()))
+                .cloned()
+                .expect("a live edge");
+            let wanted = ((most.1 - least.1) / 2).min(moves);
+            if wanted < 1 {
+                break;
+            }
+            let moved = exec(tx,"UPDATE app_edges SET edge_id=$2,revision=revision+1,updated=clock_timestamp() WHERE app_id IN (SELECT x.app_id FROM app_edges x JOIN app_http h ON h.app_id=x.app_id WHERE x.edge_id=$1 AND h.state='idle' AND NOT h.idle_draining AND NOT EXISTS(SELECT 1 FROM ingress_reservations q WHERE q.app_id=x.app_id) ORDER BY x.app_id LIMIT $3)",args![most.0,least.0,wanted]).await? as i64;
+            if moved < 1 {
+                break;
+            }
+            for (id, apps) in load.iter_mut() {
+                if *id == most.0 {
+                    *apps -= moved;
+                }
+                if *id == least.0 {
+                    *apps += moved;
+                }
+            }
+            moves -= moved;
         }
         // An app that has no HTTP trigger any more, or is gone, is no one's.
         exec(tx,"DELETE FROM app_edges x WHERE NOT EXISTS(SELECT 1 FROM app_http h JOIN apps a ON a.id=h.app_id JOIN app_triggers t ON t.app_id=a.id WHERE h.app_id=x.app_id AND t.http AND a.desired='enabled')",args![]).await?;

@@ -453,6 +453,16 @@ impl Store {
 
     async fn write_gateway(&self, tx: &mut Tx, batch: &Batch, closing: bool) -> Result<Written> {
         let session = self.gateway.session();
+        // The edge is heard from, closing or not: one that restarts is not
+        // taken for gone, nor its apps given to another.
+        if self.gateway.edge.is_some() {
+            exec(
+                tx,
+                "UPDATE edges SET seen=clock_timestamp() WHERE id=$1",
+                args![self.gateway.edge],
+            )
+            .await?;
+        }
         if closing {
             exec(
                 tx,
