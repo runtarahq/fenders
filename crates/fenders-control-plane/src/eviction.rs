@@ -183,12 +183,14 @@ impl Store {
             }
         };
         let mut found = Vec::new();
-        for binding in rows(tx,"SELECT h.*,a.tenant_id,a.configuration,(extract(epoch FROM now()-h.last_activity)*1000)::bigint AS quiet_ms FROM app_http h JOIN apps a ON a.id=h.app_id WHERE a.tenant_id=$1 AND h.state='serving' AND h.candidate_until IS NULL AND NOT h.blocked AND NOT h.idle_draining AND h.execution_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM ingress_reservations q WHERE q.app_id=h.app_id OR q.execution_id IN (SELECT id FROM executions e WHERE e.deployment_id=h.deployment_id)) ORDER BY h.last_activity,h.app_id",args![tenant]).await? {
+        // One query for the workspace: each app that serves, with its
+        // executions.
+        for binding in rows(tx,"SELECT h.*,a.tenant_id,a.configuration,(extract(epoch FROM now()-h.last_activity)*1000)::bigint AS quiet_ms,(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',e.id,'node_id',e.node_id,'cpu_percent',e.cpu_percent,'memory_mib',e.memory_mib,'state',e.state,'is_primary',e.id=h.execution_id) ORDER BY e.created,e.id),'[]'::jsonb) FROM executions e WHERE e.deployment_id=h.deployment_id AND e.reserved AND e.desired='running') AS executions FROM app_http h JOIN apps a ON a.id=h.app_id WHERE a.tenant_id=$1 AND h.state='serving' AND h.candidate_until IS NULL AND NOT h.blocked AND NOT h.idle_draining AND h.execution_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM ingress_reservations q WHERE q.app_id=h.app_id OR q.execution_id IN (SELECT id FROM executions e WHERE e.deployment_id=h.deployment_id)) ORDER BY h.last_activity,h.app_id",args![tenant]).await? {
             let app = s(&binding["app_id"]).to_owned();
             if self.gateway.gates.serving(&app) > 0 {
                 continue;
             }
-            let executions = rows(tx,"SELECT id,node_id,cpu_percent,memory_mib,state,id=$2 AS is_primary FROM executions WHERE deployment_id=$1 AND reserved AND desired='running' ORDER BY created,id",args![binding["deployment_id"],binding["execution_id"]]).await?;
+            let executions = binding["executions"].as_array().cloned().unwrap_or_default();
             let idle: Vec<_> = executions
                 .iter()
                 .filter(|e| e["state"] == "running")

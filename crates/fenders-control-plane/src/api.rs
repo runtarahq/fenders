@@ -1639,13 +1639,20 @@ fn gateway_host(parts: &axum::http::request::Parts, domain: &str) -> Result<Stri
     Ok(host.to_owned())
 }
 
+/// Gateway requests a process has in flight at once; more are refused
+/// with 503.
+pub const GATEWAY_REQUESTS: usize = 4096;
+
 async fn gateway_dispatch_tracked(
     State(state): State<ApiState>,
     req: Request,
     dispatched: &mut bool,
 ) -> Result<Response> {
     use crate::db::s;
-    static REQUESTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(128);
+    // Requests in flight at once in this process. One waiting for its app
+    // to start holds its body unread, in its connection: thousands may
+    // wait together, as many do when traffic comes to idle apps.
+    static REQUESTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(GATEWAY_REQUESTS);
     let permit = REQUESTS.try_acquire().map_err(|_| {
         Error::new(
             StatusCode::SERVICE_UNAVAILABLE,

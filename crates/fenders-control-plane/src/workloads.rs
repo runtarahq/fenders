@@ -431,6 +431,9 @@ impl Store {
         exec(&mut tx,"UPDATE executions SET state='unreachable',updated=now() WHERE reserved AND node_id IN (SELECT id FROM nodes WHERE last_seen<now()-interval '15 seconds') AND state IN ('starting','running','paused')",args![]).await?;
         self.reconcile_app_http(&mut tx).await?;
         let mut seen = None;
+        // Workspaces whose idle executions could make no room this pass:
+        // not searched again for their next execution.
+        let mut fruitless = std::collections::HashSet::new();
         for e in rows(&mut tx,"SELECT * FROM executions WHERE node_id IS NULL AND desired='running' AND reserved AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=executions.tenant_id AND t.lifecycle_state='active') ORDER BY created,id",args![]).await? {
             let public = !Self::https_connections(&mut tx,s(&e["id"])).await?.is_empty();
             if public && self.current_https_policy(&mut tx).await.is_err() {
@@ -458,9 +461,11 @@ impl Store {
                 // Nodes it fits on are full: the workspace's idle
                 // executions on one give way ([`crate::eviction`]), unless
                 // it is an app scaling out.
-                if reason==crate::placement::Rejection::Capacity && optional(&mut tx,"SELECT 1 AS extra FROM app_http_extras WHERE execution_id=$1",args![e["id"]]).await?.is_none() {
+                if reason==crate::placement::Rejection::Capacity && !fruitless.contains(s(&e["tenant_id"])) && optional(&mut tx,"SELECT 1 AS extra FROM app_http_extras WHERE execution_id=$1",args![e["id"]]).await?.is_none() {
                     if seen.is_none() {seen=Some(self.observed(&mut tx).await?);}
-                    self.make_room_on_nodes(&mut tx,&e,&full,seen.as_ref().unwrap()).await?;
+                    if !self.make_room_on_nodes(&mut tx,&e,&full,seen.as_ref().unwrap()).await? {
+                        fruitless.insert(s(&e["tenant_id"]).to_owned());
+                    }
                 }
             }
         }
