@@ -208,6 +208,42 @@ impl Forwarder {
     }
 }
 
+/// A body passed on without its empty data frames. A body relayed as it
+/// comes may yield them (a chunk that turned out to hold nothing), and an
+/// HTTP/2 peer takes many of them for abuse: it ends the connection, and
+/// every request on it, with GOAWAY ENHANCE_YOUR_CALM.
+struct Solid<B>(B);
+
+impl<B> http_body::Body for Solid<B>
+where
+    B: http_body::Body<Data = axum::body::Bytes> + Unpin,
+{
+    type Data = axum::body::Bytes;
+    type Error = B::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<std::result::Result<http_body::Frame<Self::Data>, Self::Error>>>
+    {
+        loop {
+            match std::pin::Pin::new(&mut self.0).poll_frame(context) {
+                std::task::Poll::Ready(Some(Ok(frame)))
+                    if frame.data_ref().is_some_and(|data| data.is_empty()) => {}
+                polled => return polled,
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.0.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.0.size_hint()
+    }
+}
+
 /// The hop-by-hop headers a request or an answer loses when it is passed on.
 const HOP: &[header::HeaderName] = &[
     header::CONNECTION,
@@ -282,27 +318,39 @@ impl crate::store::Store {
         parts
             .headers
             .insert(FORWARDED, HeaderValue::from_static(listener.name()));
-        let sender = forwarder.sender(edge, &peer).await;
-        let mut sender = match sender {
-            Ok(sender) => sender,
-            Err(error) => return Err(error),
+        // A request the connection never sent (it was closing, or had
+        // closed) is sent again on a new one; one that went out is not:
+        // nothing is replayed.
+        let mut request = Request::from_parts(parts, Body::new(Solid(body)));
+        let mut tries = 0;
+        let answer = loop {
+            tries += 1;
+            let mut sender = forwarder.sender(edge, &peer).await?;
+            match sender.try_send_request(request).await {
+                Ok(answer) => break answer,
+                Err(mut failed) => {
+                    forwarder
+                        .connections
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(edge);
+                    match failed.take_message() {
+                        Some(unsent) if tries < 3 => request = unsent,
+                        _ => {
+                            return Err(Error::new(
+                                StatusCode::BAD_GATEWAY,
+                                "the app's edge did not answer",
+                            ));
+                        }
+                    }
+                }
+            }
         };
-        let answer = sender
-            .send_request(Request::from_parts(parts, body))
-            .await
-            .map_err(|_| {
-                forwarder
-                    .connections
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(edge);
-                Error::new(StatusCode::BAD_GATEWAY, "the app's edge did not answer")
-            })?;
         let (mut parts, body) = answer.into_parts();
         for name in HOP {
             parts.headers.remove(name);
         }
-        Ok(Response::from_parts(parts, Body::new(body)))
+        Ok(Response::from_parts(parts, Body::new(Solid(body))))
     }
 
     /// Passes a WebSocket connection's opening request over an HTTP/1.1
@@ -390,7 +438,12 @@ pub fn router(state: crate::api::ApiState) -> axum::Router {
                 .and_then(Listener::of);
             let mut request = request;
             request.extensions_mut().insert(Forwarded);
-            match listener {
+            // What goes back holds no empty data frame: the passing edge's
+            // HTTP/2 would end the connection, and everything on it, for
+            // a hundred of them.
+            let solid =
+                |response: axum::response::Response| response.map(|body| Body::new(Solid(body)));
+            solid(match listener {
                 Some(Listener::Gateway) => crate::api::gateway_dispatch(State(state), request)
                     .await
                     .into_response(),
@@ -398,7 +451,28 @@ pub fn router(state: crate::api::ApiState) -> axum::Router {
                     .await
                     .into_response(),
                 None => Error::missing().into_response(),
-            }
+            })
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn a_body_passed_on_has_no_empty_data_frame() {
+        let (tx, body) = crate::http_exchange::pipe();
+        for chunk in ["", "a", "", "", "bc", ""] {
+            tx.send(Ok(axum::body::Bytes::from(chunk))).await.unwrap();
+        }
+        drop(tx);
+        let mut solid = Solid(body);
+        let mut frames = Vec::new();
+        while let Some(frame) = solid.frame().await {
+            frames.push(frame.unwrap().into_data().unwrap());
+        }
+        assert_eq!(frames, vec!["a", "bc"]);
+    }
 }
