@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/fenders-control-plane", "crates/fenders-node-protocol", "crates/fenders-node", "crates/fenders-shim", "crates/fenders-component", "crates/fenders-service-trust", "crates/fenders-egress", "crates/fenders-runtime-limits"]
-exclude = ["runtime/guest", "runtime/vendor/wasmtime-wasi-http", "runtime/vendor/sqlx-sqlite-unused", "runtime/vendor/sqlx-mysql-unused", "examples/service-client", "examples/runtime-fixtures", "examples/demo-components"]
+members = ["crates/fenders-control-plane", "crates/fenders-node-protocol", "crates/fenders-node", "crates/fenders-shim", "crates/fenders-component", "crates/fenders-service-trust", "crates/fenders-egress", "crates/fenders-guest-http", "crates/fenders-runtime-limits"]
+exclude = ["runtime/guest", "runtime/vendor/sqlx-sqlite-unused", "runtime/vendor/sqlx-mysql-unused", "examples/service-client", "examples/runtime-fixtures", "examples/demo-components"]
 
 [workspace.package]
 edition = "2024"

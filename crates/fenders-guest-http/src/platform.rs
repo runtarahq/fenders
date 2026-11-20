@@ -1,7 +1,7 @@
-//! Guest embedding configuration. Protocol, streaming and verification stay upstream.
-use crate::Error as ErrorCode;
+//! Where a guest's request may connect, and which roots it trusts there.
 use fenders_egress::{Origin, PublicTargets};
 use std::{net::SocketAddrV4, time::Duration};
+use wasmtime_wasi_http::Error as ErrorCode;
 
 pub(crate) const CONNECT_LIMIT: Duration = Duration::from_secs(5);
 pub(crate) const RESPONSE_WAIT_LIMIT: Duration = Duration::from_secs(10);

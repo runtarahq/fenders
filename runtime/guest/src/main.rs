@@ -43,7 +43,7 @@ impl WasiHttpHooks for HttpPolicy {
         }
         Box::new(async move {
             use http_body_util::BodyExt;
-            let (response,io)=wasmtime_wasi_http::default_send_request(request,options).await?;
+            let (response,io)=fenders_guest_http::send_request(request,options).await?;
             Ok((response.map(BodyExt::boxed_unsync),Box::new(io) as SendIo))
         })
     }
