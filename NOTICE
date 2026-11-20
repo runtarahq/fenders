@@ -3,9 +3,9 @@ Copyright 2026 SyncMyOrders Sp. z o.o.
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
-It includes a modified copy of the `wasmtime-wasi-http` crate, version 50.0.0,
-from the Wasmtime project of the Bytecode Alliance, in
-runtime/vendor/wasmtime-wasi-http. That crate is licensed under the Apache
+It includes a modified copy of one function of the `wasmtime-wasi-http` crate,
+version 50.0.3, from the Wasmtime project of the Bytecode Alliance, in
+crates/fenders-guest-http/src/send.rs. That crate is licensed under the Apache
 License, Version 2.0 with LLVM Exceptions; its licence is in
-runtime/vendor/wasmtime-wasi-http/LICENSE and the changes made to it are
-described in runtime/vendor/wasmtime-wasi-http/FENDERS-PORT.md.
+crates/fenders-guest-http/LICENSE-wasmtime and the changes made to it are
+described in crates/fenders-guest-http/src/lib.rs.

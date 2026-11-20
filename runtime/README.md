@@ -9,8 +9,9 @@ execute **inside the VM**. There is no Linux guest, initrd, host HTTP broker,
 or replacement HTTP client in WASM.
 
 Production runtime ownership: `guest/` contains the pinned Rust/Wasmtime runtime,
-`native/` contains the bounded KVM launcher and native probes, and `vendor/`
-contains the maintained WASI HTTP fork. Samples live in `examples/`.
+`native/` contains the bounded KVM launcher and native probes, and
+`crates/fenders-guest-http` sends a guest's outgoing HTTP requests. Samples
+live in `examples/`.
 
 ## Execution path
 
@@ -258,8 +259,10 @@ The VM boundary, bounded host operations and Wasmtime's WASM isolation have
 different responsibilities. Production deployment still needs VMM process
 confinement, platform fuzzing, resource accounting and a reviewed threat model.
 
-The vendored upstream HTTP changes are limited to CA-root configuration and TLS
-resumption settings; see [provenance](vendor/wasmtime-wasi-http/FENDERS-PORT.md).
+`wasmtime-wasi-http` is used unchanged. The guest's `send_request` hook sends
+through `crates/fenders-guest-http`, upstream's send function with pinned
+destinations, per-origin CA roots, no TLS resumption and bounded setup and
+response waits; see its [crate documentation](../crates/fenders-guest-http/src/lib.rs).
 
 ## Outbound byte admission primitive
 

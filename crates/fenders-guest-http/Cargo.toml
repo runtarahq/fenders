@@ -1,0 +1,29 @@
+[package]
+name = "fenders-guest-http"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# How a guest's outgoing `wasi:http` request is sent: the stock
+# `wasmtime-wasi-http` is used unchanged, and the guest's
+# `WasiHttpHooks::send_request` calls `send_request` here. The guest runtime
+# (runtime/guest) builds this crate in its own workspace, so dependencies are
+# named here, not taken from the workspace.
+[dependencies]
+fenders-egress = { path = "../fenders-egress" }
+fenders-service-trust = { path = "../fenders-service-trust" }
+wasmtime-wasi-http = { version = "=50.0.3", default-features = false, features = ["default-send-request"] }
+bytes = { version = "1.11.1", default-features = false }
+http = "1.5.0"
+http-body = "1.0.1"
+hyper = { version = "1.9.0", features = ["client", "http1"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio = { version = "1.51.1", features = ["net", "time"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "1.0.7"
+
+[dev-dependencies]
+http-body-util = "0.1"
+rcgen = "0.13"
+tokio = { version = "1.51.1", features = ["macros", "rt", "io-util"] }

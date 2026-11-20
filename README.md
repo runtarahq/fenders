@@ -96,7 +96,8 @@ bash scripts/verify_embedding_live.sh
 | `crates/fenders-node`, `crates/fenders-shim` | The node agent and the per-run shim |
 | `crates/fenders-node-protocol` | What the node and its control peer say to each other |
 | `crates/fenders-component` | The confined compiler and component inspection |
-| `runtime/` | The guest runtime, the KVM launcher and the pinned WASI HTTP fork |
+| `crates/fenders-guest-http` | How a guest's outgoing HTTP request is sent |
+| `runtime/` | The guest runtime and the KVM launcher |
 | `examples/` | WASM components and runtime fixtures |
 | `deploy/` | systemd units for the control plane and the node |
 | `scripts/` | Build and live verification entry points |

@@ -13,7 +13,8 @@ http-body-util = "0.1"
 libc = "0.2"
 wasmtime = { version = "=50.0.3", default-features = false, features = ["anyhow", "runtime", "std", "component-model", "component-model-async", "async"] }
 wasmtime-wasi = { version = "=50.0.3", default-features = false, features = ["p2", "p3"] }
-wasmtime-wasi-http = { version = "=50.0.3", path = "../vendor/wasmtime-wasi-http", features = ["fenders-platform"] }
+wasmtime-wasi-http = "=50.0.3"
+fenders-guest-http = { path = "../../crates/fenders-guest-http" }
 tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
 dlmalloc = { version = "0.2", features = ["global"] }
 

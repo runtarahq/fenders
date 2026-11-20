@@ -876,14 +876,11 @@ dependencies = [
  "fenders-runtime-limits",
  "http-body-util",
  "hyper",
- "rcgen",
- "rustls",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tokio",
- "tokio-rustls",
  "wasmparser 0.261.0",
  "wasmtime",
  "wasmtime-wasi",
@@ -937,6 +934,25 @@ dependencies = [
 [[package]]
 name = "fenders-egress"
 version = "0.1.0"
+
+[[package]]
+name = "fenders-guest-http"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "fenders-egress",
+ "fenders-service-trust",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "rcgen",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+ "wasmtime-wasi-http",
+ "webpki-roots 1.0.10",
+]
 
 [[package]]
 name = "fenders-node"
@@ -3854,11 +3870,11 @@ dependencies = [
 [[package]]
 name = "wasmtime-wasi-http"
 version = "50.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e885853105ca8557e1b143c80c9cf18dd54ca972185d21c3171dc91a276fdf8"
 dependencies = [
  "async-trait",
  "bytes",
- "fenders-egress",
- "fenders-service-trust",
  "futures",
  "http",
  "http-body",
