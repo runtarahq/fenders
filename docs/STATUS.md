@@ -231,8 +231,13 @@ a workspace.
   in flight; a lost edge's apps are given to another 15 seconds after it was
   last heard from.
 - A request that reaches an edge that does not own its app is passed to the
-  owner over mutual TLS, once, which adds a hop: with N edges behind a plain
-  TCP balancer, (N-1)/N of requests take it. `GET /v1/edge-routes` is the
+  owner over mutual TLS, once: on a connection for clients' requests, apart
+  from shims' asks, which take 4096 streams at once each. Measured, 30 apps'
+  requests went at 3,100 to 3,200 a second passed on and 3,400 sent to their
+  edge, p99 about 20 ms either way. A listener serves 2048 connections from
+  one address; a load tool past it sees refused connections, not the
+  gateway failing. With N edges behind a plain TCP balancer, (N-1)/N of
+  requests take the hop. `GET /v1/edge-routes` is the
   map a balancer that routes by host name sends them by instead.
 - Throughput was measured on one machine only (see Works); 16 MiB responses
   went at 3 to 4 a second from 4 clients.
@@ -248,11 +253,35 @@ a workspace.
   answered in 1 to 3 seconds, the slower ones making room by eviction: each
   step of a wake (placement, start, the shim's first ask) waits on a loop
   that runs once a second.
-- Time waiting for room counts toward an app's startup deadline (5 minutes
-  for a release, 10 seconds for a wake). Deploying more apps at once than a
-  workspace can start within it leaves the rest `http-readiness-timeout`,
-  blocked until each is released again: of 1,000 deployed into 8 slots, 360
-  started on the first try.
+- One request to each of those 1,000 idle apps at once, through two edges,
+  with the node's CPU overcommitted four times (1600% declared on 4 CPUs'
+  share, 64 executions of the smallest size): 64 answered 200, every slot,
+  in a median of 5.8 seconds; the 936 others 503 `HTTP wake deadline
+  exceeded` after ten seconds. No app was blocked, heartbeats kept on, and
+  every app went back to idle.
+- A wake is admitted without the mutation lock: the first request of an
+  edge to an idle app records a reservation and tells the scheduler, whose
+  pass wakes and starts it; others to the same host name wait in memory
+  for it ([`wakes`](../crates/fenders-control-plane/src/wakes.rs)). Waiting
+  requests are asked about together, a few times a second, and bound to the
+  execution with the app's row locked, not the mutation lock. A wake that
+  does not serve in ten seconds, of a release that has served, returns the
+  app to idle (`wake-timed-out`); only a release's first start blocks it.
+- A process waits for the mutation lock four transactions at a time
+  (`LOCK_WAITERS`), for five seconds at most, then answers 503 `busy`; the
+  scheduler's passes, heartbeats and the gateway's flush do not wait behind
+  requests. A read that runs out of time while the database answers a
+  question on a connection of its own is `busy`, not an outage. A process
+  holds `--database-connections` (16; the local edges 32).
+- Time waiting for room still counts toward a release's first start (5
+  minutes): deploying more apps at once than a workspace can start within it
+  leaves the rest `http-readiness-timeout`, blocked until each is released
+  again: of 1,000 deployed into 8 slots, 360 started on the first try.
+- A run's output is taken without the mutation lock, and a workspace's
+  bound on what it keeps is applied at most once a second. With 60 apps
+  each writing a line a request, the database's disk, storing a record and
+  a line for each request, bounds the rate: about 1,300 requests a second
+  across the 60, against 3,400 to 4,000 across 30 of them.
 - Scale-out reacts in seconds and by one execution at a time; a burst beyond
   the queue (64 requests an app) is answered 503.
 - An app's executions that have handled no request for 5 seconds give way
@@ -281,8 +310,8 @@ a workspace.
   (`fenders_gates`). One a process did not hear (its listener was
   reconnecting) is seen within the two seconds; a request admitted meanwhile
   to an app that stopped serving is not taken, and is answered 503 never
-  having run. A request to an app that does not serve takes the path under the lock,
-  which starts an app that is idle and holds the request while it starts.
+  having run. A request to an app that does not serve is held while the
+  scheduler starts it.
 - A request's record (`app_http_runs`, the app's events) is written up to a
   second after it ends, or after a second in flight, by the gateway's flush.
   A process that dies takes the records of what it had in flight with it.
