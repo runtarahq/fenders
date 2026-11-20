@@ -183,6 +183,9 @@ pub struct Gateway {
     /// Whether an edge's certificate is a registered edge's, as read, and
     /// when ([`Store::edge_peer`]).
     pub(crate) peers: Mutex<std::collections::HashMap<String, (bool, std::time::Instant)>>,
+    /// When each workspace's bound on the output it keeps was last applied
+    /// ([`crate::execution_logs::WORKSPACE_BOUND_EVERY`]).
+    pub(crate) log_bounded: Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl Default for Gateway {
@@ -202,6 +205,7 @@ impl Default for Gateway {
             probed: Default::default(),
             owners: Default::default(),
             peers: Default::default(),
+            log_bounded: Default::default(),
             extending: Default::default(),
         }
     }
