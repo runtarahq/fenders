@@ -95,11 +95,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let asked = Instant::now();
                 let answered = match request.send().await {
                     Ok(response) => {
-                        let status = response.status().as_u16().to_string();
+                        let code = response.status();
+                        let status = code.as_u16().to_string();
                         match response.bytes().await {
                             Ok(bytes) => {
                                 seen.received += bytes.len() as u64;
-                                status
+                                // An answer refused says why in its body.
+                                if code.is_success() {
+                                    status
+                                } else {
+                                    let why: String =
+                                        String::from_utf8_lossy(&bytes).chars().take(80).collect();
+                                    format!("{status} {why}")
+                                }
                             }
                             Err(_) => "cut".to_owned(),
                         }
