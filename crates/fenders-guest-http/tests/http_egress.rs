@@ -1,4 +1,4 @@
-use wasmtime_wasi_http::platform::{platform_root_store, request_target};
+use fenders_guest_http::platform::{platform_root_store, request_target};
 
 #[test]
 fn outgoing_requests_use_exact_pinned_origins_without_dns_fallback() {
@@ -185,8 +185,9 @@ fn real_adapter_enforces_pins_returns_redirects_and_bounds_tls_setup() {
 
 #[tokio::test]
 async fn transport_child() {
+    use fenders_guest_http::send_request;
     use http_body_util::BodyExt;
-    use wasmtime_wasi_http::{Error as ErrorCode, RequestOptions, default_send_request};
+    use wasmtime_wasi_http::{Error as ErrorCode, RequestOptions};
     let Ok(scenario) = std::env::var("FENDERS_ADAPTER_SCENARIO") else {
         return;
     };
@@ -199,7 +200,7 @@ async fn transport_child() {
                 .boxed(),
         )
         .unwrap();
-    let result = default_send_request(
+    let result = send_request(
         request,
         Some(RequestOptions {
             connect_timeout: Some(std::time::Duration::from_millis(150)),
@@ -215,7 +216,7 @@ async fn transport_child() {
             assert_eq!(response.status(), 302);
             // The application's ten-minute between-bytes wait is capped.
             assert_eq!(
-                wasmtime_wasi_http::platform::response_wait(std::time::Duration::from_secs(600)),
+                fenders_guest_http::platform::response_wait(std::time::Duration::from_secs(600)),
                 std::time::Duration::from_secs(10)
             );
         }

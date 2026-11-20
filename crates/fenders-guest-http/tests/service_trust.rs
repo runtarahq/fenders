@@ -1,9 +1,9 @@
-//! Exercise the actual vendored WASI HTTP adapter and its rustls 0.22 stack.
+//! Exercise the trust selection the guest's HTTP sends use, over real rustls.
 //! This is native TLS transport coverage, not kernel-free VM qualification.
+use fenders_guest_http::platform::service_root_store;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use wasmtime_wasi_http::platform::service_root_store;
 
 struct Identity {
     ca: String,

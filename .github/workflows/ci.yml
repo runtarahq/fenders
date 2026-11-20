@@ -48,10 +48,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: rustup show
       - run: cargo install cargo-audit --locked
-      # Every lockfile that is built from: the workspace's, the guest
-      # runtime's and the vendored fork's. .cargo/audit.toml lists what is
+      # Every lockfile that is built from: the workspace's and the guest
+      # runtime's. .cargo/audit.toml lists what is
       # known and cannot be acted on.
       - run: |
-          for lock in Cargo.lock runtime/guest/Cargo.lock runtime/vendor/wasmtime-wasi-http/Cargo.lock; do
+          for lock in Cargo.lock runtime/guest/Cargo.lock; do
             cargo audit --file "$lock"
           done

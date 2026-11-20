@@ -40,7 +40,7 @@ fn the_launchers_readme_describes_the_launcher_there_is() {
     // launcher source file it names exists.
     let code = sources("runtime/native")
         + &sources("runtime/guest/src")
-        + &sources("runtime/vendor/wasmtime-wasi-http/src")
+        + &sources("crates/fenders-guest-http/src")
         + &sources("crates/fenders-shim/src")
         + &sources("crates/fenders-node/src");
     let settings = named(readme, "FENDERS_", |c| {

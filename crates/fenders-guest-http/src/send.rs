@@ -1,4 +1,3 @@
-use crate::{Error, RequestOptions};
 use bytes::Bytes;
 use core::future::poll_fn;
 use core::pin::{Pin, pin};
@@ -8,8 +7,7 @@ use http::{Request, Response};
 use http_body::Body;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
-#[cfg(not(feature = "fenders-platform"))]
-use tokio::net::TcpStream;
+use wasmtime_wasi_http::{Error, RequestOptions};
 
 trait TokioStream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {
     fn boxed(self) -> Box<dyn TokioStream>
@@ -21,10 +19,8 @@ trait TokioStream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {
 }
 impl<T> TokioStream for T where T: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}
 
-/// The default implementation of how an outgoing request is sent.
-///
-/// This implementation is used by the `wasi:http/handler` interface
-/// default implementation.
+/// Sends a guest's outgoing request the platform's way (see the crate's
+/// documentation). Upstream's `default_send_request`, otherwise unchanged.
 ///
 /// The returned [Future] can be used to communicate
 /// a request processing error, if any, to the constructor of the request.
@@ -32,7 +28,7 @@ impl<T> TokioStream for T where T: AsyncRead + AsyncWrite + Send + Sync + Unpin 
 /// a result resolved from it will be forwarded to the guest on the future handle returned.
 ///
 /// This function performs no `Content-Length` validation.
-pub async fn default_send_request(
+pub async fn send_request(
     mut req: Request<impl Body<Data = Bytes, Error = Error> + Send + 'static>,
     options: Option<RequestOptions>,
 ) -> Result<
@@ -64,71 +60,47 @@ pub async fn default_send_request(
         .and_then(|r| r.between_bytes_timeout)
         .unwrap_or(Duration::from_secs(600));
 
-    #[cfg(feature = "fenders-platform")]
     let connect_timeout = connect_timeout.min(crate::platform::CONNECT_LIMIT);
-    #[cfg(feature = "fenders-platform")]
     let first_byte_timeout = crate::platform::response_wait(first_byte_timeout);
-    #[cfg(feature = "fenders-platform")]
     let between_bytes_timeout = crate::platform::response_wait(between_bytes_timeout);
     // One deadline covers TCP, TLS and HTTP setup. In particular, a peer that
     // accepts TCP but never completes TLS cannot hold the request indefinitely.
-    #[cfg(feature = "fenders-platform")]
     let connect_deadline = tokio::time::Instant::now() + connect_timeout;
 
-    #[cfg(feature = "fenders-platform")]
     let stream = tokio::time::timeout_at(
         connect_deadline,
         crate::platform::connect(&authority, use_tls),
     )
     .await
     .map_err(|_| Error::ConnectionTimeout)??;
-    #[cfg(not(feature = "fenders-platform"))]
-    let stream = match tokio::time::timeout(connect_timeout, TcpStream::connect(&authority)).await {
-        Ok(stream) => stream.map_err(Error::Connect)?,
-        Err(..) => return Err(Error::ConnectionTimeout),
-    };
     let stream = if use_tls {
         // derived from https://github.com/rustls/rustls/blob/main/examples/src/bin/simpleclient.rs
-        #[cfg(not(feature = "fenders-platform"))]
-        let root_cert_store = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-        };
-        #[cfg(feature = "fenders-platform")]
         let root_cert_store = crate::platform::root_store(&authority)?;
-        #[allow(unused_mut, reason = "resumption is configured only on the Fenders platform")]
         let mut config = rustls::ClientConfig::builder()
             .with_root_certificates(root_cert_store)
             .with_no_client_auth();
-        #[cfg(feature = "fenders-platform")]
-        {
-            config.resumption = rustls::client::Resumption::disabled();
-        }
+        config.resumption = rustls::client::Resumption::disabled();
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
         // The server name comes from the canonical origin, while the socket
         // was dialed at the pinned address.
-        #[cfg(feature = "fenders-platform")]
         let authority = fenders_egress::Origin::parse(&format!("https://{authority}"))
             .map_err(|_| Error::HttpRequestDenied)?
             .authority();
         let domain = tls_server_name(&authority)?;
-        let handshake = connector.connect(domain, stream);
-        #[cfg(feature = "fenders-platform")]
-        let result = tokio::time::timeout_at(connect_deadline, handshake)
+        let stream = tokio::time::timeout_at(connect_deadline, connector.connect(domain, stream))
             .await
-            .map_err(|_| Error::ConnectionTimeout)?;
-        #[cfg(not(feature = "fenders-platform"))]
-        let result = handshake.await;
-        let stream = result.map_err(Error::Tls)?;
+            .map_err(|_| Error::ConnectionTimeout)?
+            .map_err(Error::Tls)?;
         stream.boxed()
     } else {
         stream.boxed()
     };
-    #[cfg(feature = "fenders-platform")]
     let connect_timeout = connect_deadline.saturating_duration_since(tokio::time::Instant::now());
     let (mut sender, conn) = tokio::time::timeout(
         connect_timeout,
         // TODO: we should plumb the builder through the http context, and use it here
-        hyper::client::conn::http1::Builder::new().handshake(crate::io::TokioIo::new(stream)),
+        hyper::client::conn::http1::Builder::new()
+            .handshake(wasmtime_wasi_http::io::TokioIo::new(stream)),
     )
     .await
     .map_err(|_| Error::ConnectionTimeout)??;
