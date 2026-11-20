@@ -54,6 +54,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|url| url.parse())
         .collect::<Result<_, _>>()?;
+    // Each client keeps a connection to each host name: past what a
+    // listener serves one address (2048), the rest are refused, and are
+    // counted as errors that are this tool's, not the gateway's.
+    let hosts: std::collections::BTreeSet<_> =
+        urls.iter().filter_map(|url| url.host_str()).collect();
+    if args.clients.max(1) * hosts.len() > 2048 {
+        eprintln!(
+            "warning: {} clients by {} host names is {} connections from one address; a listener serves 2048",
+            args.clients.max(1),
+            hosts.len(),
+            args.clients.max(1) * hosts.len()
+        );
+    }
     let body = args.post_bytes.map(|bytes| vec![b'x'; bytes]);
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     let started = Instant::now();
@@ -82,16 +95,38 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let asked = Instant::now();
                 let answered = match request.send().await {
                     Ok(response) => {
-                        let status = response.status().as_u16().to_string();
+                        let code = response.status();
+                        let status = code.as_u16().to_string();
                         match response.bytes().await {
                             Ok(bytes) => {
                                 seen.received += bytes.len() as u64;
-                                status
+                                // An answer refused says why in its body.
+                                if code.is_success() {
+                                    status
+                                } else {
+                                    let why: String =
+                                        String::from_utf8_lossy(&bytes).chars().take(80).collect();
+                                    format!("{status} {why}")
+                                }
                             }
                             Err(_) => "cut".to_owned(),
                         }
                     }
-                    Err(_) => "error".to_owned(),
+                    // What failed, by kind: the error and what caused it,
+                    // without the URL, which differs for each app.
+                    Err(error) => {
+                        let mut kind = format!("error: {error}");
+                        let mut source = std::error::Error::source(&error);
+                        while let Some(cause) = source {
+                            kind = format!("{kind}: {cause}");
+                            source = cause.source();
+                        }
+                        let kind = match error.url() {
+                            Some(url) => kind.replace(url.as_str(), "URL"),
+                            None => kind,
+                        };
+                        kind.chars().take(160).collect()
+                    }
                 };
                 seen.micros.push(asked.elapsed().as_micros() as u64);
                 *seen.statuses.entry(answered).or_default() += 1;

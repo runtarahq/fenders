@@ -77,6 +77,11 @@ struct Args {
     /// the database cannot be reached, in seconds.
     #[arg(long, default_value_t = 600)]
     serve_stale_seconds: u64,
+    /// Connections to the database this process holds at most. Four of
+    /// them may wait for the mutation lock at once; the others are for the
+    /// reads requests make.
+    #[arg(long, default_value_t = crate::store::CONNECTIONS, value_parser = clap::value_parser!(u32).range(8..=512))]
+    database_connections: u32,
     /// What this process serves: everything (`all`), the management API,
     /// the scheduler and the nodes' peer (`control`), or the gateway and
     /// the run channel (`edge`, with `--state` holding what `fenders-keys
@@ -141,9 +146,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         if tls.is_none() {
             return Err("an edge serves over TLS: --ca, --cert and --key are required".into());
         }
-        Store::connect_edge(&dsn, &args.state).await?
+        Store::connect_edge_with(&dsn, &args.state, args.database_connections).await?
     } else {
-        Store::connect(&dsn, &args.state)
+        Store::connect_with(&dsn, &args.state, args.database_connections)
             .await?
             .serving(if role == Role::Control {
                 Serves::Control

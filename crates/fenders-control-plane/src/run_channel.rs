@@ -276,7 +276,8 @@ impl Store {
         )
         .await
         {
-            Err(error) if outage.failed(&error) => stale(),
+            Err(error) if self.confirm_outage(&error).await => stale(),
+            Err(error) => Err(crate::outage::busy(error)),
             read => read,
         }
     }

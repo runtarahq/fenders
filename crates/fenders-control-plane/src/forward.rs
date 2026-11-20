@@ -176,17 +176,23 @@ impl Forwarder {
         Ok(tls)
     }
 
-    /// The HTTP/2 connection to `edge`, made now if there is none.
+    /// The HTTP/2 connection to `edge` for what comes to `listener`, made
+    /// now if there is none. Clients' requests and shims' asks go on
+    /// connections of their own: a shim's ask waits long for a request, and
+    /// a burst of clients' requests waiting for their apps to start do not
+    /// hold up the asks that would start serving them.
     async fn sender(
         &self,
         edge: &str,
+        listener: Listener,
         peer: &Peer,
     ) -> Result<hyper::client::conn::http2::SendRequest<Body>> {
+        let key = format!("{edge}/{}", listener.name());
         if let Some(sender) = self
             .connections
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(edge)
+            .get(&key)
             .filter(|sender| !sender.is_closed())
             .cloned()
         {
@@ -203,7 +209,7 @@ impl Forwarder {
         self.connections
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(edge.to_owned(), sender.clone());
+            .insert(key, sender.clone());
         Ok(sender)
     }
 }
@@ -325,7 +331,7 @@ impl crate::store::Store {
         let mut tries = 0;
         let answer = loop {
             tries += 1;
-            let mut sender = forwarder.sender(edge, &peer).await?;
+            let mut sender = forwarder.sender(edge, listener, &peer).await?;
             match sender.try_send_request(request).await {
                 Ok(answer) => break answer,
                 Err(mut failed) => {
@@ -333,7 +339,7 @@ impl crate::store::Store {
                         .connections
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .remove(edge);
+                        .remove(&format!("{edge}/{}", listener.name()));
                     match failed.take_message() {
                         Some(unsent) if tries < 3 => request = unsent,
                         _ => {
@@ -401,17 +407,42 @@ impl crate::store::Store {
     /// Whether a forwarding peer, by the pin of the certificate it showed,
     /// is a registered edge.
     pub(crate) async fn edge_peer(&self, pin: &str) -> Result<()> {
-        let mut tx = self.transaction(false, false).await?;
-        crate::db::optional(
-            &mut tx,
-            "SELECT id FROM edges WHERE cert_sha256=$1 AND NOT deleted",
-            crate::args![pin],
-        )
-        .await?
-        .map(|_| ())
-        .ok_or_else(Error::unauthorized)
+        // Read once every few seconds, not for each request passed on: an
+        // edge deleted is refused within them.
+        let known = self
+            .gateway
+            .peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(pin)
+            .filter(|(_, read)| read.elapsed() < PEER_REGISTERED)
+            .map(|(registered, _)| *registered);
+        let registered = match known {
+            Some(registered) => registered,
+            None => {
+                let mut tx = self.transaction(false, false).await?;
+                let registered = crate::db::optional(
+                    &mut tx,
+                    "SELECT id FROM edges WHERE cert_sha256=$1 AND NOT deleted",
+                    crate::args![pin],
+                )
+                .await?
+                .is_some();
+                let mut peers = self.gateway.peers.lock().unwrap_or_else(|e| e.into_inner());
+                if peers.len() >= 4096 {
+                    peers.clear();
+                }
+                peers.insert(pin.to_owned(), (registered, std::time::Instant::now()));
+                registered
+            }
+        };
+        registered.then_some(()).ok_or_else(Error::unauthorized)
     }
 }
+
+/// How long what was read of an edge's certificate is believed, as the
+/// passing edge receives it.
+const PEER_REGISTERED: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// An edge's internal port: what another edge passes on, from a registered
 /// edge only, served as the listener it came to would serve it.

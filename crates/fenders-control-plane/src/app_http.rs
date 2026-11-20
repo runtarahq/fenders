@@ -199,7 +199,37 @@ impl Store {
         Ok(())
     }
 
-    async fn drain_http(&self, tx: &mut Tx, binding: &Value, seen: &Observed) -> Result<bool> {
+    /// A wake that did not have the app serving in time, of a release
+    /// that has served: the app goes back to idle, what was started for it
+    /// stopped as an idle app's is, and the next request wakes it again.
+    /// A release's first start that does not serve in time fails it, and
+    /// blocks the app until another is released; a wake that does not is
+    /// most often a full workspace or node, which passes.
+    async fn give_up_wake(&self, tx: &mut Tx, binding: &Value, seen: &Observed) -> Result<()> {
+        let app = s(&binding["app_id"]);
+        exec(tx,"UPDATE app_http SET state='stopping',reason='wake-timed-out',idle_draining=true,drain_until=NULL,ready_until=NULL,updated=now() WHERE app_id=$1",args![app]).await?;
+        if !binding["deployment_id"].is_null() {
+            exec(
+                tx,
+                "UPDATE deployments SET desired='stopped' WHERE id=$1",
+                args![binding["deployment_id"]],
+            )
+            .await?;
+        }
+        let mut drain = binding.clone();
+        drain["drain_until"] = Value::Null;
+        if self.drain_http(tx, &drain, seen).await? {
+            exec(tx,"UPDATE app_http SET state='idle',reason=NULL,execution_id=NULL,idle_draining=false,drain_until=NULL,ready_until=NULL,updated=now() WHERE app_id=$1",args![app]).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn drain_http(
+        &self,
+        tx: &mut Tx,
+        binding: &Value,
+        seen: &Observed,
+    ) -> Result<bool> {
         // The app is leaving service: from here its requests are admitted
         // under the lock this transaction holds, and so after it.
         let app = s(&binding["app_id"]);
@@ -243,10 +273,42 @@ impl Store {
     }
 
     pub(crate) async fn reconcile_app_http(&self, tx: &mut Tx) -> Result<()> {
+        self.reconcile_apps_http(tx, None).await
+    }
+
+    /// Sees to `only` these apps, or to every app. An app that is idle with
+    /// nothing waiting on it (no request, execution, extra or operation) is
+    /// passed over: there is nothing to do for it until a request comes,
+    /// and most of a fleet's apps are so.
+    pub(crate) async fn reconcile_apps_http(
+        &self,
+        tx: &mut Tx,
+        only: Option<&[String]>,
+    ) -> Result<()> {
         // What the exchange shows of HTTP runs: this process's, or the
         // edges' as they last wrote it ([`crate::observed`]).
         let seen = self.observed(tx).await?;
-        for binding in rows(tx,"SELECT h.*,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h",args![]).await? {
+        // Apps the workspace's allowance has no room for: idle executions
+        // give way to them once every app has been seen to, as what is read
+        // of the others above would be out of date.
+        let mut short_of_room = Vec::new();
+        // The least a workspace's allowance refused this pass: an app that
+        // needs as much or more is refused too, unasked.
+        let mut refused: std::collections::HashMap<String, crate::eviction::Room> =
+            std::collections::HashMap::new();
+        let only = only.map(|apps| json!(apps)).unwrap_or(Value::Null);
+        for mut binding in rows(tx,"SELECT h.*,(SELECT tenant_id FROM apps WHERE id=h.app_id) AS tenant_id,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h WHERE ($1::jsonb IS NULL OR h.app_id IN (SELECT jsonb_array_elements_text($1::jsonb))) AND NOT (h.state='idle' AND NOT h.idle_draining AND NOT EXISTS(SELECT 1 FROM ingress_reservations q WHERE q.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM app_http_extras x WHERE x.app_id=h.app_id) AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.deployment_id=h.deployment_id AND e.reserved) AND NOT EXISTS(SELECT 1 FROM app_http_operations x JOIN operations o ON o.id=x.operation_id WHERE x.app_id=h.app_id AND o.state='pending')) ORDER BY h.updated,h.app_id",args![only]).await? {
+            // Its workspace's allowance refused an app this pass: one that
+            // waits for room as well is passed over until the next, rather
+            // than prepared to be refused too. During a burst of wakes,
+            // hundreds wait, and each pass held the lock for seconds
+            // preparing them.
+            if binding["state"]=="starting" && binding["execution_id"].is_null() && binding["candidate_until"].is_null() && binding["expired"]!=true
+                && let Some((tenant, least)) = binding["tenant_id"].as_str().and_then(|tenant| refused.get(tenant).map(|least| (tenant.to_owned(), *least))) {
+                // Made room for as one needing what was refused.
+                short_of_room.push((tenant, least, s(&binding["app_id"]).to_owned()));
+                continue;
+            }
             let app=one(tx,"SELECT a.*,t.http FROM apps a JOIN app_triggers t ON t.app_id=a.id WHERE a.id=$1",args![binding["app_id"]]).await?;
             let app_id=s(&app["id"]);
             if !Self::workspace_active(tx,s(&app["tenant_id"])).await? {continue;}
@@ -278,7 +340,17 @@ impl Store {
             }
             if binding["state"]=="idle" {
                 Self::wake_http(tx,app_id).await?;
-                continue;
+                // Woken: it is started in this same pass, not the next.
+                match optional(tx,"SELECT h.*,(SELECT tenant_id FROM apps WHERE id=h.app_id) AS tenant_id,ready_until<=now() AS expired,restart_after<=now() AS retry_due,failure_window<now()-interval '5 minutes' AS reset_failures FROM app_http h WHERE app_id=$1 AND state='starting'",args![app_id]).await? {
+                    // Its workspace's allowance already refused one this
+                    // pass: woken, it waits for the next to be started.
+                    Some(woken) if let Some(least) = woken["tenant_id"].as_str().and_then(|tenant| refused.get(tenant)) => {
+                        short_of_room.push((s(&woken["tenant_id"]).to_owned(), *least, app_id.to_owned()));
+                        continue;
+                    }
+                    Some(woken) => binding = woken,
+                    None => continue,
+                }
             }
             if binding["state"]=="stopping" {
                 if !self.drain_http(tx,&binding,&seen).await? {
@@ -301,10 +373,8 @@ impl Store {
                 continue;
             }
             if let Some(e)=optional(tx,"SELECT e.*,n.last_seen>now()-interval '15 seconds' AND NOT n.disabled AND n.observed_confinement=$2 AS healthy FROM executions e LEFT JOIN nodes n ON n.id=e.node_id WHERE e.id=$1",args![binding["execution_id"],HOST_CONFINEMENT]).await? {
-                if app["configuration"]["keep_warm"]==false && release["state"]=="ready" && binding["expired"]==true {
-                    Self::http_failure(tx,&app,"http-readiness-timeout").await?;
-                    exec(tx,"UPDATE executions SET desired='stopped',generation=generation+1,updated=now() WHERE id=$1 AND reserved AND desired<>'stopped'",args![e["id"]]).await?;
-                    if e["node_id"].is_null() {exec(tx,"UPDATE executions SET state='stopped',reserved=false,finished_at=now() WHERE id=$1",args![e["id"]]).await?;}
+                if release["state"]=="ready" && binding["expired"]==true && !(e["state"]=="running" && e["desired"]=="running" && seen.ready(s(&e["id"]))) {
+                    self.give_up_wake(tx,&binding,&seen).await?;
                     continue;
                 }
                 // A node says a run is running when its VM starts. An app
@@ -347,7 +417,9 @@ impl Store {
                     }
                     continue;
                 }
-                if binding["expired"]==true {
+                if binding["expired"]==true && release["state"]=="ready" {
+                    self.give_up_wake(tx,&binding,&seen).await?;
+                } else if binding["expired"]==true {
                     Self::http_failure(tx,&app,"http-readiness-timeout").await?;
                     exec(tx,"UPDATE executions SET desired='stopped',generation=generation+1,updated=now() WHERE id=$1 AND reserved AND desired<>'stopped'",args![e["id"]]).await?;
                     if e["node_id"].is_null() {exec(tx,"UPDATE executions SET state='stopped',reserved=false,finished_at=now() WHERE id=$1",args![e["id"]]).await?;}
@@ -357,6 +429,7 @@ impl Store {
                 }
                 continue;
             }
+            if binding["expired"]==true && release["state"]=="ready" {self.give_up_wake(tx,&binding,&seen).await?;continue;}
             if binding["expired"]==true {Self::http_failure(tx,&app,"http-readiness-timeout").await?;continue;}
             if release["inspection"]["http"]!=true {Self::http_failure(tx,&app,"incompatible-http-entry-point").await?;continue;}
             let spec=crate::app_runtime::http_spec(release["spec"].clone(),&release["configuration"])?;
@@ -372,14 +445,56 @@ impl Store {
                 id
             };
             exec(tx,"UPDATE deployments SET spec=$1,revision=$2,desired='running' WHERE id=$3",args![spec,binding["generation"],deployment]).await?;
-            match Self::execution(tx,s(&app["tenant_id"]),s(&app["project_id"]),&spec,Some(&deployment),n(&binding["generation"])).await {
+            let need=crate::eviction::Room::of_spec(&spec);
+            let outcome=if refused.get(s(&app["tenant_id"])).is_some_and(|least| least.within(need)) {
+                Err(quota("tenant compute allowance exhausted"))
+            } else {
+                Self::execution(tx,s(&app["tenant_id"]),s(&app["project_id"]),&spec,Some(&deployment),n(&binding["generation"])).await
+            };
+            match outcome {
                 Ok(e)=>{
                     Self::record_app_connections(tx,app_id,&e).await?;
                     exec(tx,"INSERT INTO app_http_attempts(execution_id,tenant_id,project_id,app_id,release_id,generation) VALUES($1,$2,$3,$4,$5,$6)",args![e["id"],app["tenant_id"],app["project_id"],app_id,release["id"],binding["generation"]]).await?;
                     exec(tx,"UPDATE app_http SET execution_id=$1,state='starting',reason='waiting-for-capacity',updated=now() WHERE app_id=$2",args![e["id"],app_id]).await?;
                 },
-                Err(e) if e.status==StatusCode::TOO_MANY_REQUESTS=>{Self::http_state(tx,app_id,"starting",Some("allowance-exhausted")).await?;},
+                Err(e) if e.status==StatusCode::TOO_MANY_REQUESTS=>{
+                    Self::http_state(tx,app_id,"starting",Some("allowance-exhausted")).await?;
+                    let least=refused.entry(s(&app["tenant_id"]).to_owned()).or_insert(need);
+                    *least=least.least(need);
+                    short_of_room.push((s(&app["tenant_id"]).to_owned(),need,app_id.to_owned()));
+                },
                 Err(e)=>return Err(e),
+            }
+        }
+        // The workspace's idle executions give way to them
+        // ([`crate::eviction`]), the longest waiting first; each starts once
+        // they have stopped. Each is made room for beside those before it,
+        // so that two do not count on the same room; a workspace's first
+        // that cannot be made room for ends its turn.
+        let mut found = crate::eviction::Found::default();
+        let mut wanted: std::collections::HashMap<String, Option<crate::eviction::Room>> =
+            std::collections::HashMap::new();
+        for (tenant, need, app_id) in short_of_room {
+            let before = wanted
+                .entry(tenant.clone())
+                .or_insert(Some(Default::default()));
+            let Some(sum) = *before else { continue };
+            let sum = sum.plus(need);
+            if self
+                .make_room_in_allowance(
+                    tx,
+                    &tenant,
+                    sum,
+                    &seen,
+                    &json!({"app_id":app_id}),
+                    &mut found,
+                )
+                .await?
+            {
+                *before = Some(sum);
+                Self::http_state(tx, &app_id, "starting", Some("making-room")).await?;
+            } else {
+                *before = None;
             }
         }
         exec(tx,"UPDATE operations o SET state=CASE WHEN h.blocked THEN 'failed' ELSE 'succeeded' END,error=CASE WHEN h.blocked THEN h.reason ELSE NULL END,updated=now() FROM app_http_operations x JOIN app_http h ON h.app_id=x.app_id AND h.generation=x.generation WHERE o.id=x.operation_id AND o.state='pending' AND o.kind<>'app-connections' AND ((h.state IN ('serving','disabled','idle') AND h.candidate_until IS NULL) OR h.blocked)",args![]).await?;

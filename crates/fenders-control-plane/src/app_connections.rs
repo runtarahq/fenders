@@ -313,7 +313,8 @@ impl Store {
                 self.copy_app_release(&mut tx, &row, http && row["desired"] == "enabled")
                     .await?;
                 if Self::request_app_http(&mut tx, app, &op).await? {
-                    self.reconcile_app_http(&mut tx).await?;
+                    self.reconcile_apps_http(&mut tx, Some(&[app.to_owned()]))
+                        .await?;
                 }
             }
             exec(

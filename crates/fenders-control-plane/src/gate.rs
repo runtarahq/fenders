@@ -123,6 +123,9 @@ pub struct Gates {
     /// it: a change made here is seen by the next request. One made by
     /// another process is seen once what was read is no longer [`FRESH`].
     epoch: AtomicU64,
+    /// Told when the epoch moves: requests waiting for an app to start
+    /// look again then, rather than on a clock alone.
+    moved: tokio::sync::Notify,
 }
 
 impl Gates {
@@ -133,6 +136,12 @@ impl Gates {
     /// Something that may change whether an app serves is being changed.
     pub fn changed(&self) {
         self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.moved.notify_waiters();
+    }
+
+    /// Resolves when the epoch next moves.
+    pub fn moved(&self) -> tokio::sync::futures::Notified<'_> {
+        self.moved.notified()
     }
 
     /// The epoch to pass to [`read`](Self::read) or [`open`](Self::open):

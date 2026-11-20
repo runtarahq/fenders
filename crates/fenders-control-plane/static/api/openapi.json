@@ -4783,7 +4783,8 @@
               "workspace_suspended",
               "permission_denied",
               "quota_exhausted",
-              "in_use"
+              "in_use",
+              "busy"
             ]
           },
           "request_id": {
@@ -4891,7 +4892,8 @@
             }
           },
           "keep_warm": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether the app keeps its execution while it has no request (true unless said). One that does not is stopped after 60 seconds without a request and wakes on its next one. Either way, an app whose executions have handled no request for 5 seconds is stopped (reason `evicted`) when another app or a run of its workspace waits for room in the workspace's allowance or on a worker, and wakes on its next request."
           },
           "concurrency": {
             "type": "integer",
@@ -6124,6 +6126,22 @@
               "pattern": "^[0-9a-f]{64}$"
             },
             "maxItems": 32
+          },
+          "cpu_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "CPU placement counts the node as holding, in percent of one CPU. More than the host has overcommits it: each run is held to its own share, and busy runs share the host's CPUs. The node's own --cpu-percent must say the same."
+          },
+          "memory_mib": {
+            "type": "integer",
+            "minimum": 88,
+            "maximum": 100000000
+          },
+          "instances": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000
           }
         },
         "required": []
@@ -6163,6 +6181,22 @@
           "id": {
             "type": "string",
             "pattern": "^[0-9a-f]{32}$"
+          },
+          "cpu_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "CPU placement counts the node as holding, in percent of one CPU. More than the host has overcommits it: each run is held to its own share, and busy runs share the host's CPUs. The node's own --cpu-percent must say the same."
+          },
+          "memory_mib": {
+            "type": "integer",
+            "minimum": 88,
+            "maximum": 100000000
+          },
+          "instances": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000
           }
         },
         "required": [

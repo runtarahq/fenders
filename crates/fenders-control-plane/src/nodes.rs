@@ -159,9 +159,25 @@ impl Store {
                 "egress_budget_required",
                 "egress_budget_launcher",
                 "retained_egress_launchers",
+                "cpu_percent",
+                "memory_mib",
+                "instances",
             ],
             &[],
         )?;
+        // What placement counts the node as holding, as registered. It is
+        // the operator's to declare: CPU beyond what the host has
+        // overcommits it, as each run is held to its own share. One lowered
+        // below what is placed stops nothing; nothing more is placed.
+        for (field, least, most) in [
+            ("cpu_percent", 1, 1000000),
+            ("memory_mib", 88, 100000000),
+            ("instances", 1, 100000),
+        ] {
+            if let Some(v) = value.get(field) {
+                integer(v, least, most)?;
+            }
+        }
         validate_runtime_digest(&value["egress_budget_launcher"])?;
         if let Some(retained) = value.get("retained_egress_launchers") {
             crate::egress_budget::validate_retained_launchers(retained)?;
@@ -170,7 +186,11 @@ impl Store {
             || value.as_object().unwrap().iter().any(|(k, v)| {
                 !matches!(
                     k.as_str(),
-                    "egress_budget_launcher" | "retained_egress_launchers"
+                    "egress_budget_launcher"
+                        | "retained_egress_launchers"
+                        | "cpu_percent"
+                        | "memory_mib"
+                        | "instances"
                 ) && !v.is_boolean()
             })
         {
@@ -210,14 +230,17 @@ impl Store {
         }
         exec(
             &mut tx,
-            "UPDATE nodes SET draining=$1,disabled=$2,egress_budget_launcher=$4,egress_budget_required=$5,retained_egress_launchers=$6 WHERE id=$3",
+            "UPDATE nodes SET draining=$1,disabled=$2,egress_budget_launcher=$4,egress_budget_required=$5,retained_egress_launchers=$6,cpu_percent=$7,memory_mib=$8,instances=$9 WHERE id=$3",
             args![
                 get(&value, "draining", old["draining"].clone()),
                 get(&value, "disabled", old["disabled"].clone()),
                 node,
                 get(&value, "egress_budget_launcher", old["egress_budget_launcher"].clone()),
                 get(&value, "egress_budget_required", old["egress_budget_required"].clone()),
-                get(&value, "retained_egress_launchers", old["retained_egress_launchers"].clone())
+                get(&value, "retained_egress_launchers", old["retained_egress_launchers"].clone()),
+                get(&value, "cpu_percent", old["cpu_percent"].clone()),
+                get(&value, "memory_mib", old["memory_mib"].clone()),
+                get(&value, "instances", old["instances"].clone())
             ],
         )
         .await?;
@@ -505,7 +528,16 @@ impl Store {
         }
         Self::network_reconcile(&mut tx).await?;
         Self::reconcile_app_runs(&mut tx).await?;
-        self.reconcile_app_http(&mut tx).await?;
+        // The apps whose executions it reports; the scheduler's pass sees
+        // to the others within a second.
+        let reported: Vec<String> = reports
+            .iter()
+            .filter_map(|r| r["id"].as_str().map(str::to_owned))
+            .collect();
+        let apps: Vec<String> = rows(&mut tx,"SELECT DISTINCT h.app_id FROM app_http h JOIN executions e ON e.deployment_id=h.deployment_id OR e.id=h.candidate_execution_id WHERE e.id IN (SELECT jsonb_array_elements_text($1))",args![reported]).await?.iter().map(|r| s(&r["app_id"]).to_owned()).collect();
+        if !apps.is_empty() {
+            self.reconcile_apps_http(&mut tx, Some(&apps)).await?;
+        }
         Self::reconcile_workspace_suspensions(&mut tx).await?;
         let assignments=rows(&mut tx,"SELECT id,generation,desired,spec,tenant_id,project_id FROM executions WHERE node_id=$1 AND reserved ORDER BY created",args![node]).await?;
         self.commit_watched(tx).await?;
@@ -585,7 +617,7 @@ impl Store {
         // An execution of an app that accepts WebSocket connections sends
         // to them by calling the run channel over its host-bound origin.
         // No other launch of Fenders' own names one.
-        if run_channel.is_some() && self.websocket_sender(execution).await?.is_some() {
+        if run_channel.is_some() && Self::websocket_sender(&mut tx, execution).await?.is_some() {
             spec["host_origin"] = json!(crate::websocket::ORIGIN);
         }
         let egress = if !e["egress_budget_launcher"].is_null() {

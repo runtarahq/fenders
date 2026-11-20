@@ -319,3 +319,94 @@ async fn a_database_that_hangs_is_taken_for_gone_and_served_around() {
     assert_eq!(counted, 3);
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_lock_waited_for_too_long_is_busy_not_broken_nor_the_database_gone() {
+    let l = Lab::new().await;
+    let mut holder = l.store.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(184923781)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let mut waiter = l.store.pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout='50ms'")
+        .execute(&mut *waiter)
+        .await
+        .unwrap();
+    let error: fenders_control_plane::error::Error =
+        sqlx::query("SELECT pg_advisory_xact_lock(184923781)")
+            .execute(&mut *waiter)
+            .await
+            .unwrap_err()
+            .into();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!error.is_database_unavailable());
+    drop(waiter);
+    holder.rollback().await.unwrap();
+    l.finish().await;
+}
+
+/// A flush that waits for the lock behind other work for longer than it
+/// may is not the database being gone: the edge goes on serving as it was,
+/// not from memory as in an outage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flush_kept_waiting_for_the_lock_is_not_an_outage() {
+    let l = Lab::new().await;
+    // A flush bounded by half a second, and the lock held for one: held
+    // no longer, as the lock is the whole database's, and other tests'
+    // too.
+    let edge = Store::from_pool(l.store.pool.clone(), l.root.path())
+        .unwrap()
+        .serving(Serves::Edge)
+        .with_flush_within(std::time::Duration::from_millis(500));
+    let mut holder = l.store.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(184923781)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    assert!(edge.flush_gateway().await.is_err(), "it could not flush");
+    assert!(
+        edge.gateway.outage.down_for().is_none(),
+        "the database answered: no outage"
+    );
+    holder.rollback().await.unwrap();
+    // The lock let go, it flushes again: within half a second, here, once
+    // the tests beside it leave it a moment.
+    let mut flushed = false;
+    for _ in 0..20 {
+        if edge.flush_gateway().await.is_ok() {
+            flushed = true;
+            break;
+        }
+    }
+    assert!(flushed);
+    l.finish().await;
+}
+
+/// A burst keeps every connection of a process's pool busy: a read that
+/// waits too long for one is not the database being gone, which answers a
+/// question asked on a connection of its own. The request is refused as
+/// busy, and the edge does not serve from memory as in an outage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pool_kept_busy_is_not_an_outage() {
+    let l = Lab::new().await;
+    let options = l.store.pool.connect_options().as_ref().clone();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let edge = Store::from_pool(pool.clone(), l.root.path())
+        .unwrap()
+        .serving(Serves::Edge);
+    let held = pool.acquire().await.unwrap();
+    let refused = edge
+        .ingress_start("app-none.apps.test", 0)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!refused.is_database_unavailable(), "{}", refused.message);
+    assert!(edge.gateway.outage.down_for().is_none(), "no outage");
+    drop(held);
+    l.finish().await;
+}

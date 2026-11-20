@@ -144,6 +144,10 @@ struct Written {
     granted: Vec<(crate::lease::Key, i64, i64)>,
 }
 
+/// An app's owner as read for a host name: the edge, when it was read,
+/// and the gates' epoch then.
+pub(crate) type Owned = (Option<String>, std::time::Instant, u64);
+
 pub struct Gateway {
     session: String,
     inner: Mutex<Inner>,
@@ -165,6 +169,23 @@ pub struct Gateway {
     /// The registered edge this process serves as, if any: it then owns
     /// only the apps the scheduler gives it ([`crate::edges`]).
     pub edge: Option<String>,
+    /// Requests waiting together for an app to start ([`crate::wakes`]).
+    pub wakes: std::sync::Arc<crate::wakes::Wakes>,
+    /// How long a flush may take ([`crate::outage::FLUSH_WITHIN`]).
+    pub(crate) flush_within: std::time::Duration,
+    /// Whether the database last answered a question of its own, and
+    /// when ([`Store::database_answers`]).
+    probed: tokio::sync::Mutex<Option<(std::time::Instant, bool)>>,
+    /// Which edge owns a host name's app, as read, when, and in which of
+    /// the gates' epochs: an edge passing another's requests on reads it
+    /// once, not for each ([`Store::foreign_owner`]).
+    pub(crate) owners: Mutex<std::collections::HashMap<String, Owned>>,
+    /// Whether an edge's certificate is a registered edge's, as read, and
+    /// when ([`Store::edge_peer`]).
+    pub(crate) peers: Mutex<std::collections::HashMap<String, (bool, std::time::Instant)>>,
+    /// When each workspace's bound on the output it keeps was last applied
+    /// ([`crate::execution_logs::WORKSPACE_BOUND_EVERY`]).
+    pub(crate) log_bounded: Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl Default for Gateway {
@@ -179,6 +200,12 @@ impl Default for Gateway {
             outage: Default::default(),
             shares: Default::default(),
             edge: None,
+            wakes: Default::default(),
+            flush_within: crate::outage::FLUSH_WITHIN,
+            probed: Default::default(),
+            owners: Default::default(),
+            peers: Default::default(),
+            log_bounded: Default::default(),
             extending: Default::default(),
         }
     }
@@ -330,16 +357,55 @@ impl Store {
     /// One transaction, whatever it holds. What cannot be written is kept
     /// for the next flush.
     pub async fn flush_gateway(&self) -> Result<()> {
-        let flushed = crate::outage::within(crate::outage::FLUSH_WITHIN, self.flush(false)).await;
+        let flushed = crate::outage::within(self.gateway.flush_within, self.flush(false)).await;
         // The flush is what notices that the database is back: it tries
         // every second, outage or not.
         match &flushed {
             Ok(()) => self.gateway.outage.reached(),
+            // A flush that ran out of time may have waited for the lock
+            // behind other work: the database is gone only if it does not
+            // answer a question that takes none.
             Err(error) => {
-                self.gateway.outage.failed(error);
+                self.confirm_outage(error).await;
             }
         }
         flushed
+    }
+
+    /// Whether the database answers, in [`crate::outage::READ_WITHIN`], a
+    /// question asked on a connection of its own, not one of the pool's:
+    /// a burst can keep every one of those busy, and a read waiting for one
+    /// cannot tell that from a database that does not answer. Asked once
+    /// for every caller that wonders within a second.
+    pub(crate) async fn database_answers(&self) -> bool {
+        use sqlx::Connection;
+        let mut probed = self.gateway.probed.lock().await;
+        if let Some((at, answered)) = *probed
+            && at.elapsed() < std::time::Duration::from_secs(1)
+        {
+            return answered;
+        }
+        let options = self.pool.connect_options();
+        let answered = tokio::time::timeout(crate::outage::READ_WITHIN, async {
+            let mut connection = sqlx::postgres::PgConnection::connect_with(&options).await?;
+            sqlx::query("SELECT 1").execute(&mut connection).await?;
+            connection.close().await
+        })
+        .await
+        .is_ok_and(|asked| asked.is_ok());
+        *probed = Some((std::time::Instant::now(), answered));
+        answered
+    }
+
+    /// Whether `error` is the database being gone, as it then marks: one
+    /// that says so (a call that ran out of time, a connection that could
+    /// not be had) is believed only if the database does not answer a
+    /// question of its own ([`Self::database_answers`]).
+    pub(crate) async fn confirm_outage(&self, error: &crate::error::Error) -> bool {
+        if !crate::outage::unreachable(error) || self.database_answers().await {
+            return false;
+        }
+        self.gateway.outage.failed(error)
     }
 
     /// The last flush of a gateway that is stopping: as any other, and
@@ -355,7 +421,7 @@ impl Store {
         if !closing && self.serves != crate::store::Serves::Edge && !self.gateway.due() {
             return Ok(());
         }
-        let mut tx = self.gateway_transaction().await?;
+        let mut tx = self.flush_transaction().await?;
         let period: String = sqlx::query_scalar(&format!("SELECT {PERIOD}::text"))
             .fetch_one(&mut *tx)
             .await?;
@@ -453,6 +519,16 @@ impl Store {
 
     async fn write_gateway(&self, tx: &mut Tx, batch: &Batch, closing: bool) -> Result<Written> {
         let session = self.gateway.session();
+        // The edge is heard from, closing or not: one that restarts is not
+        // taken for gone, nor its apps given to another.
+        if self.gateway.edge.is_some() {
+            exec(
+                tx,
+                "UPDATE edges SET seen=clock_timestamp() WHERE id=$1",
+                args![self.gateway.edge],
+            )
+            .await?;
+        }
         if closing {
             exec(
                 tx,
@@ -603,7 +679,7 @@ impl Store {
         if self.gateway.outage.down_for().is_some() {
             return Err(crate::error::Error::database_unavailable());
         }
-        let taken = crate::outage::within(crate::outage::READ_WITHIN, async {
+        let taken = crate::outage::within_locked(crate::outage::READ_WITHIN, async {
             let mut tx = self.gateway_transaction().await?;
             let share = self
                 .take_share(&mut tx, tenant, concurrent, per_minute)
@@ -618,7 +694,7 @@ impl Store {
                 Ok(taken.0)
             }
             Err(error) => {
-                self.gateway.outage.failed(&error);
+                self.confirm_outage(&error).await;
                 Err(error)
             }
         }
@@ -629,6 +705,49 @@ impl Store {
     /// does not use, and give it back at their next flush. Waits up to two
     /// seconds for that, taking its share again as they do. `None` when the
     /// workspace has no room, or none came.
+    /// This process's share of `tenant`'s limits, and the room the
+    /// workspace had, taken again under the lock for requests short of it:
+    /// at most every [`crate::shares::RETAKE`], however many requests ask.
+    /// The others have the share as it last was, without the lock. The
+    /// limits are read when not given. `None` when it could not be taken.
+    pub(crate) async fn retake_share(
+        &self,
+        tenant: &str,
+        limits: Option<(i64, i64)>,
+    ) -> Option<(crate::shares::Limits, crate::shares::Limits)> {
+        let mut retaken = self.gateway.shares.retaken.lock().await;
+        if retaken
+            .get(tenant)
+            .is_some_and(|at| at.elapsed() < crate::shares::RETAKE)
+        {
+            drop(retaken);
+            return Some((
+                self.gateway.shares.of(tenant)?,
+                self.gateway.shares.room_of(tenant)?,
+            ));
+        }
+        let taken = crate::outage::within_locked(crate::outage::READ_WITHIN, async {
+            let mut tx = self.gateway_transaction().await?;
+            let (concurrent, per_minute) = match limits {
+                Some(limits) => limits,
+                None => {
+                    let row = crate::db::one(&mut tx,"SELECT http_concurrent_requests concurrent,http_requests_per_minute per_minute FROM tenants WHERE id=$1",args![tenant]).await?;
+                    (crate::db::n(&row["concurrent"]), crate::db::n(&row["per_minute"]))
+                }
+            };
+            let share = self
+                .take_share(&mut tx, tenant, concurrent, per_minute)
+                .await?;
+            tx.commit().await?;
+            Ok::<_, crate::error::Error>(share)
+        })
+        .await
+        .ok()?;
+        self.gateway.shares.set(tenant, taken);
+        retaken.insert(tenant.to_owned(), std::time::Instant::now());
+        Some(taken)
+    }
+
     pub(crate) async fn grow_share(
         &self,
         tenant: &str,
@@ -647,18 +766,10 @@ impl Store {
             if tokio::time::Instant::now() >= until {
                 return None;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let taken = crate::outage::within(crate::outage::READ_WITHIN, async {
-                let mut tx = self.gateway_transaction().await?;
-                let share = self
-                    .take_share(&mut tx, tenant, concurrent, per_minute)
-                    .await?;
-                tx.commit().await?;
-                Ok::<_, crate::error::Error>(share)
-            })
-            .await
-            .ok()?;
-            self.gateway.shares.set(tenant, taken);
+            tokio::time::sleep(crate::shares::RETAKE).await;
+            let taken = self
+                .retake_share(tenant, Some((concurrent, per_minute)))
+                .await?;
             if enough(taken.0) {
                 return Some(taken.0);
             }
@@ -813,7 +924,7 @@ impl Store {
             return false;
         }
         let want = want.max(need);
-        let granted = crate::outage::within(crate::outage::READ_WITHIN, async {
+        let granted = crate::outage::within_locked(crate::outage::READ_WITHIN, async {
             let mut tx = self.gateway_transaction().await?;
             let granted = self.lease_grant(&mut tx, key, want).await?;
             tx.commit().await?;
@@ -826,7 +937,7 @@ impl Store {
                 self.gateway.budgets.has(key, need)
             }
             Err(error) => {
-                self.gateway.outage.failed(&error);
+                self.confirm_outage(&error).await;
                 false
             }
         }

@@ -53,9 +53,27 @@ where
     .map_err(|_| Error::internal())
 }
 
+/// Transactions of a process that wait for the mutation lock at once, of
+/// its pool's 16 connections.
+pub const LOCK_WAITERS: usize = 4;
+
+/// Connections a process's pool holds, unless told otherwise
+/// (`--database-connections`). An edge does a few reads for each request
+/// it has not seen the host name of: one taking thousands of requests to
+/// thousands of apps at once may want more.
+pub const CONNECTIONS: u32 = 16;
+
+/// How long a transaction waits for its turn to wait for the lock: as long
+/// as it would wait for the lock itself (`lock_timeout`).
+pub const LOCK_TURN_WAIT: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct Store {
     pub pool: PgPool,
+    /// Transactions of this process waiting for the mutation lock, at most
+    /// [`LOCK_WAITERS`] at once: each waits on one of the pool's
+    /// connections, and those left are for the work that takes no lock.
+    lock_waiters: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) state: PathBuf,
     /// The master encryption key's cipher: tenants' secrets. An edge has
     /// none ([`Store::edge_from_pool`]).
@@ -260,9 +278,13 @@ pub fn write_edge_key(control_state: &Path, output: &Path) -> Result<Value> {
 
 impl Store {
     pub async fn connect(dsn: &str, state: &Path) -> Result<Self> {
+        Self::connect_with(dsn, state, CONNECTIONS).await
+    }
+    /// As [`Self::connect`], with a pool of `connections`.
+    pub async fn connect_with(dsn: &str, state: &Path, connections: u32) -> Result<Self> {
         crate::db::database_url(dsn)?;
         let pool = PgPoolOptions::new()
-            .max_connections(16)
+            .max_connections(connections)
             .acquire_timeout(Duration::from_secs(5))
             .connect(dsn)
             .await?;
@@ -314,9 +336,13 @@ impl Store {
             .map(|store| store.serving(Serves::Edge))
     }
     pub async fn connect_edge(dsn: &str, state: &Path) -> Result<Self> {
+        Self::connect_edge_with(dsn, state, CONNECTIONS).await
+    }
+    /// As [`Self::connect_edge`], with a pool of `connections`.
+    pub async fn connect_edge_with(dsn: &str, state: &Path, connections: u32) -> Result<Self> {
         crate::db::database_url(dsn)?;
         let pool = PgPoolOptions::new()
-            .max_connections(16)
+            .max_connections(connections)
             .acquire_timeout(Duration::from_secs(5))
             .connect(dsn)
             .await?;
@@ -331,6 +357,7 @@ impl Store {
     ) -> Result<Self> {
         Ok(Self {
             pool,
+            lock_waiters: std::sync::Arc::new(tokio::sync::Semaphore::new(LOCK_WAITERS)),
             state: state.canonicalize()?,
             cipher,
             channel_cipher,
@@ -373,7 +400,15 @@ impl Store {
     /// moves it after it commits, if a trigger said it changed any of it
     /// (`sql/gate_changes.sql`).
     pub(crate) async fn watched_transaction(&self) -> Result<Tx> {
-        self.begin_transaction(true, false, false, false).await
+        // Heartbeats and scheduler passes are few, and what keeps every
+        // run and app moving: they do not wait for a turn behind requests.
+        self.begin_with(true, false, false, false, true).await
+    }
+    /// The gateway's flush: under the lock, without waiting for a turn
+    /// behind requests, as what it writes (what the exchange sees, which
+    /// apps serve) is what they wait for.
+    pub(crate) async fn flush_transaction(&self) -> Result<Tx> {
+        self.begin_with(true, false, false, false, true).await
     }
     /// Commits a [`Self::watched_transaction`], and moves the epoch if it
     /// changed what the gates hold.
@@ -450,6 +485,14 @@ impl Store {
         }
         self
     }
+    /// How long a flush may take, instead of [`crate::outage::FLUSH_WITHIN`]:
+    /// for tests.
+    pub fn with_flush_within(mut self, within: Duration) -> Self {
+        if let Some(gateway) = std::sync::Arc::get_mut(&mut self.gateway) {
+            gateway.flush_within = within;
+        }
+        self
+    }
     /// Requests of apps other edges own are passed to them with `forwarder`.
     pub fn with_forwarder(mut self, forwarder: crate::forward::Forwarder) -> Self {
         self.forwarder = Some(std::sync::Arc::new(forwarder));
@@ -471,10 +514,39 @@ impl Store {
                 .stale(hostname)
                 .and_then(|gate| gate.owner),
             _ => {
-                let _ = epoch;
-                let mut tx = self.transaction(false, false).await?;
-                crate::db::optional(&mut tx,"SELECT x.edge_id FROM app_http h JOIN app_edges x ON x.app_id=h.app_id WHERE h.hostname=$1",crate::args![hostname]).await?
-                    .and_then(|row| row["edge_id"].as_str().map(str::to_owned))
+                // What was read is believed as a gate is: for as long as it
+                // is fresh, and the gates' epoch has not moved, as a change
+                // of owner moves it (`app_edges`' trigger).
+                let known = self
+                    .gateway
+                    .owners
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(hostname)
+                    .filter(|(_, read, at)| *at == epoch && read.elapsed() < crate::gate::FRESH)
+                    .map(|(owner, _, _)| owner.clone());
+                match known {
+                    Some(owner) => owner,
+                    None => {
+                        let mut tx = self.transaction(false, false).await?;
+                        let owner = crate::db::optional(&mut tx,"SELECT x.edge_id FROM app_http h JOIN app_edges x ON x.app_id=h.app_id WHERE h.hostname=$1",crate::args![hostname]).await?
+                            .and_then(|row| row["edge_id"].as_str().map(str::to_owned));
+                        let mut owners = self
+                            .gateway
+                            .owners
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        // Bounded: a flood of made-up names forgets the rest.
+                        if owners.len() >= 65536 {
+                            owners.clear();
+                        }
+                        owners.insert(
+                            hostname.to_owned(),
+                            (owner.clone(), std::time::Instant::now(), epoch),
+                        );
+                        owner
+                    }
+                }
             }
         };
         Ok(owner.filter(|owner| !self.owns(Some(owner))))
@@ -537,6 +609,39 @@ impl Store {
         snapshot: bool,
         changes_gates: bool,
     ) -> Result<Tx> {
+        self.begin_with(mutate, recovery, snapshot, changes_gates, false)
+            .await
+    }
+    async fn begin_with(
+        &self,
+        mutate: bool,
+        recovery: bool,
+        snapshot: bool,
+        changes_gates: bool,
+        priority: bool,
+    ) -> Result<Tx> {
+        // A transaction that is to wait for the lock waits first, without a
+        // connection, for its turn to: a burst of them would otherwise hold
+        // every connection while they wait, and a read that takes no lock
+        // would wait for one long enough to take the database for gone.
+        // A request waits for a turn no longer than it would for the lock.
+        let turn = if mutate && !priority {
+            let waiting = self.lock_waiters.clone().acquire_owned();
+            Some(
+                tokio::time::timeout(LOCK_TURN_WAIT, waiting)
+                    .await
+                    .map_err(|_| {
+                        Error::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "the control plane is busy; try again",
+                        )
+                        .coded("busy")
+                    })?
+                    .map_err(|_| Error::internal())?,
+            )
+        } else {
+            None
+        };
         let mut tx = self.pool.begin().await?;
         if snapshot {
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -555,6 +660,7 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
             self.load.locked(asked.elapsed());
+            drop(turn);
             if changes_gates {
                 self.gateway.gates.changed();
             }

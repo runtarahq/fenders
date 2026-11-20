@@ -49,6 +49,8 @@ mod control_plane_rollout;
 mod dns;
 #[path = "cases/egress_budget.rs"]
 mod egress_budget;
+#[path = "cases/eviction.rs"]
+mod eviction;
 #[path = "cases/execution_input_retention.rs"]
 mod execution_input_retention;
 #[path = "cases/execution_logs.rs"]

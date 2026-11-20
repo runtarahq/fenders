@@ -513,13 +513,18 @@ impl crate::store::Store {
 
     /// The app an execution belongs to, when that app accepts WebSocket
     /// connections: an execution of it may send to them.
-    pub(crate) async fn websocket_sender(&self, execution: &str) -> Result<Option<String>> {
+    /// Read in the caller's transaction: a second one, beside one holding
+    /// the mutation lock, would wait for a connection that the transactions
+    /// waiting for the lock may all hold.
+    pub(crate) async fn websocket_sender(
+        tx: &mut crate::store::Tx,
+        execution: &str,
+    ) -> Result<Option<String>> {
         use crate::{
             args,
             db::{optional, s},
         };
-        let mut tx = self.transaction(false, false).await?;
-        Ok(optional(&mut tx,"SELECT a.id FROM apps a WHERE a.configuration->>'websocket'='true' AND a.id=COALESCE((SELECT app_id FROM app_http_attempts WHERE execution_id=$1),(SELECT app_id FROM app_runs WHERE execution_id=$1))",args![execution]).await?
+        Ok(optional(tx,"SELECT a.id FROM apps a WHERE a.configuration->>'websocket'='true' AND a.id=COALESCE((SELECT app_id FROM app_http_attempts WHERE execution_id=$1),(SELECT app_id FROM app_runs WHERE execution_id=$1))",args![execution]).await?
             .map(|a| s(&a["id"]).to_owned()))
     }
 

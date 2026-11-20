@@ -1747,7 +1747,9 @@ async fn public_gateway_and_secret_logs_preserve_credential_boundaries() {
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
             let waiting:i64=sqlx::query_scalar("SELECT count(*) FROM ingress_reservations WHERE app_id=$1 AND execution_id IS NULL").bind(demand_id).fetch_one(&store.pool).await.unwrap();
-            if waiting==2 {break;}
+            // One wakes the app; the other follows it, with no
+            // reservation of its own ([`fenders_control_plane::wakes`]).
+            if waiting==1 {break;}
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }).await.unwrap();

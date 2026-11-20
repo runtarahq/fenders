@@ -435,6 +435,8 @@ async fn workspace_log_payload_and_record_budgets_preserve_other_tenants() {
         .unwrap();
     sqlx::query("INSERT INTO execution_log_records(tenant_id,project_id,execution_id,sequence,stream,at_ms,payload) SELECT tenant_id,project_id,execution_id,i,'stdout',1,decode(repeat('ab',8192),'hex') FROM execution_log_sources CROSS JOIN generate_series(1,128) i WHERE execution_id LIKE 'history-%' ORDER BY execution_id,i")
         .execute(&l.store.pool).await.unwrap();
+    // A process bounds a workspace's output at most once a second.
+    tokio::time::sleep(fenders_control_plane::execution_logs::WORKSPACE_BOUND_EVERY).await;
     let receipt = ingest(
         &l,
         &node,

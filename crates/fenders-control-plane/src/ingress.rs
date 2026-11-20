@@ -8,6 +8,23 @@ use crate::{
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
+/// What a request is refused with when this process's share of its
+/// workspace's limits has no room for it.
+const SHARE_SHORT: &str = "ingress allowance exhausted";
+
+/// What a cold admission tried without the lock answers when it needs it.
+const NEEDS_LOCK: &str = "the admission needs the mutation lock";
+
+/// What it answers when it found the app serving: the request goes in as
+/// one to an app that serves does, from what is read of it without the
+/// lock, unless its gate was closed.
+const SERVES_NOW: &str = "the app serves now";
+
+/// What it answers when it has had its process take what it lacked (a
+/// share of the workspace's limits, a lease of its allowance), and is to
+/// be tried without the lock again.
+const TRY_AGAIN: &str = "the admission is to be tried again";
+
 /// The largest request body and the largest response body passed on.
 pub const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -362,10 +379,11 @@ impl Store {
                     whose
                 }
                 // The database went away: what the gates know decides.
-                Err(error) if self.gateway.outage.failed(&error) => Some((String::new(), i64::MAX)),
-                Err(error) => return Err(error),
+                Err(error) if self.confirm_outage(&error).await => Some((String::new(), i64::MAX)),
+                Err(error) => return Err(crate::outage::busy(error)),
             },
         };
+        let tenant = whose.as_ref().map(|(tenant, _)| tenant.clone());
         match whose {
             None => {
                 return Err(Error::new(
@@ -403,13 +421,73 @@ impl Store {
         // The request is counted as in flight from the moment it is
         // admitted; one that is not admitted after all is not.
         let reservation = uid();
-        let admitted = self
-            .ingress_cold(hostname, allow_wait, request, &reservation)
+        // A request that wakes an app is admitted without the lock when it
+        // can be: the scheduler wakes the app ([`Self::ingress_cold`]).
+        let mut admitted = self
+            .ingress_cold(hostname, allow_wait, request, &reservation, false)
             .await;
+        // The app came to serve since it was looked at: in as any request
+        // to an app that serves, unless its gate is closed, which only the
+        // locked path opens.
+        if matches!(&admitted, Err(e) if e.message == SERVES_NOW) {
+            if let Some(gate) = self.gate_read(hostname).await? {
+                if !self.owns(gate.owner.as_deref()) {
+                    return Err(misdirected());
+                }
+                let reservation = self.ingress_warm(&gate, request).await?;
+                return Ok((Some(gate.route), reservation));
+            }
+            admitted = Err(Error::new(StatusCode::CONFLICT, NEEDS_LOCK));
+        }
+        if matches!(&admitted, Err(e) if e.message == TRY_AGAIN) {
+            admitted = self
+                .ingress_cold(hostname, allow_wait, request, &reservation, false)
+                .await;
+        }
+        if matches!(&admitted, Err(e) if e.message == NEEDS_LOCK || e.message == TRY_AGAIN) {
+            admitted = self
+                .ingress_cold(hostname, allow_wait, request, &reservation, true)
+                .await;
+        }
+        // This process's share of the workspace's limits had no room for
+        // it. With the lock let go, it waits for one the workspace has room
+        // for, as a warm request does, and is admitted once more.
+        if matches!(&admitted, Err(e) if e.status == StatusCode::TOO_MANY_REQUESTS && e.message == SHARE_SHORT)
+            && let Some(tenant) = tenant.filter(|t| !t.is_empty())
+        {
+            self.gateway.gates.leave(&reservation);
+            if self.share_with_room(&tenant).await {
+                admitted = self
+                    .ingress_cold(hostname, allow_wait, request, &reservation, true)
+                    .await;
+            }
+        }
         if admitted.is_err() {
             self.gateway.gates.leave(&reservation);
         }
         admitted.map(|route| (route, reservation))
+    }
+
+    /// Takes this process's share of `tenant`'s limits again, until it has
+    /// room for one more request or the workspace has none to give, for
+    /// two seconds at most: another process gives back what it does not
+    /// use at its next flush ([`crate::shares`]). Whether it has room.
+    async fn share_with_room(&self, tenant: &str) -> bool {
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let Some((share, room)) = self.retake_share(tenant, None).await else {
+                return false;
+            };
+            if share.concurrent > self.gateway.gates.in_flight_of(tenant) as i64
+                && share.per_minute > self.http_rates.count(tenant)
+            {
+                return true;
+            }
+            if room.concurrent < 1 && room.per_minute < 1 || tokio::time::Instant::now() >= until {
+                return false;
+            }
+            tokio::time::sleep(crate::shares::RETAKE).await;
+        }
     }
     /// Whose `hostname` is, and its workspace's requests a minute.
     async fn ingress_whose(&self, hostname: &str) -> Result<Option<(String, i64)>> {
@@ -435,7 +513,8 @@ impl Store {
             return stale();
         }
         match crate::outage::within(crate::outage::READ_WITHIN, self.gate_fetch(hostname)).await {
-            Err(error) if outage.failed(&error) => stale(),
+            Err(error) if self.confirm_outage(&error).await => stale(),
+            Err(error) => Err(crate::outage::busy(error)),
             read => read,
         }
     }
@@ -589,9 +668,35 @@ impl Store {
         allow_wait: bool,
         request: Option<(&str, &str)>,
         reservation: &str,
+        locked: bool,
     ) -> Result<Option<Value>> {
+        // Without the lock, a request that waits for its app to start is
+        // admitted when nothing here needs it: it holds a reservation, and
+        // the scheduler, told of it, wakes the app in its pass. A thousand
+        // requests to a thousand idle apps then take the lock not at all,
+        // rather than a thousand times ahead of the scheduler and the
+        // nodes' heartbeats. One to an app that serves, or that needs a
+        // share of its workspace's limits or more of its lease, takes it.
+        let needs_lock = || Error::new(StatusCode::CONFLICT, NEEDS_LOCK);
         let epoch = self.gateway.gates.epoch();
-        let mut tx = self.gateway_transaction().await?;
+        let mut tx = if locked {
+            self.gateway_transaction().await?
+        } else {
+            self.transaction(false, false).await?
+        };
+        // A restored control plane admits nothing until it is activated:
+        // the locked path says so.
+        if !locked
+            && one(
+                &mut tx,
+                "SELECT active FROM recovery_barrier WHERE singleton",
+                args![],
+            )
+            .await?["active"]
+                == true
+        {
+            return Err(needs_lock());
+        }
         let route = Self::ingress_route(&mut tx, hostname).await?;
         let app = optional(&mut tx, APP_OF_HOST, args![hostname]).await?;
         // A request waits while its app has nothing ready to serve it but
@@ -609,7 +714,14 @@ impl Store {
                 "service unavailable",
             ));
         }
-        let expired = Self::expire_ingress(&mut tx).await?;
+        if !locked && route.is_some() {
+            return Err(Error::new(StatusCode::CONFLICT, SERVES_NOW));
+        }
+        let expired = if locked {
+            Self::expire_ingress(&mut tx).await?
+        } else {
+            Vec::new()
+        };
         let context = route
             .as_ref()
             .or(app.as_ref())
@@ -645,6 +757,34 @@ impl Store {
             row: route.is_none(),
             bound: route.is_some(),
         };
+        // A share of the workspace's limits, or enough of its project's
+        // lease, that this process lacks is taken under the lock by one
+        // request at a time, and found taken by the others
+        // ([`Self::retake_share`], [`Self::lease_extend`]); then the request
+        // is tried without the lock again. After a restart, the first
+        // thousand requests of a workspace take them once, not each.
+        let key = (s(tenant).to_owned(), s(&context["project_id"]).to_owned());
+        if !locked
+            && (self.gateway.shares.of(s(tenant)).is_none()
+                || self.gateway.budgets.short(&key).is_some())
+        {
+            // Only read: given back before what follows takes the lock.
+            drop(tx);
+            if self.gateway.shares.of(s(tenant)).is_none() {
+                self.retake_share(
+                    s(tenant),
+                    Some((
+                        n(&limits["http_concurrent_requests"]),
+                        n(&limits["http_requests_per_minute"]),
+                    )),
+                )
+                .await;
+            }
+            if let Some(want) = self.gateway.budgets.short(&key) {
+                self.lease_extend(&key, crate::lease::BLOCK, want).await;
+            }
+            return Err(Error::new(StatusCode::CONFLICT, TRY_AGAIN));
+        }
         let (share, taken) = match self.gateway.shares.of(s(tenant)) {
             Some(share) => (share, None),
             None => {
@@ -664,7 +804,7 @@ impl Store {
             .gates
             .enter(reservation, entered, share.concurrent)
         {
-            return Err(quota("ingress allowance exhausted"));
+            return Err(quota(SHARE_SHORT));
         }
         // The request's bytes come out of the gateway's lease of the
         // workspace's transfer allowance. A lease with not a block left is
@@ -689,7 +829,7 @@ impl Store {
             None => None,
         };
         if !self.http_rates.admit(s(tenant), share.per_minute) {
-            return Err(quota("ingress allowance exhausted"));
+            return Err(quota(SHARE_SHORT));
         }
         // What was read here, under the lock, is what the gateway now
         // knows of the host name: its next requests come in warm.
@@ -723,7 +863,7 @@ impl Store {
         // to write too.
         let admitted = context["hostname"].as_str().unwrap_or(hostname);
         let audited = self.http_rates.first_this_minute(s(tenant), admitted);
-        if !app.is_null() {
+        if !app.is_null() && locked {
             exec(
                 &mut tx,
                 "UPDATE app_http SET last_activity=now() WHERE app_id=$1",
@@ -731,6 +871,14 @@ impl Store {
             )
             .await?;
             Self::wake_http(&mut tx, s(&app["id"])).await?;
+        } else if !app.is_null() && self.gateway.wakes.tell_scheduler() {
+            // The scheduler wakes it, told at once ([`crate::wakes`]).
+            exec(
+                &mut tx,
+                "SELECT pg_notify('fenders_schedule','wake')",
+                args![],
+            )
+            .await?;
         }
         tx.commit().await?;
         if let Some(taken) = taken {
@@ -757,7 +905,34 @@ impl Store {
         Ok(route)
     }
     pub async fn ingress_poll(&self, reservation: &str) -> Result<Option<Value>> {
-        let mut tx = self.gateway_transaction().await?;
+        // Asked without the lock first: until something serves the app
+        // there is nothing to bind the request to, and a thousand waiting
+        // requests asking under the lock would hold back everything else.
+        if !self.wake_settled(reservation).await? {
+            return Ok(None);
+        }
+        // Bound to the execution without the mutation lock: the app's row
+        // is locked instead, and read again once it is. Whatever takes an
+        // app's execution out of service (a takeover, an idle stop, an
+        // eviction, a stop) changes that row under the mutation lock: a
+        // request bound before it is seen by it, and one bound after it
+        // finds the app changed. A thousand requests coming to serving apps
+        // together are bound at once, not one after another behind every
+        // scheduler pass. A restored control plane awaiting activation
+        // binds under the lock, which refuses.
+        let mut tx = self.transaction(false, false).await?;
+        let locked = one(
+            &mut tx,
+            "SELECT active FROM recovery_barrier WHERE singleton",
+            args![],
+        )
+        .await?["active"]
+            == true;
+        if locked {
+            tx = self.gateway_transaction().await?;
+        } else {
+            optional(&mut tx,"SELECT h.app_id FROM app_http h JOIN ingress_reservations q ON q.app_id=h.app_id WHERE q.id=$1 FOR SHARE OF h",args![reservation]).await?;
+        }
         let q=optional(&mut tx,"SELECT q.*,h.hostname,h.blocked,a.desired,t.http,a.target_release_id,a.revision FROM ingress_reservations q JOIN apps a ON a.id=q.app_id JOIN app_http h ON h.app_id=a.id JOIN app_triggers t ON t.app_id=a.id WHERE q.id=$1 AND q.expires>now()",args![reservation]).await?.ok_or_else(||Error::new(StatusCode::SERVICE_UNAVAILABLE,"HTTP wake request expired"))?;
         Self::require_workspace_active(&mut tx, s(&q["tenant_id"])).await?;
         if !q["execution_id"].is_null()
@@ -775,12 +950,16 @@ impl Store {
         let route = Self::ingress_route(&mut tx, s(&q["hostname"])).await?;
         if let Some(route) = &route {
             exec(&mut tx,"UPDATE ingress_reservations SET execution_id=$1,expires=now()+interval '90 seconds' WHERE id=$2",args![route["execution_id"],reservation]).await?;
-            exec(
-                &mut tx,
-                "UPDATE app_http SET last_activity=now() WHERE app_id=$1",
-                args![q["app_id"]],
-            )
-            .await?;
+            // Its activity is the flush's to write: the app's row, held
+            // for share, is not written here.
+            if locked {
+                exec(
+                    &mut tx,
+                    "UPDATE app_http SET last_activity=now() WHERE app_id=$1",
+                    args![q["app_id"]],
+                )
+                .await?;
+            }
         }
         tx.commit().await?;
         if let Some(execution) = route.as_ref().and_then(|r| r["execution_id"].as_str()) {
@@ -790,32 +969,125 @@ impl Store {
         }
         Ok(route)
     }
+    /// Runs a round of [`crate::wakes::Rounds`] when it is this caller's
+    /// turn: which of the waiting reservations' apps serve, or whose wake
+    /// ended or changed. Read without the lock, in one query.
+    async fn wake_round(&self) -> Result<()> {
+        let Some((_turn, waiting)) = self.gateway.wakes.rounds.take_turn() else {
+            return Ok(());
+        };
+        if waiting.is_empty() {
+            self.gateway.wakes.rounds.answer(Default::default());
+            return Ok(());
+        }
+        let mut tx = self.transaction(false, false).await?;
+        let settled = rows(&mut tx,"SELECT x.id FROM jsonb_array_elements_text($1::jsonb) x(id)
+            LEFT JOIN ingress_reservations q ON q.id=x.id AND q.expires>now()
+            LEFT JOIN apps a ON a.id=q.app_id LEFT JOIN app_http h ON h.app_id=a.id LEFT JOIN app_triggers t ON t.app_id=a.id
+            WHERE q.id IS NULL OR h.blocked OR q.execution_id IS NOT NULL OR a.desired<>'enabled' OR NOT t.http OR a.target_release_id IS DISTINCT FROM q.release_id OR a.revision<>q.app_revision
+            OR EXISTS(SELECT 1 FROM routes r JOIN deployments d ON d.id=r.deployment_id JOIN executions e ON e.deployment_id=d.id AND h.execution_id=e.id JOIN nodes n ON n.id=e.node_id
+                WHERE r.hostname=h.hostname AND d.desired='running' AND e.desired='running' AND e.state='running' AND e.reserved AND NOT n.disabled AND n.last_seen>now()-interval '15 seconds' AND n.observed_confinement=$2 AND h.state='serving')",args![json!(waiting),HOST_CONFINEMENT]).await?;
+        tx.commit().await?;
+        self.gateway
+            .wakes
+            .rounds
+            .answer(settled.iter().map(|r| s(&r["id"]).to_owned()).collect());
+        Ok(())
+    }
+
+    /// Whether a waiting request's app serves, or its wake ended or
+    /// changed: what [`Self::ingress_poll`] then decides under the lock.
+    /// Read without it.
+    async fn wake_settled(&self, reservation: &str) -> Result<bool> {
+        let mut tx = self.transaction(false, false).await?;
+        let Some(q) = optional(&mut tx,"SELECT h.hostname,(h.blocked OR q.execution_id IS NOT NULL OR a.desired<>'enabled' OR NOT t.http OR a.target_release_id IS DISTINCT FROM q.release_id OR a.revision<>q.app_revision) AS changed FROM ingress_reservations q JOIN apps a ON a.id=q.app_id JOIN app_http h ON h.app_id=a.id JOIN app_triggers t ON t.app_id=a.id WHERE q.id=$1 AND q.expires>now()",args![reservation]).await? else {
+            return Ok(true);
+        };
+        if q["changed"] == true {
+            return Ok(true);
+        }
+        Ok(Self::ingress_route(&mut tx, s(&q["hostname"]))
+            .await?
+            .is_some())
+    }
+
     pub async fn ingress_wait_request(
         &self,
         hostname: &str,
         request_bytes: usize,
         request: Option<(&str, &str)>,
     ) -> Result<(Value, String)> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        // A request to an app that serves goes in at once. One to an app
+        // being woken by another request of this process waits for that
+        // one, without the lock, and goes in after it ([`crate::wakes`]).
+        let _leading = loop {
+            if matches!(
+                self.gateway.gates.look(hostname),
+                crate::gate::Look::Warm(_)
+            ) {
+                break None;
+            }
+            match self.gateway.wakes.join(hostname) {
+                crate::wakes::Wake::Lead(leading) => break Some(leading),
+                crate::wakes::Wake::Follow(done) => {
+                    if tokio::time::timeout_at(deadline, crate::wakes::followed(done))
+                        .await
+                        .is_err()
+                    {
+                        return Err(Error::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "HTTP wake deadline exceeded",
+                        ));
+                    }
+                }
+            }
+        };
         let (route, lease) = self
             .ingress_begin_request(hostname, request_bytes, true, request)
             .await?;
         if let Some(route) = route {
             return Ok((route, lease));
         }
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        // It waits among the others: asked about in rounds, together
+        // ([`crate::wakes::Rounds`]), and asked about alone, and bound to
+        // the execution under the lock, only once a round finds it settled.
+        struct Waiting<'a>(&'a crate::wakes::Rounds, String);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.done(&self.1);
+            }
+        }
+        self.gateway.wakes.rounds.wait(&lease);
+        let _waiting = Waiting(&self.gateway.wakes.rounds, lease.clone());
         loop {
-            let polled = tokio::time::timeout_at(deadline, self.ingress_poll(&lease))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(Error::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "HTTP wake deadline exceeded",
-                    ))
-                });
+            // Looked at again when what serves changes, or a moment later.
+            let moved = self.gateway.gates.moved();
+            // A round that fails (the database is slow to answer) is as one
+            // that found nothing: the next will ask again.
+            let _ = tokio::time::timeout_at(deadline, self.wake_round()).await;
+            let polled = if self.gateway.wakes.rounds.settled(&lease) {
+                tokio::time::timeout_at(deadline, self.ingress_poll(&lease))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(Error::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "HTTP wake deadline exceeded",
+                        ))
+                    })
+            } else if tokio::time::Instant::now() >= deadline {
+                Err(Error::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "HTTP wake deadline exceeded",
+                ))
+            } else {
+                Ok(None)
+            };
             match polled {
                 Ok(Some(route)) => return Ok((route, lease)),
                 Ok(None) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_millis(250), moved).await;
                 }
                 result => {
                     self.ingress_finish(&lease, Some(0)).await?;
@@ -951,7 +1223,10 @@ impl Store {
         let settled = match self.gateway.gates.leave(reservation) {
             Some(entered) if !entered.row => true,
             _ => {
-                let mut tx = self.gateway_transaction().await?;
+                // Without the mutation lock: the row is all there is to it,
+                // and deleting it takes the row's own lock. Hundreds of
+                // requests that waited for apps to start end together.
+                let mut tx = self.transaction(false, false).await?;
                 let row = optional(
                     &mut tx,
                     "DELETE FROM ingress_reservations WHERE id=$1 RETURNING id",

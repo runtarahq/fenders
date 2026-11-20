@@ -98,6 +98,38 @@ pub async fn within<T>(
         .unwrap_or_else(|_| Err(crate::error::Error::database_unavailable()))
 }
 
+/// `work` under the mutation lock, given `within`: one that takes longer
+/// most often waited for the lock behind other work, which is not the
+/// database being gone, and is answered as busy.
+pub async fn within_locked<T>(
+    within: Duration,
+    work: impl std::future::Future<Output = crate::error::Result<T>>,
+) -> crate::error::Result<T> {
+    tokio::time::timeout(within, work)
+        .await
+        .unwrap_or_else(|_| {
+            Err(crate::error::Error::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "the control plane is busy; try again",
+            )
+            .coded("busy"))
+        })
+}
+
+/// What a call that said the database was gone answers when the database
+/// answered after all: the process is busy.
+pub fn busy(error: crate::error::Error) -> crate::error::Error {
+    if unreachable(&error) {
+        crate::error::Error::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "the control plane is busy; try again",
+        )
+        .coded("busy")
+    } else {
+        error
+    }
+}
+
 /// Whether `error` is the database not being there.
 pub fn unreachable(error: &crate::error::Error) -> bool {
     error.is_database_unavailable()

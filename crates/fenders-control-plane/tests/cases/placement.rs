@@ -208,3 +208,61 @@ async fn occupied_capacity_explains_queued_commands_without_changing_admission()
     );
     l.finish().await;
 }
+
+#[tokio::test]
+async fn a_nodes_declared_capacity_is_changed_and_placement_counts_it() {
+    let l = Lab::new().await;
+    // The lab's node holds one execution: 100% CPU, 128 MiB, one instance.
+    let node = l.node("overcommitted").await;
+    approve_component(&l, &node, true, true).await;
+    let first =
+        s(&l.deploy("first", true, false, "first").await.unwrap()["resource_id"]).to_owned();
+    let second =
+        s(&l.deploy("second", true, false, "second").await.unwrap()["resource_id"]).to_owned();
+    l.store.schedule().await.unwrap();
+    let placed = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM executions WHERE reserved AND node_id IS NOT NULL",
+        )
+        .fetch_one(&l.store.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(placed().await, 1);
+    for bad in [
+        json!({"cpu_percent":0}),
+        json!({"memory_mib":"lots"}),
+        json!({"instances":100001}),
+    ] {
+        assert_eq!(
+            l.store
+                .node_mode(&l.operator, s(&node["id"]), bad)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    // Declared with twice the CPU, memory and instances: the second fits.
+    l.store
+        .node_mode(
+            &l.operator,
+            s(&node["id"]),
+            json!({"cpu_percent":200,"memory_mib":256,"instances":2}),
+        )
+        .await
+        .unwrap();
+    l.store.schedule().await.unwrap();
+    assert_eq!(placed().await, 2);
+    for app in [&first, &second] {
+        assert!(!l.http(app).await["execution_id"].is_null());
+    }
+    // Lowered below what is placed: nothing is stopped.
+    l.store
+        .node_mode(&l.operator, s(&node["id"]), json!({"cpu_percent":50}))
+        .await
+        .unwrap();
+    l.store.schedule().await.unwrap();
+    assert_eq!(placed().await, 2);
+    l.finish().await;
+}

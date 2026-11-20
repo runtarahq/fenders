@@ -16,6 +16,9 @@ pub const EXECUTION_BYTES: i64 = 1024 * 1024;
 pub const EXECUTION_RECORDS: i64 = 4096;
 pub const WORKSPACE_BYTES: i64 = 64 * 1024 * 1024;
 pub const WORKSPACE_RECORDS: i64 = 65536;
+/// How often a process applies a workspace's bound on what it keeps, at
+/// most: between, it may keep a second's more.
+pub const WORKSPACE_BOUND_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,9 +128,48 @@ impl Store {
             return Err(Error::invalid("invalid log generation"));
         }
         let batch = Batch::parse(value)?;
-        let mut tx = self.watched_transaction().await?;
+        // Without the mutation lock: a node ships output as its runs write
+        // it, and sixty apps writing a line a request held the lock most of
+        // the time, under everything else. The execution's row is held for
+        // share instead: fencing its output, or deleting it, changes that
+        // row under the lock, and waits for this or is seen by it. The
+        // source's row orders one execution's batches, and a lock of the
+        // workspace's own its bound on what it keeps.
+        let mut tx = self.transaction(false, false).await?;
+        // A restored control plane takes nothing until it is activated, as
+        // under the lock.
+        if one(
+            &mut tx,
+            "SELECT active FROM recovery_barrier WHERE singleton",
+            args![],
+        )
+        .await?["active"]
+            == true
+        {
+            return Err(Error::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "restored control plane awaits external-resource fencing and operator activation",
+            ));
+        }
+        // The workspace's lock first, holding no row while waiting for it:
+        // a batch holding its execution's row while it waited kept a
+        // heartbeat, under the mutation lock, from reporting the run.
+        if let Some(owner) = optional(
+            &mut tx,
+            "SELECT tenant_id FROM executions WHERE id=$1",
+            args![execution],
+        )
+        .await?
+        {
+            exec(
+                &mut tx,
+                "SELECT pg_advisory_xact_lock(184923783,hashtext($1))",
+                args![owner["tenant_id"]],
+            )
+            .await?;
+        }
         let execution_row = optional(&mut tx,
-            "SELECT e.* FROM executions e JOIN nodes n ON n.id=e.node_id WHERE e.id=$1 AND e.generation=$2 AND e.node_id=$3 AND NOT e.log_ingestion_fenced AND NOT n.disabled AND n.backend='wasm' AND n.boot_id=$4 AND n.observed_confinement=$5",
+            "SELECT e.* FROM executions e JOIN nodes n ON n.id=e.node_id WHERE e.id=$1 AND e.generation=$2 AND e.node_id=$3 AND NOT e.log_ingestion_fenced AND NOT n.disabled AND n.backend='wasm' AND n.boot_id=$4 AND n.observed_confinement=$5 FOR SHARE OF e",
             args![execution,generation,node,batch.boot_id,HOST_CONFINEMENT]).await?
             .ok_or_else(|| conflict("log execution ownership or worker identity changed"))?;
         if execution_row["spec"]["secret_env"]
@@ -193,10 +235,17 @@ impl Store {
         // text and are intentionally not used for this value.
         sqlx::query("UPDATE execution_log_sources SET acknowledged=$1,reported_last=$2,end_sequence=$3,source_gap=$4,interrupted=interrupted OR $6,updated=now() WHERE execution_id=$5")
             .bind(ack).bind(reported).bind(end).bind(gap).bind(execution).bind(batch.interrupted).execute(&mut *tx).await?;
-        Self::expire_execution_logs(&mut tx).await?;
-        Self::bound_execution_logs(&mut tx, execution, s(&execution_row["tenant_id"])).await?;
+        // Output older than its days is the scheduler's to remove, each pass.
+        let workspace = self.workspace_bound_due(s(&execution_row["tenant_id"]));
+        Self::bound_execution_logs(
+            &mut tx,
+            execution,
+            s(&execution_row["tenant_id"]),
+            workspace,
+        )
+        .await?;
         let result = one(&mut tx,"SELECT capture_id,acknowledged,source_gap,interrupted,pruned_through,COALESCE(end_sequence=acknowledged,false) AS complete FROM execution_log_sources WHERE execution_id=$1",args![execution]).await?;
-        self.commit_watched(tx).await?;
+        tx.commit().await?;
         Ok(json!({"accepted":true,"cursor":result}))
     }
 
@@ -204,9 +253,39 @@ impl Store {
         exec(tx,"WITH removed AS (DELETE FROM execution_log_records WHERE received<now()-interval '7 days' RETURNING execution_id,sequence), bounds AS (SELECT execution_id,max(sequence) AS sequence FROM removed GROUP BY execution_id) UPDATE execution_log_sources s SET pruned_through=GREATEST(s.pruned_through,b.sequence) FROM bounds b WHERE s.execution_id=b.execution_id",args![]).await?;
         Ok(())
     }
-    async fn bound_execution_logs(tx: &mut Tx, execution: &str, tenant: &str) -> Result<()> {
+    /// Whether `tenant`'s bound on what it keeps is to be applied now: at
+    /// most every [`WORKSPACE_BOUND_EVERY`] by this process. It reads every
+    /// record the workspace keeps; a workspace whose apps write a line a
+    /// request ships dozens of batches a second.
+    fn workspace_bound_due(&self, tenant: &str) -> bool {
+        let mut bounded = self
+            .gateway
+            .log_bounded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if bounded
+            .get(tenant)
+            .is_some_and(|at| at.elapsed() < WORKSPACE_BOUND_EVERY)
+        {
+            return false;
+        }
+        if bounded.len() >= 65536 {
+            bounded.clear();
+        }
+        bounded.insert(tenant.to_owned(), std::time::Instant::now());
+        true
+    }
+    async fn bound_execution_logs(
+        tx: &mut Tx,
+        execution: &str,
+        tenant: &str,
+        workspace: bool,
+    ) -> Result<()> {
         exec(tx,"WITH retained AS (SELECT id,row_number() OVER(ORDER BY id DESC) AS records,sum(octet_length(payload)) OVER(ORDER BY id DESC) AS bytes FROM execution_log_records WHERE execution_id=$1), removed AS (DELETE FROM execution_log_records WHERE id IN (SELECT id FROM retained WHERE records>$2 OR bytes>$3) RETURNING execution_id,sequence), bounds AS (SELECT execution_id,max(sequence) AS sequence FROM removed GROUP BY execution_id) UPDATE execution_log_sources s SET pruned_through=GREATEST(s.pruned_through,b.sequence) FROM bounds b WHERE s.execution_id=b.execution_id",
             args![execution,EXECUTION_RECORDS,EXECUTION_BYTES]).await?;
+        if !workspace {
+            return Ok(());
+        }
         exec(tx,"WITH retained AS (SELECT id,row_number() OVER(ORDER BY id DESC) AS records,sum(octet_length(payload)) OVER(ORDER BY id DESC) AS bytes FROM execution_log_records WHERE tenant_id=$1), removed AS (DELETE FROM execution_log_records WHERE id IN (SELECT id FROM retained WHERE records>$2 OR bytes>$3) RETURNING execution_id,sequence), bounds AS (SELECT execution_id,max(sequence) AS sequence FROM removed GROUP BY execution_id) UPDATE execution_log_sources s SET pruned_through=GREATEST(s.pruned_through,b.sequence) FROM bounds b WHERE s.execution_id=b.execution_id",
             args![tenant,WORKSPACE_RECORDS,WORKSPACE_BYTES]).await?;
         Ok(())
