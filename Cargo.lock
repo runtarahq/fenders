@@ -869,7 +869,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fenders-component"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "fenders-control-plane"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -933,11 +933,11 @@ dependencies = [
 
 [[package]]
 name = "fenders-egress"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "fenders-guest-http"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "fenders-egress",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "fenders-node"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "fenders-node-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "fenders-runtime-limits"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "wasmtime",
  "wat",
@@ -1020,11 +1020,11 @@ dependencies = [
 
 [[package]]
 name = "fenders-service-trust"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "fenders-shim"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "fenders-node",

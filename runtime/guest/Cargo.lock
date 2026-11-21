@@ -211,11 +211,11 @@ dependencies = [
 
 [[package]]
 name = "fenders-egress"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "fenders-guest-http"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "fenders-egress",
@@ -249,14 +249,14 @@ dependencies = [
 
 [[package]]
 name = "fenders-runtime-limits"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "wasmtime",
 ]
 
 [[package]]
 name = "fenders-service-trust"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "find-msvc-tools"
