@@ -22,6 +22,15 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
     exit 1
 fi
 
+# Everything needed is found before anything is changed. rustup installs
+# cargo in ~/.cargo/bin, which a login shell does not always put on PATH.
+cargo=$(command -v cargo || true)
+[[ -n $cargo ]] || [[ ! -x ${CARGO_HOME:-$HOME/.cargo}/bin/cargo ]] || cargo=${CARGO_HOME:-$HOME/.cargo}/bin/cargo
+if [[ -z $cargo ]]; then
+    echo "Error: cargo not found on PATH or in ${CARGO_HOME:-$HOME/.cargo}/bin." >&2
+    exit 1
+fi
+
 # The current version is the latest v*.*.* tag; before the first one, VERSION.
 latest_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
 if [[ -n $latest_tag ]]; then
@@ -50,15 +59,19 @@ if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
     exit 1
 fi
 
+# A failure before the commit puts the tree back as it was.
+trap 'git checkout -q -- . && echo "Failed; version changes reverted." >&2' ERR
+
 "$script_dir/update-version.sh" "$version"
 
 echo "Updating Cargo.lock workspace package versions..."
-cargo update --workspace
+"$cargo" update --workspace
 echo "Verifying Cargo.lock is current..."
-cargo metadata --locked --format-version 1 >/dev/null
+"$cargo" metadata --locked --format-version 1 >/dev/null
 
 git add -A
 git commit -m "Release $version"
+trap - ERR
 git tag "$tag"
 
 echo
