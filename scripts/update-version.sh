@@ -19,7 +19,13 @@ echo "$version" > VERSION
 for toml in crates/*/Cargo.toml; do
     sed -i "0,/^version = \"[^\"]*\"/s//version = \"$version\"/" "$toml"
 done
+# The API contract states the version of the control plane that serves it
+# (customer_api::tests::the_contract_is_this_versions): info.version, the
+# first "version" in the file.
+openapi=crates/fenders-control-plane/static/api/openapi.json
+sed -i "0,/\"version\": \"[^\"]*\"/s//\"version\": \"$version\"/" "$openapi"
 
 echo "Version set to $version:"
 echo "  VERSION: $(cat VERSION)"
 grep -H -m1 '^version = ' crates/*/Cargo.toml | sed 's/^/  /'
+grep -H -m1 '"version": ' "$openapi" | sed 's/^/  /'
