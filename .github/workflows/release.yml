@@ -1,0 +1,95 @@
+name: release
+# A v*.*.* tag (cut by scripts/release.sh) publishes the worker bundle on
+# that tag's release. Untagged commits get no bundle.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+# Queue rather than cancel: an interrupted publish leaves a partial release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  worker:
+    # Building needs no KVM; only the live tests run guests.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Build host
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential musl-tools
+          rustup toolchain install 1.97.0 --profile minimal \
+            --target x86_64-unknown-linux-musl,wasm32-wasip2
+          rustup show
+
+      # The tag is the version, and must match VERSION.
+      - name: Version
+        id: version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          base=$(tr -d '[:space:]' < VERSION)
+          [[ $version == "$base" ]] || { echo "tag $GITHUB_REF_NAME does not match VERSION ($base)" >&2; exit 1; }
+          [[ $version =~ ^[0-9A-Za-z.-]+$ ]] || { echo "unusable version: $version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The binaries report, and the manifest records, the bundle's version.
+      - name: Build
+        env:
+          FENDERS_BUILD_ID: ${{ steps.version.outputs.version }}
+        run: make build-node
+
+      - name: Assemble
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/"$VERSION"
+          cd dist/"$VERSION"
+          for file in fenders-node fenders-shim launch compile runtime.elf; do
+            install -m 0555 "$GITHUB_WORKSPACE/build/node/$file" "$file"
+          done
+          # The manifest names the agent that prints it: run the bundled one.
+          ./fenders-node release-manifest --build . > worker-release.json
+          chmod 0444 worker-release.json
+          sha256sum fenders-node fenders-shim launch compile runtime.elf worker-release.json > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          tarball="fenders-worker-$VERSION.tar.gz"
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime="@$(git log -1 --format=%ct)" \
+            -czf "$tarball" "$VERSION"
+          sha256sum "$tarball" > "$tarball.sha256"
+          # What the node role sees: one top-level directory that checks out.
+          [[ $(tar -tzf "$tarball" | cut -d/ -f1 | sort -u) == "$VERSION" ]]
+          mkdir unpacked && tar -xzf "$tarball" -C unpacked
+          (cd "unpacked/$VERSION" && sha256sum --check SHA256SUMS)
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          flags=()
+          [[ $VERSION != *-* ]] || flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Worker bundle fenders-worker-$VERSION built from ${GITHUB_SHA}." \
+            "${flags[@]}" \
+            "fenders-worker-$VERSION.tar.gz" \
+            "fenders-worker-$VERSION.tar.gz.sha256"
