@@ -69,6 +69,16 @@ echo "Updating Cargo.lock workspace package versions..."
 echo "Verifying Cargo.lock is current..."
 "$cargo" metadata --locked --format-version 1 >/dev/null
 
+# Projects outside the workspace (runtime/guest) lock the workspace crates they
+# use by path, at their versions: refresh those entries too, nothing else.
+for lock in $(git ls-files '*/Cargo.lock'); do
+    manifest=$(dirname "$lock")/Cargo.toml
+    grep -q 'path *= *"[./]*crates/' "$manifest" || continue
+    echo "Updating $lock..."
+    "$cargo" update --workspace --manifest-path "$manifest"
+    "$cargo" metadata --locked --format-version 1 --manifest-path "$manifest" >/dev/null
+done
+
 git add -A
 git commit -m "Release $version"
 trap - ERR
