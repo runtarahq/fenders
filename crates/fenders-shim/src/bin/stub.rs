@@ -24,9 +24,12 @@
 //! its body as text); with none left, or without the flag given requests,
 //! `next` waits a second and answers 204. Without `--http` at all `next`
 //! gets 404. The workflow API calls a
-//! one-step workflow makes are answered as Runtara would for a fresh launch;
-//! anything else gets `{}`.
-use http_body_util::{BodyExt, Full};
+//! one-step workflow makes are answered as Runtara would for a fresh launch.
+//! Two paths stand for slow work, as a guest's relayed calls meet it:
+//! `GET /test/slow?seconds=N` answers after N seconds, and
+//! `GET /test/stream?chunks=N&every=S` answers at once and sends N lines, S
+//! seconds apart. Anything else gets `{}`.
+use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, StatusCode, body::Bytes, service::service_fn};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde_json::json;
@@ -74,14 +77,16 @@ fn arg(name: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
-fn reply(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
-    let mut response = Response::new(Full::new(body.into()));
+type Body = UnsyncBoxBody<Bytes, std::convert::Infallible>;
+
+fn reply(status: StatusCode, body: impl Into<Bytes>) -> Response<Body> {
+    let mut response = Response::new(Full::new(body.into()).boxed_unsync());
     *response.status_mut() = status;
     response
 }
 
 impl Stub {
-    async fn handle(&self, request: Request<hyper::body::Incoming>) -> Response<Full<Bytes>> {
+    async fn handle(&self, request: Request<hyper::body::Incoming>) -> Response<Body> {
         let (parts, body) = request.into_parts();
         let body = body
             .collect()
@@ -178,6 +183,29 @@ impl Stub {
                     });
                     reply(StatusCode::OK, "{}")
                 }
+                ("GET", "/test/slow") => {
+                    let seconds = query(&parts.uri, "seconds").unwrap_or(0).min(600);
+                    tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+                    reply(StatusCode::OK, json!({"waited_seconds": seconds}).to_string())
+                }
+                ("GET", "/test/stream") => {
+                    let chunks = query(&parts.uri, "chunks").unwrap_or(3).min(1000);
+                    let every = query(&parts.uri, "every").unwrap_or(1).min(600);
+                    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(1);
+                    tokio::spawn(async move {
+                        for chunk in 0..chunks {
+                            if chunk > 0 {
+                                tokio::time::sleep(std::time::Duration::from_secs(every)).await;
+                            }
+                            if tx.send(format!("chunk {chunk}\n").into()).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                    let mut r = Response::new(Lines(rx).boxed_unsync());
+                    r.headers_mut().insert("content-type", "text/plain".parse().unwrap());
+                    r
+                }
                 ("GET", "/v1/time") => reply(
                     StatusCode::OK,
                     json!({"nowMs": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64}).to_string(),
@@ -209,6 +237,30 @@ impl Stub {
         });
         println!("{line}");
         response
+    }
+}
+
+/// A query parameter as a number.
+fn query(uri: &hyper::Uri, name: &str) -> Option<u64> {
+    uri.query()?.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| value.parse().ok()).flatten()
+    })
+}
+
+/// A body of the lines sent on a channel, ending when it closes.
+struct Lines(tokio::sync::mpsc::Receiver<Bytes>);
+
+impl hyper::body::Body for Lines {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Self::Error>>> {
+        self.0
+            .poll_recv(cx)
+            .map(|line| line.map(|line| Ok(hyper::body::Frame::data(line))))
     }
 }
 

@@ -1256,7 +1256,11 @@ async fn supervise(
     if channel.set_nonblocking(true).is_ok()
         && let Ok(stream) = tokio::net::UnixStream::from_std(channel)
     {
-        tokio::spawn(relay::serve(stream, relay.clone()));
+        tokio::spawn(relay::serve(
+            stream,
+            relay.clone(),
+            relay::concurrency(&spec.machine.guest),
+        ));
     }
     let pid = child.id() as libc::pid_t;
     // The VMM's exit, collected on a blocking thread: waitid needs no SIGCHLD

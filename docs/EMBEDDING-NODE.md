@@ -75,7 +75,7 @@ plain path, with no extra pipe, socket, task or call:
 | `"tcp_allow"`, `"http_allow"`, `"http_public_targets"` | Outbound access: socket addresses, HTTPS origins, and the addresses public origins are pinned to | nothing: it is static for the run's life |
 | `"egress_budget"` | An outbound byte limit: the guest sends only bytes it was granted | `POST v1/run/egress` |
 | `"mode": "http"` | An app that serves requests on a socket only its shim holds | `POST v1/run/http/next`, `POST v1/run/http/response/ID` |
-| `"host_origin": "http://name"` | An origin inside the guest that reaches you | every request to it, relayed |
+| `"host_origin": "http://name"` | An origin inside the guest that reaches you; `"host_origin_concurrency"` (1 to 64, default 16) is how many of its calls are relayed at once, further ones waiting | every request to it, relayed |
 
 A warm shim is started with the spec minus `run` and `channel` plus
 `"warm": true`, and is later sent `{run, channel}` as its claim.

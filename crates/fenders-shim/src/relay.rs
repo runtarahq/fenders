@@ -30,7 +30,10 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type Answer = UnsyncBoxBody<Bytes, BoxError>;
 
 const REQUEST_LIMIT: usize = 4 * 1024 * 1024;
-const CONCURRENCY: usize = 4;
+/// The guest's calls relayed at once, unless its launch says
+/// (`host_origin_concurrency`, 1 to 64). Each holds its request body, at
+/// most [`REQUEST_LIMIT`], while it is sent; answers are not held.
+pub const CONCURRENCY: usize = 16;
 /// Where a guest posts its run's outcome.
 pub const OUTCOME_PATH: &str = "/v1/run/outcome";
 /// The header that carries a run's trace id on every call.
@@ -204,9 +207,17 @@ impl Relay {
     }
 }
 
-/// Serves the guest's HTTP/2 connection on `stream` until it closes.
-pub async fn serve(stream: tokio::net::UnixStream, relay: Arc<Relay>) {
-    let permits = Arc::new(tokio::sync::Semaphore::new(CONCURRENCY));
+/// The calls relayed at once for a launch's guest configuration.
+pub fn concurrency(guest: &serde_json::Value) -> usize {
+    guest["host_origin_concurrency"]
+        .as_u64()
+        .map_or(CONCURRENCY, |n| n as usize)
+}
+
+/// Serves the guest's HTTP/2 connection on `stream` until it closes, with
+/// `concurrency` calls relayed at once; the guest's further calls wait.
+pub async fn serve(stream: tokio::net::UnixStream, relay: Arc<Relay>, concurrency: usize) {
+    let permits = Arc::new(tokio::sync::Semaphore::new(concurrency));
     let service = service_fn(move |request| {
         let (relay, permits) = (relay.clone(), permits.clone());
         async move {
@@ -215,7 +226,7 @@ pub async fn serve(stream: tokio::net::UnixStream, relay: Arc<Relay>) {
         }
     });
     let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-        .max_concurrent_streams(CONCURRENCY as u32)
+        .max_concurrent_streams(concurrency as u32)
         .serve_connection(TokioIo::new(stream), service)
         .await;
 }
@@ -325,7 +336,7 @@ mod tests {
     /// The guest's side of the relay: a connection to it as the runtime has.
     async fn guest(relay: Relay) -> hyper::client::conn::http2::SendRequest<Full<Bytes>> {
         let (shim, guest) = tokio::net::UnixStream::pair().unwrap();
-        tokio::spawn(serve(shim, Arc::new(relay)));
+        tokio::spawn(serve(shim, Arc::new(relay), CONCURRENCY));
         let (sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
             .handshake(TokioIo::new(guest))
             .await
@@ -391,6 +402,15 @@ mod tests {
             assert_eq!(body, "whole");
         }
         served.abort();
+    }
+
+    #[test]
+    fn a_launch_sets_how_many_calls_are_relayed_at_once() {
+        assert_eq!(concurrency(&serde_json::json!({})), 16);
+        assert_eq!(
+            concurrency(&serde_json::json!({"host_origin_concurrency": 3})),
+            3
+        );
     }
 
     #[test]
