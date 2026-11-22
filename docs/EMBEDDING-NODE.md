@@ -75,7 +75,7 @@ plain path, with no extra pipe, socket, task or call:
 | `"tcp_allow"`, `"http_allow"`, `"http_public_targets"` | Outbound access: socket addresses, HTTPS origins, and the addresses public origins are pinned to | nothing: it is static for the run's life |
 | `"egress_budget"` | An outbound byte limit: the guest sends only bytes it was granted | `POST v1/run/egress` |
 | `"mode": "http"` | An app that serves requests on a socket only its shim holds | `POST v1/run/http/next`, `POST v1/run/http/response/ID` |
-| `"host_origin": "http://name"` | An origin inside the guest that reaches you | every request to it, relayed |
+| `"host_origin": "http://name"` | An origin inside the guest that reaches you; `"host_origin_concurrency"` (1 to 64, default 16) is how many of its calls are relayed at once, further ones waiting | every request to it, relayed |
 
 A warm shim is started with the spec minus `run` and `channel` plus
 `"warm": true`, and is later sent `{run, channel}` as its claim.
@@ -91,6 +91,15 @@ has moved on.
 
 A request that could not be sent is retried with backoff; one that reached
 you is never repeated.
+
+A relayed guest call goes on an HTTP/2 connection of its own when you offer
+HTTP/2, and its answer is handed to the guest as you send it: no deadline
+and no size limit of the shim's, so a call may wait as long as its work
+takes and a streamed answer (a model's output) reaches the guest as it is
+made. HTTP/2 pings notice an endpoint gone silent; the guest giving up the
+call, or its VM ending, resets the stream. Over HTTP/1.1 the answer is read
+whole, at most 8 MiB, within a minute. The shim's own calls are bounded in
+time either way.
 
 | Call | When | Answer |
 |---|---|---|

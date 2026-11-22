@@ -280,6 +280,7 @@ pub fn validate_spec(value: &Value) -> Result<Value> {
             "tcp_allow",
             "http_allow",
             "host_origin",
+            "host_origin_concurrency",
             "http_trust",
             "http_public_targets",
             "http_runtime_digest",
@@ -374,6 +375,16 @@ pub fn validate_spec(value: &Value) -> Result<Value> {
             ));
         }
         out["host_origin"] = json!(origin);
+    }
+    // The calls the guest's host-bound origin has relayed at once. Carried
+    // only when a spec sets it; the shim's default otherwise.
+    if let Some(concurrency) = value.get("host_origin_concurrency") {
+        if out.get("host_origin").is_none() {
+            return Err(Error::invalid(
+                "host-bound call concurrency needs a host-bound origin",
+            ));
+        }
+        out["host_origin_concurrency"] = json!(integer(concurrency, 1, 64)?);
     }
     out["http_allow"] = json!(http);
     if let Some(trust) = value.get("http_trust") {
@@ -1357,6 +1368,38 @@ mod tests {
         assert_eq!(
             validate_spec(&json!({"artifact":"a".repeat(64),"egress_budget":true})).unwrap()["egress_budget"],
             true
+        );
+    }
+
+    #[test]
+    fn host_bound_call_concurrency_is_bounded_and_needs_the_origin() {
+        let origin = json!({"artifact":"a".repeat(64),"host_origin":"http://api.internal"});
+        // Left out when unset, so earlier specs normalize unchanged.
+        assert!(
+            validate_spec(&origin)
+                .unwrap()
+                .get("host_origin_concurrency")
+                .is_none()
+        );
+        for n in [1, 16, 64] {
+            let mut spec = origin.clone();
+            spec["host_origin_concurrency"] = json!(n);
+            assert_eq!(validate_spec(&spec).unwrap()["host_origin_concurrency"], n);
+        }
+        for bad in [
+            json!(0),
+            json!(65),
+            json!(-1),
+            json!("4"),
+            json!(1.5),
+            Value::Null,
+        ] {
+            let mut spec = origin.clone();
+            spec["host_origin_concurrency"] = bad.clone();
+            assert!(validate_spec(&spec).is_err(), "accepted {bad}");
+        }
+        assert!(
+            validate_spec(&json!({"artifact":"a".repeat(64),"host_origin_concurrency":4})).is_err()
         );
     }
 }

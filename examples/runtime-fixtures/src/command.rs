@@ -44,6 +44,7 @@ fn main() {
         }
         Ok("memory-limit") => memory_limit(),
         Ok("host-origin") => host_origin(),
+        Ok("host-origin-timed") => host_origin_timed(),
         Ok("connect") => connect(),
         _ => println!("command complete"),
     }
@@ -161,6 +162,45 @@ fn host_origin() {
         }
     }
     println!("FENDERS_HOST_ORIGIN {}", String::from_utf8(bytes).unwrap());
+}
+
+/// Calls `TEST_HOST_ORIGIN_PATH` on the host-bound origin and prints when the
+/// answer's head and each part of its body came, in milliseconds from the
+/// call: a slow answer, and one streamed, as the guest sees them.
+fn host_origin_timed() {
+    use wasi::clocks::monotonic_clock::now;
+    use wasi::http::{
+        outgoing_handler,
+        types::{Fields, OutgoingRequest, Scheme},
+    };
+    use wasi::io::streams::StreamError;
+    let authority = std::env::var("TEST_HOST_ORIGIN_AUTHORITY").unwrap();
+    let path = std::env::var("TEST_HOST_ORIGIN_PATH").unwrap();
+    let started = now();
+    let ms = || (now() - started) / 1_000_000;
+    let request = OutgoingRequest::new(Fields::new());
+    request.set_scheme(Some(&Scheme::Https)).unwrap();
+    request.set_authority(Some(&authority)).unwrap();
+    request.set_path_with_query(Some(&path)).unwrap();
+    let future = outgoing_handler::handle(request, None).expect("host-bound handle");
+    future.subscribe().block();
+    let response = future.get().unwrap().unwrap().expect("host-bound response");
+    println!("FENDERS_TIMED head {} at {} ms", response.status(), ms());
+    let body = response.consume().unwrap();
+    let input = body.stream().unwrap();
+    loop {
+        match input.blocking_read(65536) {
+            Ok(chunk) if chunk.is_empty() => continue,
+            Ok(chunk) => println!(
+                "FENDERS_TIMED {:?} at {} ms",
+                String::from_utf8_lossy(&chunk),
+                ms()
+            ),
+            Err(StreamError::Closed) => break,
+            Err(error) => panic!("host-bound body: {error:?}"),
+        }
+    }
+    println!("FENDERS_TIMED end at {} ms", ms());
 }
 
 fn run_context() {

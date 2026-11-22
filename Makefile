@@ -10,10 +10,12 @@ run:
 check:
 	cargo fmt --check
 	cargo clippy --workspace --all-targets --locked -- -D warnings
+# Tests run as CI runs them: more threads at once exhaust a stock
+# PostgreSQL's locks and slow the tests that keep time.
 test verify: verify-platform
 verify-platform:
 	@test -n "$$FENDERS_TEST_DATABASE_URL" || (echo 'Set FENDERS_TEST_DATABASE_URL to a dedicated PostgreSQL database' >&2; exit 1)
-	cargo test --workspace --locked
+	cargo test --workspace --locked -- --test-threads=4
 build-node:
 	bash scripts/build_node.sh
 build-demos:

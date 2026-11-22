@@ -94,16 +94,19 @@ struct RatesInner {
     audited: std::collections::HashMap<(String, String), u64>,
     /// Seconds added to the clock by [`Rates::advance`].
     advanced: u64,
+    /// Where [`Rates::hold`] stopped the clock, if it did.
+    held: Option<u64>,
 }
 
 impl Rates {
     fn now(inner: &RatesInner) -> u64 {
         static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        START
-            .get_or_init(std::time::Instant::now)
-            .elapsed()
-            .as_secs()
-            + inner.advanced
+        inner.held.unwrap_or_else(|| {
+            START
+                .get_or_init(std::time::Instant::now)
+                .elapsed()
+                .as_secs()
+        }) + inner.advanced
     }
 
     /// Admits one request of `tenant` unless `limit` were admitted in the
@@ -193,6 +196,16 @@ impl Rates {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .advanced += seconds;
+    }
+
+    /// Stops the clock where it is; [`advance`](Self::advance) still moves
+    /// it. For tests that count more in a minute than a loaded machine
+    /// makes in one.
+    #[doc(hidden)]
+    pub fn hold(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Self::now(&inner) - inner.advanced;
+        inner.held = Some(now);
     }
 }
 
@@ -1268,5 +1281,18 @@ mod rate_tests {
         assert!(rates.admit("w", 2));
         // Never none: a caller told to wait no time would not wait.
         assert_eq!(rates.retry_after("nobody"), 1);
+    }
+
+    #[test]
+    fn a_held_clock_keeps_its_minute_until_it_is_moved() {
+        let rates = Rates::default();
+        rates.hold();
+        assert!(rates.admit("w", 1));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Real time passed, the held clock did not.
+        assert!(!rates.admit("w", 1));
+        assert_eq!(rates.retry_after("w"), 60);
+        rates.advance(60);
+        assert!(rates.admit("w", 1));
     }
 }

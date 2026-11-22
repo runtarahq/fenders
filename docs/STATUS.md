@@ -18,6 +18,13 @@ as both control plane and node.
   names per launch, with a per-launch bearer credential and trust. It reports
   how the run ended and its outbound byte totals. Shims outlive the agent and
   are reattached when it restarts.
+- A guest's relayed call goes on an HTTP/2 connection of its own, its answer
+  streamed back as the endpoint sends it, with no deadline or size limit of
+  the shim's: HTTP/2 pings, the guest's own timeout and the run's lifetime
+  bound it. To an endpoint without HTTP/2 the answer is read whole, at most
+  8 MiB, within 60 seconds. 16 calls are relayed at once unless the launch
+  sets `host_origin_concurrency` (1 to 64); a guest's further calls wait for
+  one to end. A request body is at most 4 MiB, held while it is sent.
 - A launch spec carries `protocol`, `run` and `channel`, and a `mode`:
   `command`, or `http` for an app that serves requests.
 - Every further capability is opt-in per launch spec (`output`,

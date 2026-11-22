@@ -6,17 +6,26 @@
 //! else a few kept HTTP/1.1 connections. A request that could not be sent
 //! (connect or TLS failure, or a kept connection found closed) is retried with
 //! backoff for [`PATIENCE`]; one that reached the endpoint is never repeated.
+//!
+//! The run's own calls are short, and each is bounded whole and read whole
+//! ([`Upstream::send`]). A guest's call is not: it may wait minutes for a
+//! slow connection or stream a model's output, so it goes on an HTTP/2
+//! connection of its own and its answer is handed back as it arrives
+//! ([`Upstream::stream`]).
 use crate::spec::Channel;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{
     Request, Response, StatusCode,
-    body::Bytes,
+    body::{Bytes, Incoming},
     header::{AUTHORIZATION, HOST, HeaderMap, HeaderValue},
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::ServerName;
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -24,7 +33,7 @@ use std::{
 /// fails back to the guest as retryable.
 pub const PATIENCE: Duration = Duration::from_secs(30);
 /// How long connecting to the endpoint may take, its TLS and HTTP handshakes
-/// included, and how long one call may take in all.
+/// included, and how long one of the run's own calls may take in all.
 const CONNECT: Duration = Duration::from_secs(10);
 const EXCHANGE: Duration = Duration::from_secs(60);
 
@@ -54,6 +63,10 @@ pub struct Upstream {
     bearer: HeaderValue,
     h2: tokio::sync::Mutex<Option<hyper::client::conn::http2::SendRequest<Full<Bytes>>>>,
     h1: Mutex<Vec<hyper::client::conn::http1::SendRequest<Full<Bytes>>>>,
+    /// The connection guests' calls go on, apart from the run's own calls.
+    guest_h2: tokio::sync::Mutex<Option<hyper::client::conn::http2::SendRequest<Full<Bytes>>>>,
+    /// Set once the endpoint was found not to offer HTTP/2.
+    http1_only: AtomicBool,
 }
 
 /// What went wrong sending a request upstream.
@@ -116,6 +129,8 @@ impl Upstream {
             bearer,
             h2: tokio::sync::Mutex::new(None),
             h1: Mutex::new(Vec::new()),
+            guest_h2: tokio::sync::Mutex::new(None),
+            http1_only: AtomicBool::new(false),
         })
     }
 
@@ -258,27 +273,83 @@ impl Upstream {
         headers: &HeaderMap,
         body: Bytes,
     ) -> Result<(StatusCode, HeaderMap, Bytes), Failure> {
-        // The runtime's clock, as the waits below are.
-        let started = tokio::time::Instant::now();
-        let mut delay = Duration::from_millis(100);
-        loop {
-            let sent = match self.sender().await {
-                Err(()) => Err(true),
-                Ok(sender) => {
-                    self.exchange(sender, method, path_and_query, headers, body.clone())
-                        .await
-                }
+        let body = &body;
+        patiently(|| async move {
+            let sender = self.sender().await.map_err(|()| true)?;
+            self.exchange(sender, method, path_and_query, headers, body.clone())
+                .await
+        })
+        .await
+    }
+
+    /// Sends a guest's call, with the credential added, on the connection
+    /// guests' calls have, and returns the answer once its head has come:
+    /// its body is read as the endpoint sends it, and none of it is held.
+    ///
+    /// No clock bounds the call. The connection's pings notice an endpoint
+    /// gone silent; the guest giving up the call, or its VM ending, drops it
+    /// and resets the stream. `None` when the endpoint does not offer
+    /// HTTP/2: the call is then for [`send`](Self::send).
+    pub async fn stream(
+        &self,
+        method: &hyper::Method,
+        path_and_query: &str,
+        headers: &HeaderMap,
+        body: Bytes,
+    ) -> Result<Option<Response<Incoming>>, Failure> {
+        if self.http1_only.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let body = &body;
+        patiently(|| async move {
+            let Some(mut sender) = self.guest_sender().await.map_err(|()| true)? else {
+                return Ok(None);
             };
-            match sent {
-                Ok(answer) => return Ok(answer),
-                Err(false) => return Err(Failure::Broken),
-                Err(true) if started.elapsed() + delay > PATIENCE => {
-                    return Err(Failure::Unreachable);
+            let mut request = self
+                .request(method.clone(), path_and_query)
+                .body(Full::new(body.clone()))
+                .map_err(|_| false)?;
+            for (name, value) in headers {
+                request.headers_mut().append(name, value.clone());
+            }
+            request
+                .headers_mut()
+                .insert(AUTHORIZATION, self.bearer.clone());
+            match sender.send_request(request).await {
+                Ok(response) => Ok(Some(response)),
+                // The connection closed before it took the request.
+                Err(e) if e.is_canceled() => {
+                    *self.guest_h2.lock().await = None;
+                    Err(true)
                 }
-                Err(true) => {
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(5));
-                }
+                // It may have reached the endpoint: not sent again.
+                Err(_) => Err(false),
+            }
+        })
+        .await
+    }
+
+    /// The connection guests' calls go on, made when first needed and again
+    /// when found closed; `None` when the endpoint does not offer HTTP/2.
+    async fn guest_sender(
+        &self,
+    ) -> Result<Option<hyper::client::conn::http2::SendRequest<Full<Bytes>>>, ()> {
+        // Held while connecting, so concurrent first calls share one.
+        let mut slot = self.guest_h2.lock().await;
+        if let Some(sender) = slot.as_mut() {
+            if !sender.is_closed() && sender.ready().await.is_ok() {
+                return Ok(Some(sender.clone()));
+            }
+            *slot = None;
+        }
+        match self.streaming::<Full<Bytes>>().await? {
+            Some(sender) => {
+                *slot = Some(sender.clone());
+                Ok(Some(sender))
+            }
+            None => {
+                self.http1_only.store(true, Ordering::Relaxed);
+                Ok(None)
             }
         }
     }
@@ -349,6 +420,30 @@ impl Upstream {
     }
 }
 
+/// Makes `attempt` until it gives an answer or fails having reached the
+/// endpoint (`Err(false)`); one that did not reach it (`Err(true)`) is made
+/// again with backoff, for [`PATIENCE`].
+async fn patiently<T, F: Future<Output = Result<T, bool>>>(
+    mut attempt: impl FnMut() -> F,
+) -> Result<T, Failure> {
+    // The runtime's clock, as the waits below are.
+    let started = tokio::time::Instant::now();
+    let mut delay = Duration::from_millis(100);
+    loop {
+        match attempt().await {
+            Ok(answer) => return Ok(answer),
+            Err(false) => return Err(Failure::Broken),
+            Err(true) if started.elapsed() + delay > PATIENCE => {
+                return Err(Failure::Unreachable);
+            }
+            Err(true) => {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(5));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +498,17 @@ lpkwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiBN63u7DM2edvt/
             started.elapsed()
         );
         assert!(upstream.streaming::<Full<Bytes>>().await.is_err());
+        let started = tokio::time::Instant::now();
+        let failed = upstream
+            .stream(
+                &hyper::Method::GET,
+                "/anything",
+                &HeaderMap::new(),
+                Bytes::new(),
+            )
+            .await;
+        assert!(matches!(failed, Err(Failure::Unreachable)));
+        assert!(started.elapsed() <= PATIENCE + CONNECT + Duration::from_secs(5));
         held.abort();
     }
 }
