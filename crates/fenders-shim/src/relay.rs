@@ -2,8 +2,14 @@
 //! VMM holds, each request relayed to the run channel with the credential
 //! added. The guest never sees the credential, and nothing it sends can name
 //! another run: authorization, binding and `fenders-*` headers are dropped.
+//!
+//! The answer is handed to the guest as the endpoint sends it, with no
+//! deadline of the relay's own, so a call may wait as long as its work
+//! takes and a streamed answer reaches the guest as it is made. An endpoint
+//! that does not offer HTTP/2 is answered the old way: whole, within a
+//! minute, at most [`RESPONSE_LIMIT`](crate::upstream::RESPONSE_LIMIT).
 use crate::upstream::{Failure, Upstream};
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Full, Limited, combinators::UnsyncBoxBody};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::{Bytes, Incoming},
@@ -18,6 +24,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+/// An answer's body as the guest is given it.
+type Answer = UnsyncBoxBody<Bytes, BoxError>;
 
 const REQUEST_LIMIT: usize = 4 * 1024 * 1024;
 const CONCURRENCY: usize = 4;
@@ -101,8 +111,14 @@ fn guest_may(enabled: bool, method: &Method, path: &str) -> bool {
     enabled && guest_method(method) && !shims_own(path)
 }
 
-fn status(code: StatusCode) -> Response<Full<Bytes>> {
-    let mut response = Response::new(Full::default());
+fn whole(bytes: Bytes) -> Answer {
+    Full::new(bytes)
+        .map_err(|never| match never {})
+        .boxed_unsync()
+}
+
+fn status(code: StatusCode) -> Response<Answer> {
+    let mut response = Response::new(whole(Bytes::new()));
     *response.status_mut() = code;
     response
 }
@@ -123,7 +139,7 @@ impl Relay {
         self.upstream.send(method, path, &headers, body).await
     }
 
-    async fn forward(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
+    async fn forward(&self, request: Request<Incoming>) -> Response<Answer> {
         let (parts, body) = request.into_parts();
         let path = parts
             .uri
@@ -138,26 +154,42 @@ impl Relay {
         if !guest_may(self.guest, &parts.method, parts.uri.path()) {
             return status(StatusCode::FORBIDDEN);
         }
+        // Held whole, so a call that could not be sent can be sent again.
         let Ok(body) = Limited::new(body, REQUEST_LIMIT).collect().await else {
             return status(StatusCode::PAYLOAD_TOO_LARGE);
         };
+        let body = body.to_bytes();
         let outcome = parts.method == Method::POST && parts.uri.path() == OUTCOME_PATH;
-        match self
-            .send(
-                &parts.method,
-                &path,
-                filtered(&parts.headers),
-                body.to_bytes(),
-            )
+        let mut headers = filtered(&parts.headers);
+        if let Some(trace) = &self.trace_id {
+            headers.insert(HeaderName::from_static(TRACE_HEADER), trace.clone());
+        }
+        let answered = match self
+            .upstream
+            .stream(&parts.method, &path, &headers, body.clone())
             .await
         {
-            Ok((code, headers, body)) => {
-                if outcome && code.is_success() {
+            Ok(Some(response)) => {
+                Ok(response.map(|body| body.map_err(BoxError::from).boxed_unsync()))
+            }
+            Ok(None) => self
+                .upstream
+                .send(&parts.method, &path, &headers, body)
+                .await
+                .map(|(code, headers, body)| {
+                    let mut response = Response::new(whole(body));
+                    *response.status_mut() = code;
+                    *response.headers_mut() = headers;
+                    response
+                }),
+            Err(failure) => Err(failure),
+        };
+        match answered {
+            Ok(mut response) => {
+                if outcome && response.status().is_success() {
                     self.outcome_posted.store(true, Ordering::SeqCst);
                 }
-                let mut response = Response::new(Full::new(body));
-                *response.status_mut() = code;
-                *response.headers_mut() = filtered(&headers);
+                *response.headers_mut() = filtered(response.headers());
                 response
             }
             Err(Failure::Unreachable) => {
@@ -191,6 +223,175 @@ pub async fn serve(stream: tokio::net::UnixStream, relay: Arc<Relay>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run channel endpoint over TLS offering `alpn`, and the channel to
+    /// reach it. It answers `GET /slow` with `first`, then, once `go` is
+    /// notified, `second`; anything else with `whole`. A call without the
+    /// launch's bearer, or with the guest's own, is answered 401.
+    async fn endpoint(
+        alpn: &[&[u8]],
+        go: Arc<tokio::sync::Notify>,
+    ) -> (crate::spec::Channel, tokio::task::JoinHandle<()>) {
+        let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca = params.self_signed(&ca_key).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut server = rcgen::CertificateParams::new(vec![]).unwrap();
+        server
+            .subject_alt_names
+            .push(rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap()));
+        let certificate = server.signed_by(&key, &ca, &ca_key).unwrap();
+        let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![certificate.der().clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+        )
+        .unwrap();
+        tls.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let channel = crate::spec::Channel {
+            endpoint: format!("https://{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+            credential: "launch".into(),
+            ca_pem: ca.pem(),
+            pin: None,
+            server_name: None,
+        };
+        let served = tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let (acceptor, go) = (acceptor.clone(), go.clone());
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let go = go.clone();
+                        async move {
+                            if request
+                                .headers()
+                                .get_all(header::AUTHORIZATION)
+                                .iter()
+                                .count()
+                                != 1
+                                || request.headers()[header::AUTHORIZATION] != "Bearer launch"
+                            {
+                                return Ok::<_, Infallible>(status(StatusCode::UNAUTHORIZED));
+                            }
+                            if request.uri().path() != "/slow" {
+                                return Ok(Response::new(whole(Bytes::from_static(b"whole"))));
+                            }
+                            let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(1);
+                            tokio::spawn(async move {
+                                let _ = tx.send(Bytes::from_static(b"first")).await;
+                                go.notified().await;
+                                let _ = tx.send(Bytes::from_static(b"second")).await;
+                            });
+                            Ok(Response::new(Chunks(rx).boxed_unsync()))
+                        }
+                    });
+                    let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(tls), service)
+                        .await;
+                });
+            }
+        });
+        (channel, served)
+    }
+
+    /// A body of the chunks sent on a channel, ending when it closes.
+    struct Chunks(tokio::sync::mpsc::Receiver<Bytes>);
+
+    impl hyper::body::Body for Chunks {
+        type Data = Bytes;
+        type Error = BoxError;
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, BoxError>>> {
+            self.0
+                .poll_recv(cx)
+                .map(|chunk| chunk.map(|chunk| Ok(hyper::body::Frame::data(chunk))))
+        }
+    }
+
+    /// The guest's side of the relay: a connection to it as the runtime has.
+    async fn guest(relay: Relay) -> hyper::client::conn::http2::SendRequest<Full<Bytes>> {
+        let (shim, guest) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(serve(shim, Arc::new(relay)));
+        let (sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .handshake(TokioIo::new(guest))
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        sender
+    }
+
+    fn relay(channel: &crate::spec::Channel) -> Relay {
+        Relay {
+            upstream: Upstream::new(channel).unwrap(),
+            guest: true,
+            trace_id: None,
+            outcome_posted: Default::default(),
+        }
+    }
+
+    fn call(path: &str) -> Request<Full<Bytes>> {
+        Request::get(format!("http://host{path}"))
+            .header(header::AUTHORIZATION, "Bearer guest-made")
+            .body(Full::default())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_guest_is_handed_an_answer_as_the_endpoint_sends_it() {
+        let go = Arc::new(tokio::sync::Notify::new());
+        let (channel, served) = endpoint(&[b"h2", b"http/1.1"], go.clone()).await;
+        let mut guest = guest(relay(&channel)).await;
+        let within = std::time::Duration::from_secs(10);
+        let response = tokio::time::timeout(within, guest.send_request(call("/slow")))
+            .await
+            .expect("the head comes before the body ends")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        // The first part reaches the guest while the endpoint still holds
+        // the rest: nothing waits for the whole answer.
+        let first = tokio::time::timeout(within, body.frame())
+            .await
+            .expect("the first part is passed on as it comes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.into_data().unwrap(), "first");
+        go.notify_one();
+        let rest = tokio::time::timeout(within, body.collect())
+            .await
+            .unwrap()
+            .unwrap()
+            .to_bytes();
+        assert_eq!(rest, "second");
+        served.abort();
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_without_http2_is_answered_whole() {
+        let (channel, served) = endpoint(&[b"http/1.1"], Default::default()).await;
+        let mut guest = guest(relay(&channel)).await;
+        for _ in 0..2 {
+            let response = guest.send_request(call("/other")).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body, "whole");
+        }
+        served.abort();
+    }
 
     #[test]
     fn the_guest_reaches_its_outcome_and_not_the_shims_own_calls() {

@@ -92,6 +92,15 @@ has moved on.
 A request that could not be sent is retried with backoff; one that reached
 you is never repeated.
 
+A relayed guest call goes on an HTTP/2 connection of its own when you offer
+HTTP/2, and its answer is handed to the guest as you send it: no deadline
+and no size limit of the shim's, so a call may wait as long as its work
+takes and a streamed answer (a model's output) reaches the guest as it is
+made. HTTP/2 pings notice an endpoint gone silent; the guest giving up the
+call, or its VM ending, resets the stream. Over HTTP/1.1 the answer is read
+whole, at most 8 MiB, within a minute. The shim's own calls are bounded in
+time either way.
+
 | Call | When | Answer |
 |---|---|---|
 | `POST v1/run/outcome` | The VM ended without the guest reporting an outcome itself. JSON: how it ended | `204` |
