@@ -34,6 +34,16 @@ impl Lab {
             .await
             .unwrap();
     }
+    /// It handled a request just now and is not idle for the coming minute,
+    /// however long the steps after take: the counterpart of [`quiet`].
+    async fn busy(&self, app: &str) {
+        self.store.flush_gateway().await.unwrap();
+        sqlx::query("UPDATE app_http SET last_activity=now()+interval '1 minute' WHERE app_id=$1")
+            .bind(app)
+            .execute(&self.store.pool)
+            .await
+            .unwrap();
+    }
     async fn instances(&self, tenant: &str, instances: i64) {
         sqlx::query("UPDATE tenants SET instances=$1 WHERE id=$2")
             .bind(instances)
@@ -62,6 +72,7 @@ async fn an_idle_app_gives_way_to_one_of_its_workspace_the_allowance_has_no_room
 
     // It took a request a moment ago: it is not idle long enough to give
     // way, and the new app waits for the allowance as it did.
+    l.busy(&warm).await;
     let new = s(&l.deploy("new", true, false, "new").await.unwrap()["resource_id"]).to_owned();
     l.store.schedule().await.unwrap();
     assert_eq!(l.http(&new).await["reason"], "allowance-exhausted");
@@ -154,6 +165,9 @@ async fn an_idle_app_gives_way_on_a_full_node_to_one_of_its_workspace_and_no_oth
     approve_component(&l, &node, true, true).await;
     l.quiet(&warm).await;
     let theirs = s(&l.store.deploy_app(&l.operator,s(&other["id"]),s(&other_project["id"]),AppSubmission{value:json!({"name":"theirs","artifact_id":artifact["id"],"triggers":{"http":true,"manual":false}}),key:"theirs",domain:"apps.test"}).await.unwrap()["resource_id"]).to_owned();
+    // The node is reachable however long the steps above took: what keeps
+    // the app is the workspace, not a node gone quiet.
+    l.heard(&node).await;
     l.store.schedule().await.unwrap();
     l.store.schedule().await.unwrap();
     assert_eq!(l.http(&warm).await["state"], "serving");
@@ -196,6 +210,7 @@ async fn an_idle_app_gives_way_on_a_full_node_to_one_of_its_workspace_and_no_oth
 
     // One of its own waits for the node: the idle app gives way.
     let new = s(&l.deploy("new", true, false, "new").await.unwrap()["resource_id"]).to_owned();
+    l.heard(&node).await;
     l.store.schedule().await.unwrap();
     l.store.schedule().await.unwrap();
     assert_eq!(l.http(&warm).await["reason"], "evicted");
@@ -224,6 +239,8 @@ async fn apps_waiting_together_are_each_made_room_for_and_not_twice_for_one() {
     let first = l.warm_app("first").await;
     let second = l.warm_app("second").await;
     // Two wait while both are busy.
+    l.busy(&first).await;
+    l.busy(&second).await;
     let a = s(&l.deploy("a", true, false, "a").await.unwrap()["resource_id"]).to_owned();
     let b = s(&l.deploy("b", true, false, "b").await.unwrap()["resource_id"]).to_owned();
     l.store.schedule().await.unwrap();

@@ -657,6 +657,8 @@ async fn schedule_edits_stop_and_deadlines_cancel_only_unassigned_work() {
         .execute(&l.store.pool)
         .await
         .unwrap();
+    // The node is one to place on, however long the steps above took.
+    l.heard(&node).await;
     l.store.schedule().await.unwrap();
     let active = l.runs(&app).await["items"][0].clone();
     assert!(l.execution(s(&active["execution_id"])).await["node_id"].is_string());

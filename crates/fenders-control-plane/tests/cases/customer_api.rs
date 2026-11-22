@@ -1003,6 +1003,8 @@ async fn a_workspaces_rows_and_changes_are_bounded() {
     assert_eq!(issue().await.unwrap_err().status, quota);
 
     // Changes in a minute: refused or not, each one counts, and reads do not.
+    // The minute is held, so all 600 are in it however long they take.
+    l.store.api_rates.hold();
     let path = format!("/v1/workspaces/{}/projects/{}/secrets", l.tenant, l.project);
     let token = s(&editor["token"]);
     let mut last = (StatusCode::OK, json!({}));

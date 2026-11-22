@@ -341,6 +341,17 @@ impl Lab {
             .unwrap();
         node
     }
+    /// The node was heard from just now, as its heartbeat would say, with
+    /// nothing reported. For tests whose steps may take longer, on a loaded
+    /// machine, than a node is believed without one: 10 seconds to be
+    /// placed on, 15 to be reachable.
+    async fn heard(&self, node: &Value) {
+        sqlx::query("UPDATE nodes SET last_seen=now() WHERE id=$1")
+            .bind(s(&node["id"]))
+            .execute(&self.store.pool)
+            .await
+            .unwrap();
+    }
     async fn report(&self, node: &Value, e: &Value, state: &str, sequence: i64) {
         self.store.heartbeat(s(&node["id"]),json!({"boot_id":"test-boot","confinement":HOST_CONFINEMENT,"reports":[{"id":e["id"],"generation":e["generation"],"state":state,"sequence":sequence,"cpu_usec":12,"memory_bytes":512}]})).await.unwrap();
     }
